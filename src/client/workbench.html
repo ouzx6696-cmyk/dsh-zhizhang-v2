@@ -89,7 +89,8 @@
             <button id="refine">保存回改稿</button><button id="accept">验收</button><button id="reject">退回</button>
             <button id="approve">批准交稿</button><button id="deliver" class="primary">交稿</button>
           </div>
-          <a id="download" hidden download="交稿单.md">下载交稿单</a>
+          <p id="approved-version" hidden></p>
+          <a id="download" hidden download="交稿单.md">下载获批 Markdown</a>
         </div>
         <details id="planning">
           <summary>写作规划</summary>
@@ -118,8 +119,21 @@
             <label>设定编号<input name="factId" required></label>
             <label>设定内容<textarea name="note" rows="3" required></textarea></label>
             <label>来源<input name="source" required></label>
-            <label>知情人物<input name="character"></label>
-            <label>生效章内段落<input name="point" type="number" min="1" value="1" required></label>
+            <label>生效章节<select name="fromChapter" data-setting-chapters data-default="当前章"></select></label>
+            <label>生效段落<input name="point" type="number" min="1" value="1" required></label>
+            <label>失效章节<select name="toChapter" data-setting-chapters data-default="长期有效"></select></label>
+            <label id="setting-to-point" hidden>从第几段起失效<input name="toPoint" type="number" min="1" value="1" required></label>
+            <div id="setting-people"></div>
+            <button id="setting-add-person" type="button">添加知情人物</button>
+            <template id="setting-person-template">
+              <fieldset>
+                <legend>知情人物</legend>
+                <label>姓名<input data-person required></label>
+                <label>知情章节<select data-when data-setting-chapters data-default="与生效章相同"></select></label>
+                <label>知情段落<input data-point type="number" min="1" placeholder="留空采用生效点或所选章第一段"></label>
+                <button type="button">移除人物</button>
+              </fieldset>
+            </template>
             <label class="check"><input name="locked" type="checkbox">锁定设定</label>
             <button type="submit">提交设定提案</button>
           </form>
@@ -145,6 +159,7 @@
             <output id="budget-hint"></output>
             <label id="run-point">知情查询段落<input name="point" type="number" min="1" value="1"></label>
             <button type="submit">创建写作任务</button>
+            <button type="button" id="estimate-budget">按当前修订核算</button>
           </form>
           <div id="run-content" hidden>
             <p id="run-status"></p>

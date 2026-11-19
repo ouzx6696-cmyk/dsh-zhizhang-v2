@@ -45,6 +45,8 @@ label { display: block; margin-bottom: 7px; }
 details { margin: 13px 0; }
 summary { color: var(--accent); cursor: pointer; margin-bottom: 8px; }
 form { margin-bottom: 12px; }
+#setting-people fieldset { min-width: 0; margin: 0 0 8px; padding: 8px; border: 1px solid var(--line); border-radius: 7px; }
+#setting-add-person { margin-bottom: 8px; }
 nav button { display: block; width: 100%; text-align: left; margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; }
 nav button[aria-current=true] { border-color: var(--accent); color: var(--accent); }
 .notice { border: 1px solid var(--line); background: var(--surface); padding: 8px 12px; border-radius: 8px; margin: 0 auto 16px; max-width: 850px; }

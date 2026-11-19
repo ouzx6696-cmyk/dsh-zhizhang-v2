@@ -17,10 +17,17 @@ const create = (product, name, title, mode = "short") => {
   return { projectId, documentId };
 };
 const novel = create("fanqie", "小说", "第一章");
+const secondChapter = app.mutation("document.create", { projectId: novel.projectId, title: "第二章" }).id;
 const article = create("toutiao", "文章", "旧标题");
 app.mutation("draft.save", { ...novel, baseRevisionId: null, body: "甲" });
+app.mutation("draft.save", { documentId: secondChapter, baseRevisionId: null, body: "信" });
+app.mutation("chapter.outline", {
+  documentId: secondChapter, viewpoint: "林", target: 2200, lockedFacts: "信", knowledge: "见人物设定",
+  剧情梗概: "林收到信", 核心冲突与看点: "是否拆开", 情节推进节点: "第三段读信", 章末落点: "留下疑问",
+});
 app.mutation("draft.save", { ...article, baseRevisionId: null, body: "稿".repeat(1100) });
-const page = await browser.newPage({ colorScheme: "dark", viewport: { width: 768, height: 1024 } });
+const browserContext = await browser.newContext({ colorScheme: "dark", viewport: { width: 768, height: 1024 } });
+const page = await browserContext.newPage();
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
 page.on("dialog", (dialog) => dialog.accept());
@@ -30,7 +37,7 @@ let delay = true;
 let refresh;
 
 try {
-  await page.route("http://workbench.test/**", async (route) => {
+  await browserContext.route("http://workbench.test/**", async (route) => {
     const url = new URL(route.request().url());
     const name = url.pathname.split("/").at(-1);
     if (name === "state") {
@@ -62,15 +69,15 @@ try {
     const body = await readFile(new URL(`../src/client/${file}`, import.meta.url));
     return route.fulfill({ body, contentType: types[file] });
   });
-  const open = async ({ projectId }) => {
-    await page.locator("#projects").selectOption(projectId);
-    await page.locator("#documents button").click();
-    await page.locator("#body").waitFor();
+  const open = async ({ projectId }, title, tab = page) => {
+    await tab.locator("#projects").selectOption(projectId);
+    await tab.locator("#documents button").filter({ hasText: title }).click();
+    await tab.locator("#body").waitFor();
   };
   const click = (id) => page.locator(`#${id}`).click();
   const expectText = (id, text) => page.locator(`#${id}`).getByText(text, { exact: true }).waitFor();
   await page.goto("http://workbench.test/workbench");
-  await open(novel);
+  await open(novel, "第一章");
   const body = page.locator("#body");
   await body.fill("甲乙");
   await click("save");
@@ -81,7 +88,7 @@ try {
   assert.equal(await body.inputValue(), "甲乙丙");
   assert.equal(app.snapshot(novel.projectId, novel.documentId).active.body, "甲乙");
   await page.reload();
-  await open(novel);
+  await open(novel, "第一章");
   assert.equal(await body.inputValue(), "甲乙丙");
   const refreshAfterSave = { ready: Promise.withResolvers(), release: Promise.withResolvers() };
   refresh = refreshAfterSave;
@@ -93,27 +100,67 @@ try {
   assert.equal(await body.inputValue(), "甲乙丙丁");
   assert.equal(app.snapshot(novel.projectId, novel.documentId).active.body, "甲乙丙");
   await page.reload();
-  await open(novel);
+  await open(novel, "第一章");
   assert.equal(await body.inputValue(), "甲乙丙丁");
   await click("save");
   await expectText("draft-status", "已保存");
+
+  const secondTab = await browserContext.newPage();
+  await secondTab.goto(page.url());
+  await open(novel, "第一章", secondTab);
+  await secondTab.locator("#body").fill("第二页保留的稿件");
+  await secondTab.locator("#body").blur();
+  await body.fill("甲乙丙丁戊");
+  await click("save");
+  await expectText("notice", "已保存");
+  await secondTab.reload();
+  await open(novel, "第一章", secondTab);
+  assert.equal(await secondTab.locator("#body").inputValue(), "第二页保留的稿件");
+  await secondTab.getByText("有一份基于旧版本的本地编辑。").waitFor();
+  await secondTab.close();
+  await page.bringToFront();
 
   await page.locator("#continuity summary").click();
   await page.locator('#setting-proposal [name="factId"]').fill("f1");
   await page.locator('#setting-proposal [name="note"]').fill("设定");
   await page.locator('#setting-proposal [name="source"]').fill("作者笔记");
-  await page.locator('#setting-proposal [name="character"]').fill("林");
-  await page.locator("#setting-proposal button").click();
+  await click("setting-add-person");
+  await page.locator("#setting-people [data-person]").fill("乔");
+  await click("setting-add-person");
+  const later = page.locator("#setting-people fieldset").last();
+  await later.locator("[data-person]").fill("林");
+  await later.locator("[data-when]").selectOption(secondChapter);
+  await later.locator("[data-point]").fill("3");
+  await page.locator("#setting-proposal button[type=submit]").click();
   await page.getByRole("button", { name: "确认设定" }).click();
-  await page.locator('#settings-read [name="character"]').fill("林");
+  await page.locator('#settings-read [name="character"]').fill("乔");
   await page.locator("#settings-read button").click();
   await page.getByText("设定 · 来源 作者笔记", { exact: false }).waitFor();
   await click("review-pass");
   await expectText("state", "已审稿");
   await click("finalize");
   await expectText("state", "已定稿");
+  await page.locator("#documents button").filter({ hasText: "第二章" }).click();
+  await expectText("heading", "第二章");
+  await page.locator('#settings-read [name="character"]').fill("林");
+  await page.locator('#settings-read [name="point"]').fill("2");
+  await page.locator("#settings-read button").click();
+  await expectText("known-settings", "此时该人物没有已确认的知情设定。");
+  await page.locator('#settings-read [name="point"]').fill("3");
+  await page.locator("#settings-read button").click();
+  await page.getByText("设定 · 来源 作者笔记", { exact: false }).waitFor();
+  await page.locator("#run-details summary").click();
+  await page.locator('#start-run [name="instruction"]').fill("接写");
+  await page.locator('#start-run [name="point"]').fill("3");
+  await click("estimate-budget");
+  await page.getByText("首轮写作预留约", { exact: false }).waitFor();
+  await page.locator("#start-run button[type=submit]").click();
+  await expectText("run-status", "等待候选稿");
+  const run = app.mutation("run.history", { documentId: secondChapter })[0];
+  const { frozenInput } = app.mutation("run.detail", { documentId: secondChapter, runId: run.id });
+  assert.equal(JSON.parse(frozenInput).knownFacts[0].id, "f1");
 
-  await open(article);
+  await open(article, "旧标题");
   await page.locator('#rename [name="title"]').fill("新标题");
   await page.locator("#rename button").click();
   await expectText("heading", "新标题");

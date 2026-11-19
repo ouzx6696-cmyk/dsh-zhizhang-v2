@@ -23,24 +23,30 @@ const llm = {
     } };
   },
 };
-const receipts = [];
+const receipts = new Map();
+const ledger = {
+  begin(phase, inputReserve, maxOutput) {
+    const id = receipts.size + 1;
+    receipts.set(id, { phase, inputReserve, maxOutput });
+    return id;
+  },
+  receive(id, usage) { receipts.get(id).usage = usage; },
+};
 const signal = new AbortController().signal;
-const result = await generateCandidate(llm, run, signal, () => { refinements++; }, (phase, usage) => {
-  if (usage) receipts.push([phase, usage]);
-});
+const result = await generateCandidate(llm, run, signal, () => { refinements++; }, ledger);
 assert.equal(result.body, body);
 assert.equal(result.qa.overall, 84);
 assert.equal(refinements, 1);
 assert.equal(result.tokens, 5760);
-assert.deepEqual(receipts.map(([phase]) => phase), ["write", "qa", "refine", "qa"]);
-assert.deepEqual(receipts[0][1], [1000, 400, 30, 10]);
+assert.deepEqual([...receipts.values()].map(({ phase }) => phase), ["write", "qa", "refine", "qa"]);
+assert.deepEqual(receipts.get(1).usage, [1000, 400, 30, 10]);
 
-await assert.rejects(generateCandidate(llm, { ...run, reserved: 100 }, signal, () => {}), { code: "budget.exhausted" });
+await assert.rejects(generateCandidate(llm, { ...run, reserved: 100 }, signal, () => {}, ledger), { code: "budget.exhausted" });
 assert.equal(calls, 4);
 const missingUsage = {
   async prepareCall() {
     return { config: {}, async *stream() { yield { type: "finish", reason: { kind: "stop" } }; } };
   },
 };
-await assert.rejects(generateCandidate(missingUsage, run, signal, () => {}), { code: "usage.uncertain" });
+await assert.rejects(generateCandidate(missingUsage, run, signal, () => {}, ledger), { code: "usage.uncertain" });
 console.log("通过 3000 字长稿与 QA 回改、四类用量、预算不足和缺失回执验证");

@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
 import { openAuthorWorkspace } from "../src/host/workspace.ts";
 import { openDatabase } from "../src/storage/index.ts";
@@ -31,5 +32,8 @@ for (let index = 0; index < 100; index++) {
   app.mutation("run.complete", { runId, body, tokens: 400 });
   app.mutation("run.discard", { runId });
 }
-console.log(JSON.stringify({ baseline, withHistory: sample() }, null, 2));
+const withHistory = sample();
+assert.ok(baseline.bytes < 100 * 1024, "Initial workbench snapshot exceeds 100 KiB");
+assert.ok(withHistory.bytes < 150 * 1024, "Snapshot with discarded candidates exceeds 150 KiB");
+console.log(JSON.stringify({ baseline, withHistory }, null, 2));
 db.close();

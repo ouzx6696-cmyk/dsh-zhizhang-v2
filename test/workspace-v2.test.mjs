@@ -74,7 +74,7 @@ test("a cancelled run records usage without a candidate and over-budget results 
 });
 
 test("the Toutiao workbench separates QA, acceptance, version approval and retryable Markdown delivery", (t) => {
-  const { app, writes, allowExport } = withWorkspace(t);
+  const { app, db, writer, writes, allowExport } = withWorkspace(t);
   const context = setup(app, "toutiao");
   const { documentId, projectId } = context;
   assert.throws(() => app.mutation("article.accept", { ...context, accept: true }), { code: "gate.denied" });
@@ -85,11 +85,16 @@ test("the Toutiao workbench separates QA, acceptance, version approval and retry
   const delivery = { ...context, key: "approved-version" };
   assert.throws(() => app.mutation("article.deliver", delivery), { code: "gate.denied" });
   app.mutation("approval.decide", { ...context, confirmed: true });
+  assert.throws(() => app.mutation("article.deliver", { ...delivery, baseRevisionId: "old-version" }), { code: "gate.denied" });
   assert.equal(app.mutation("article.deliver", delivery).state, "failed");
   assert.equal(app.snapshot(projectId, documentId).active.state, "已交稿");
   allowExport();
-  assert.equal(app.mutation("article.deliver", delivery).state, "exported");
+  const reopened = openAuthorWorkspace(db, writer);
+  reopened.resumeExports();
   assert.equal(app.mutation("article.deliver", delivery).wrote, false);
+  assert.equal(reopened.snapshot(projectId, documentId).exportStatus.state, "exported");
+  assert.equal(reopened.snapshot(projectId, documentId).exportStatus.revisionId, context.revisionId);
+  assert.equal(reopened.snapshot(projectId, documentId).delivery, writes[0].data);
   assert.equal(writes.length, 1);
   assert.ok(writes[0].data.startsWith("# 正文\n\n"));
   assert.ok(writes[0].data.endsWith(DELIVERY_ENDING + "\n"));
@@ -245,9 +250,9 @@ test("host generation survives restart without guessing unreturned usage", (t) =
   const { id: runId } = app.mutation("run.start", { ...context, instruction: "写", tokenLimit: 8000 });
   const input = { runId, provider: "fixture", model: "model" };
   const { attemptId } = app.generationInput(input, true);
-  app.generationProgress(attemptId, "write");
-  app.generationProgress(attemptId, "write", [20, 10, 0, 3]);
-  app.generationProgress(attemptId, "qa");
+  const write = app.beginGenerationCall(attemptId, "write", 512, 2000);
+  app.recordGenerationReceipt(attemptId, write, [20, 10, 0, 3]);
+  app.beginGenerationCall(attemptId, "qa", 512, 1200);
   const reopened = openAuthorWorkspace(db, writer);
   reopened.recoverGenerations();
   reopened.recoverGenerations();
@@ -258,11 +263,18 @@ test("host generation survives restart without guessing unreturned usage", (t) =
   const projected = reopened.mutation("read.model", { projectId: context.projectId, model: "run", runId });
   assert.equal(projected.value.budget.settled, 40);
   const retry = reopened.generationInput(input, true);
-  reopened.generationProgress(retry.attemptId, "write");
-  reopened.generationProgress(retry.attemptId, "write", [5, 2, 0, 0]);
+  const qa = reopened.beginGenerationCall(retry.attemptId, "qa", 512, 1200);
+  reopened.recordGenerationReceipt(retry.attemptId, qa, [3, 1, 0, 0]);
+  const secondQa = reopened.beginGenerationCall(retry.attemptId, "qa", 512, 1200);
+  reopened.recordGenerationReceipt(retry.attemptId, qa, [90, 8, 0, 0]);
+  reopened.recordGenerationReceipt(retry.attemptId, secondQa, [2, 1, 0, 0]);
   reopened.finishGeneration(retry.attemptId, { body: "候选" }, null);
   reopened.finishGeneration(retry.attemptId, { body: "重复" }, null);
-  assert.equal(reopened.mutation("run.detail", { ...context, runId }).settled, 47);
+  const detail = reopened.mutation("run.detail", { ...context, runId });
+  assert.equal(detail.settled, 47);
+  assert.deepEqual(detail.calls.map((call) => call.usage && JSON.parse(call.usage)), [
+    [3, 1, 0, 0], [2, 1, 0, 0], [20, 10, 0, 3], null,
+  ]);
 });
 
 test("claiming an old failed run cannot bypass a newer active run across SQLite connections", (t) => {
@@ -279,10 +291,12 @@ test("claiming an old failed run cannot bypass a newer active run across SQLite 
   const a = app.mutation("run.start", runInput).id;
   app.finishGeneration(claim(app, a).attemptId, null, "generation.failed");
   const b = otherTab.mutation("run.start", runInput).id;
-  claim(otherTab, b);
+  const attempt = claim(otherTab, b);
   assert.throws(() => claim(app, a), { code: "gate.denied", details: { action: "run.generate", reason: "generation-in-progress" } });
   assert.deepEqual(app.mutation("run.history", context).map((run) => run.state), ["running", "failed"]);
   otherTab.mutation("run.cancel", { runId: b });
+  assert.throws(() => claim(app, a), { code: "gate.denied" });
+  otherTab.finishGeneration(attempt.attemptId, null, "cancelled");
   assert.ok(claim(app, a).attemptId);
 });
 

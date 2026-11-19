@@ -17,6 +17,11 @@ export function createGenerationLedger(db: SqliteDatabase) {
       state TEXT NOT NULL, stage TEXT, usage TEXT NOT NULL, error TEXT
     );
     CREATE INDEX IF NOT EXISTS author_generation_by_run ON author_generation_attempts(run_id);
+    CREATE TABLE IF NOT EXISTS author_generation_calls (
+      id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL REFERENCES author_generation_attempts(id),
+      phase TEXT NOT NULL, input_reserve INTEGER NOT NULL, max_output INTEGER NOT NULL, usage TEXT
+    );
+    CREATE INDEX IF NOT EXISTS author_calls_by_attempt ON author_generation_calls(attempt_id);
   `);
 
   return {
@@ -24,23 +29,31 @@ export function createGenerationLedger(db: SqliteDatabase) {
       return Boolean(db.prepare(`SELECT 1 FROM author_generation_attempts
         WHERE run_id = ? AND state IN ${unresolvedStates};`).get(runId));
     },
-    uncertainForDocument(documentId: string) {
+    unresolvedForDocument(documentId: string, exceptRunId: string | null) {
       return Boolean(db.prepare(`SELECT 1 FROM author_generation_attempts a JOIN author_runs r ON r.id = a.run_id
-        WHERE r.document_id = ? AND a.state = 'uncertain' LIMIT 1;`).get(documentId));
+        WHERE r.document_id = ? AND r.id IS NOT ? AND a.state IN ${unresolvedStates} LIMIT 1;`).get(documentId, exceptRunId));
     },
     create(id: string, runId: string, provider: string, model: string) {
       db.prepare(`INSERT INTO author_generation_attempts (id, run_id, provider, model, state, usage)
         VALUES (?, ?, ?, ?, 'prepared', '[]');`).run(id, runId, provider, model);
     },
-    progress(id: string, phase: string, usage?: readonly number[]) {
-      if (!usage) {
-        db.prepare(`UPDATE author_generation_attempts SET state = 'inflight', stage = ?
-          WHERE id = ? AND state IN ('prepared','received');`).run(phase, id);
-      } else {
-        db.prepare(`UPDATE author_generation_attempts SET state = 'received',
-          usage = json_insert(usage, '$[#]', json(?))
-          WHERE id = ? AND state = 'inflight' AND stage = ?;`).run(JSON.stringify({ phase, usage }), id, phase);
-      }
+    beginCall(attemptId: string, callId: string, phase: string, inputReserve: number, maxOutput: number) {
+      const marked = db.prepare(`UPDATE author_generation_attempts SET state = 'inflight', stage = ?
+        WHERE id = ? AND state IN ('prepared','received');`).run(phase, attemptId);
+      if (!marked.changes) return false;
+      db.prepare(`INSERT INTO author_generation_calls (id, attempt_id, phase, input_reserve, max_output)
+        VALUES (?, ?, ?, ?, ?);`).run(callId, attemptId, phase, inputReserve, maxOutput);
+      return true;
+    },
+    receiveCall(attemptId: string, callId: string, usage: readonly number[]) {
+      const call = db.prepare(`UPDATE author_generation_calls SET usage = ?
+        WHERE id = ? AND attempt_id = ? AND usage IS NULL
+          AND EXISTS (SELECT 1 FROM author_generation_attempts WHERE id = ? AND state = 'inflight')
+        RETURNING phase;`).get(JSON.stringify(usage), callId, attemptId, attemptId) as { phase: string } | undefined;
+      if (!call) return;
+      // The attempt summary also retains receipts from databases written by 2.0.1.
+      db.prepare(`UPDATE author_generation_attempts SET state = 'received', usage = json_insert(usage, '$[#]', json(?))
+        WHERE id = ?;`).run(JSON.stringify({ callId, phase: call.phase, usage }), attemptId);
     },
     openAttempt(id: string) {
       return db.prepare(`SELECT run_id AS runId, state, usage FROM author_generation_attempts
@@ -59,6 +72,12 @@ export function createGenerationLedger(db: SqliteDatabase) {
     history(runId: string) {
       return db.prepare(`SELECT id, provider, model, state, stage, usage, error FROM author_generation_attempts
         WHERE run_id = ? ORDER BY rowid DESC;`).all(runId);
+    },
+    calls(runId: string) {
+      return db.prepare(`SELECT c.id, c.attempt_id AS attemptId, c.phase, c.input_reserve AS inputReserve,
+        c.max_output AS maxOutput, c.usage FROM author_generation_calls c
+        JOIN author_generation_attempts a ON a.id = c.attempt_id
+        WHERE a.run_id = ? ORDER BY a.rowid DESC, c.rowid;`).all(runId);
     },
   };
 }

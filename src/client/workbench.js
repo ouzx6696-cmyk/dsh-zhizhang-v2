@@ -37,7 +37,13 @@ async function request(action, input, ifSequence) {
   if (!packet.ok) {
     const fields = packet.details ?? {};
     const reason = fields.reason ?? fields.field;
-    const message = packet.code === "version.conflict" ? "稿件版本已更新。本地编辑已保留，请刷新后核对再保存。" : [packet.code, reason].filter(Boolean).join(" · ");
+    const message = ({
+      "generation-in-progress": "该稿件已有活动任务，请先完成或取消当前任务。",
+      "generation-needs-reconciliation": "上一次任务仍在结束或等待用量核对。请刷新任务查看状态。",
+      "export.conflict": "目标文件与获批稿件不同，请处理同名文件后重试。",
+    })[reason] ?? (packet.code === "version.conflict"
+      ? "稿件版本已更新。本地编辑已保留，请刷新后核对再保存。"
+      : [packet.code, reason].filter(Boolean).join(" · "));
     throw new Error(packet.diagnosticId ? `${message}（诊断号 ${packet.diagnosticId}）` : message);
   }
   return packet.result;
@@ -48,6 +54,11 @@ let stashTimer;
 let storageUnavailable = false;
 let composing = false;
 let directoryKey = "";
+let selectedDirectoryButton;
+let directoryButtons = new Map();
+let chapterTitles = new Map();
+let settingProject;
+let settingsKey;
 let toolDocument;
 
 function stashKey(id) { return `zhizhang:draft:${id}`; }
@@ -55,7 +66,8 @@ function readStash(id) {
   if (localDrafts.has(id)) return localDrafts.get(id);
   let draft = null;
   try {
-    const tabDraft = sessionStorage.getItem(stashKey(id));
+    let tabDraft;
+    try { tabDraft = sessionStorage.getItem(stashKey(id)); } catch {}
     draft = JSON.parse(tabDraft ?? localStorage.getItem(stashKey(id)) ?? "null");
   } catch {}
   localDrafts.set(id, draft);
@@ -76,7 +88,7 @@ function writeStash(id, draft) {
     else {
       const backup = JSON.parse(localStorage.getItem(key) ?? "null");
       if (backup?.owner === draftOwner ||
-          backup && backup.body === previous?.body && backup.revisionId === previous.revisionId) {
+          previous && backup?.body === previous.body && backup.revisionId === previous.revisionId) {
         localStorage.removeItem(key);
       }
     }
@@ -109,10 +121,19 @@ function candidate() { return snapshot.runs?.find((run) => run.state === "awaiti
 function uncertainRun() { return snapshot.runs?.find((run) => run.generationState === "uncertain"); }
 function currentRun() { return snapshot.runs?.find((run) => run.state === "running"); }
 
+function settingPoint({ chapterId, point }) {
+  return `${chapterTitles.get(chapterId) ?? chapterId}第 ${point} 段`;
+}
+
 function appendSettings(target, entries) {
   for (const entry of entries) {
     const row = element("section", "");
     row.append(element("p", `${entry.fact.id} · ${entry.fact.note} · ${({ approved: "已确认", rejected: "已拒绝", pending: "待确认" })[entry.decision]}`));
+    const { source, effectiveFrom, effectiveTo, knownFrom } = entry.fact;
+    row.append(element("p", [source, `${settingPoint(effectiveFrom)}生效`,
+      effectiveTo && `${settingPoint(effectiveTo)}起失效`,
+      ...Object.entries(knownFrom).map(([name, at]) => `${name}在${settingPoint(at)}知情`),
+    ].filter(Boolean).join(" · ")));
     if (entry.decision === "pending") {
       for (const [label, accept] of [["确认设定", true], ["拒绝提案", false]]) {
         const button = element("button", label);
@@ -122,6 +143,13 @@ function appendSettings(target, entries) {
     }
     target.append(row);
   }
+}
+
+function settingChapters(select) {
+  const value = select.value;
+  select.replaceChildren(new Option(select.dataset.default, ""),
+    ...Array.from(chapterTitles, ([id, title]) => new Option(title, id)));
+  if (chapterTitles.has(value)) select.value = value;
 }
 
 function titleCount(field, output, titled) {
@@ -152,7 +180,7 @@ function render() {
   const article = project?.product === "toutiao";
   const hasDraft = Boolean(active?.revisionId);
   const locked = ["final", "已验收", "已交稿"].includes(active?.state);
-  const nextDirectoryKey = JSON.stringify([projectId, documentId, snapshot.projects, snapshot.documents]);
+  const nextDirectoryKey = JSON.stringify([projectId, snapshot.projects, snapshot.documents]);
   if (nextDirectoryKey !== directoryKey) {
     directoryKey = nextDirectoryKey;
     projects.replaceChildren(element("option", "选择项目"));
@@ -162,19 +190,35 @@ function render() {
       choice.value = item.id;
       projects.append(choice);
     }
-    projects.value = projectId;
-    navigation.replaceChildren();
+    directoryButtons = new Map();
+    chapterTitles = new Map();
     for (const item of snapshot.documents ?? []) {
       const button = element("button", item.title || "微头条");
-      button.setAttribute("aria-current", String(item.id === documentId));
+      directoryButtons.set(item.id, button);
+      chapterTitles.set(item.id, item.title || "微头条");
+      button.setAttribute("aria-current", "false");
       button.onclick = () => perform(async () => {
         stash();
         byId("known-settings").replaceChildren();
         documentId = item.id;
         await load();
       });
-      navigation.append(button);
     }
+    navigation.replaceChildren(...directoryButtons.values());
+    if (settingProject !== projectId) {
+      settingProject = projectId;
+      byId("setting-proposal").reset();
+      byId("setting-people").replaceChildren();
+    }
+    for (const select of byId("setting-proposal").querySelectorAll("[data-setting-chapters]")) settingChapters(select);
+    byId("setting-to-point").hidden = !byId("setting-proposal").elements.toChapter.value;
+  }
+  projects.value = projectId;
+  const selectedButton = directoryButtons.get(documentId);
+  if (selectedButton !== selectedDirectoryButton) {
+    selectedDirectoryButton?.setAttribute("aria-current", "false");
+    selectedButton?.setAttribute("aria-current", "true");
+    selectedDirectoryButton = selectedButton;
   }
   byId("document-tools").hidden = !project;
   byId("article-options").hidden = !article;
@@ -235,6 +279,9 @@ function render() {
     ? [`最近质检 ${report.overall} 分`, ...(report.hardGates ?? []), ...(report.fails ?? [])].join(" · ")
     : report ? `验收退回 ${report.reason || "请修订后重新质检"}` : "";
   const exportStatus = snapshot.exportStatus;
+  const approvedVersion = byId("approved-version");
+  approvedVersion.hidden = !snapshot.approved;
+  approvedVersion.textContent = snapshot.approved ? `获批修订 ${(exportStatus?.revisionId ?? active.revisionId).slice(0, 8)}` : "";
   byId("export-status").hidden = !exportStatus;
   byId("export-status").textContent = ({
     exported: "已写入交稿文件", pending: "已记录交稿，等待写入文件",
@@ -265,11 +312,15 @@ function render() {
   }
   byId("fanqie-actions").hidden = article;
   byId("continuity").hidden = article;
-  const settingList = byId("settings");
-  settingList.replaceChildren();
-  appendSettings(settingList, snapshot.settings ?? []);
-  byId("settings-more").hidden = !snapshot.settingsCursor;
-  byId("settings-more").dataset.cursor = snapshot.settingsCursor ?? "";
+  const nextSettingsKey = JSON.stringify([projectId, snapshot.settings, snapshot.settingsCursor]);
+  if (nextSettingsKey !== settingsKey) {
+    settingsKey = nextSettingsKey;
+    const settingList = byId("settings");
+    settingList.replaceChildren();
+    appendSettings(settingList, snapshot.settings ?? []);
+    byId("settings-more").hidden = !snapshot.settingsCursor;
+    byId("settings-more").dataset.cursor = snapshot.settingsCursor ?? "";
+  }
   const position = snapshot.documents.findIndex(({ id }) => id === active.id);
   byId("move-up").disabled = position < 1;
   byId("move-down").disabled = position >= snapshot.documents.length - 1;
@@ -304,6 +355,7 @@ function render() {
   byId("adopt").disabled = pending?.baseRevisionId !== active.revisionId;
   byId("run-content").hidden = !run;
   byId("start-run").querySelector("button").disabled = !hasDraft || locked || Boolean(currentRun() || pending) || run?.generationState === "uncertain";
+  byId("estimate-budget").disabled = !hasDraft || locked;
   showBudget();
   if (toolDocument !== active.id) {
     toolDocument = active.id;
@@ -451,6 +503,18 @@ click("deliver", async () => {
   notice(result.state === "exported" ? "交稿单已生成" : "已记录交稿，文件导出失败，可从此处重试。", result.state !== "exported");
 });
 form("start-run", (values) => change("run.start", { ...values, tokenLimit: Number(values.tokenLimit), point: Number(values.point) }, { savedVersion: true }));
+click("estimate-budget", async () => {
+  if (dirty()) throw new Error("保存当前正文后即可按该修订核算预算。");
+  const { instruction, point, tokenLimit } = byId("start-run").elements;
+  if (!instruction.reportValidity() || !point.reportValidity()) return;
+  const { inputReserve, recommended } = await request("run.preview", activeInput({
+    instruction: instruction.value, point: Number(point.value),
+  }));
+  if (!tokenLimit.value || tokenLimit.value === tokenLimit.dataset.suggested) tokenLimit.value = recommended;
+  tokenLimit.dataset.suggested = recommended;
+  const maxOutput = Math.max(0, Number(tokenLimit.value) - inputReserve);
+  byId("budget-hint").textContent = `首轮写作预留约 ${inputReserve} token，当前额度最多可输出 ${maxOutput}。质检与回改使用任务剩余额度。`;
+});
 form("complete-run", async (values, node) => {
   await change("run.complete", { ...values, tokens: Number(values.tokens), runId: currentRun().id });
   node.reset();
@@ -468,17 +532,39 @@ form("chapter-outline", async (values) => {
   if (result.warnings.length) notice(result.warnings.join(" · "));
 });
 form("article-plan", (values) => change("article.plan", values));
+byId("setting-proposal").elements.toChapter.onchange = (event) => {
+  byId("setting-to-point").hidden = !event.currentTarget.value;
+};
+byId("setting-add-person").onclick = () => {
+  const person = byId("setting-person-template").content.firstElementChild.cloneNode(true);
+  settingChapters(person.querySelector("select"));
+  person.querySelector("button").onclick = () => person.remove();
+  byId("setting-people").append(person);
+  person.querySelector("[data-person]").focus();
+};
 form("setting-proposal", async (values, node) => {
+  const from = { chapterId: values.fromChapter || documentId, point: Number(values.point) };
+  const people = Array.from(byId("setting-people").children, (row) => {
+    const character = row.querySelector("[data-person]").value;
+    const chapterId = row.querySelector("[data-when]").value;
+    const point = row.querySelector("[data-point]").value;
+    return { character, at: chapterId || point
+      ? { chapterId: chapterId || from.chapterId, point: Number(point || (chapterId ? 1 : from.point)) }
+      : undefined };
+  });
   await change("setting.propose", {
-    projectId, factId: values.factId, note: values.note, source: values.source, character: values.character,
-    from: { chapterId: documentId, point: Number(values.point) }, locked: values.locked === "on",
+    projectId, factId: values.factId, note: values.note, source: values.source, from, people,
+    to: values.toChapter ? { chapterId: values.toChapter, point: Number(values.toPoint) } : undefined,
+    locked: values.locked === "on",
   });
   node.reset();
+  byId("setting-people").replaceChildren();
+  byId("setting-to-point").hidden = true;
 });
 form("settings-read", async (values) => {
   const result = await request("settings.read", { projectId, character: values.character, at: { chapterId: documentId, point: Number(values.point) } });
   byId("known-settings").replaceChildren(...(result.entries.length
-    ? result.entries.map(({ note, source, locked, effectiveFrom, effectiveTo }) => element("p", [note, `来源 ${source}`, locked ? "已锁定" : "", `自第 ${effectiveFrom.point} 段生效`, effectiveTo ? `至第 ${effectiveTo.point} 段失效` : ""].filter(Boolean).join(" · ")))
+    ? result.entries.map(({ note, source, locked, effectiveFrom, effectiveTo }) => element("p", [note, `来源 ${source}`, locked ? "已锁定" : "", `${settingPoint(effectiveFrom)}生效`, effectiveTo && `${settingPoint(effectiveTo)}起失效`].filter(Boolean).join(" · ")))
     : [element("p", "此时该人物没有已确认的知情设定。")]));
 });
 for (const [id, offset] of [["move-up", -1], ["move-down", 1]]) {
@@ -523,7 +609,8 @@ async function showRunDetail(runId) {
   const target = byId("run-input");
   target.hidden = false;
   target.textContent = JSON.stringify({
-    frozenInput: JSON.parse(detail.frozenInput), candidate: detail.candidate, attempts: detail.attempts,
+    frozenInput: JSON.parse(detail.frozenInput), candidate: detail.candidate,
+    attempts: detail.attempts, calls: detail.calls?.map((call) => ({ ...call, usage: call.usage && JSON.parse(call.usage) })),
   }, null, 2);
   return detail;
 }

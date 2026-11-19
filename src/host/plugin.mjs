@@ -94,12 +94,12 @@ export function apply(ctx, config) {
       }
       route("/state", ["GET"], async (request) => {
         const query = new URL(request.url).searchParams;
-        const projectId = query.get("projectId") ?? undefined;
-        const previousSeq = query.get("ifSequence");
-        if (projectId && previousSeq !== null && previousSeq === String(workspace.projectSeq(projectId))) {
-          return json({ ok: true, result: { unchanged: true } });
-        }
-        return json({ ok: true, result: workspace.snapshot(projectId, query.get("documentId") ?? undefined) });
+        const result = workspace.readState(
+          query.get("projectId") ?? undefined,
+          query.get("documentId") ?? undefined,
+          query.get("ifSequence") ?? undefined,
+        );
+        return json({ ok: true, result });
       });
       route("/mutate", ["POST"], async (request) => {
         try {
@@ -107,14 +107,19 @@ export function apply(ctx, config) {
           if (typeof action !== "string") throw new ContractError("input.invalid", { field: "action", reason: "required" });
           if (closing || request.signal.aborted) return new Response(null, { status: 503 });
           if (action === "run.generate") {
+            if (generations.has(input.runId)) throw new ContractError("gate.denied", { action, reason: "generation-in-progress" });
             const run = workspace.generationInput(input, true);
-            if (generations.has(run.id)) throw new ContractError("gate.denied", { action, reason: "generation-in-progress" });
             const controller = new AbortController();
             const task = generateCandidate(ctx.llm, run, controller.signal, () => {
               controller.signal.throwIfAborted();
               workspace.reserveRefinement(run.id);
-            }, (phase, usage) => {
-              if (!closing) workspace.generationProgress(run.attemptId, phase, usage);
+            }, {
+              begin(phase, inputReserve, maxOutput) {
+                return workspace.beginGenerationCall(run.attemptId, phase, inputReserve, maxOutput);
+              },
+              receive(callId, usage) {
+                if (!closing) workspace.recordGenerationReceipt(run.attemptId, callId, usage);
+              },
             })
               .then((result) => {
                 if (!closing) workspace.finishGeneration(run.attemptId, result, null);

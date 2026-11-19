@@ -26,12 +26,12 @@
 import {
   executeCommand,
   type CommandOutcome,
+  type CommandRequest,
 } from "./command.ts";
 import type { SqliteDatabase } from "./driver.ts";
 import {
   attemptExport,
   insertDeliveryRow,
-  type Delivery,
   type ExportAttempt,
 } from "./export.ts";
 import type { ApprovalRecord, Subject } from "../contracts/index.ts";
@@ -61,6 +61,22 @@ export interface DeliverArticleOutcome {
 /** The external write a delivery performs after its transaction commits. */
 export type ExportWriter = (payload: string) => void;
 
+export function commitApprovedDelivery<T>(
+  db: SqliteDatabase,
+  request: Omit<CommandRequest, "commandId" | "targetVersion"> & { finalRevisionId: string },
+  finishArticle: () => T,
+): CommandOutcome<T> {
+  return executeCommand(db, { ...request, commandId: "article.deliver", targetVersion: request.finalRevisionId }, () => {
+    const result = finishArticle();
+    insertDeliveryRow(db, {
+      articleId: request.documentId,
+      finalRevisionId: request.finalRevisionId,
+      approvalId: request.approval?.at ?? "",
+    });
+    return result;
+  });
+}
+
 /**
  * Runs `article.deliver` end to end.
  *
@@ -73,33 +89,15 @@ export function deliverArticle(
   request: DeliverArticleRequest,
   write: ExportWriter,
 ): CommandOutcome<DeliverArticleOutcome> {
-  const delivery: Delivery = {
-    articleId: request.articleId,
+  const outcome = commitApprovedDelivery(db, {
+    actor: request.actor,
+    documentId: request.articleId,
     finalRevisionId: request.finalRevisionId,
-    approvalId: request.approval?.at ?? "",
-  };
-  const outcome = executeCommand(
-    db,
-    {
-      commandId: "article.deliver",
-      actor: request.actor,
-      documentId: request.articleId,
-      idempotencyKey: request.idempotencyKey,
-      payload: {
-        articleId: request.articleId,
-        finalRevisionId: request.finalRevisionId,
-      },
-      baseRevisionId: request.baseRevisionId,
-      approval: request.approval,
-      // The delivery versions the revision it delivers, not the one it starts
-      // from, so the approval record has to name that revision.
-      targetVersion: request.finalRevisionId,
-    },
-    () => {
-      insertDeliveryRow(db, delivery);
-      return { articleId: request.articleId };
-    },
-  );
+    idempotencyKey: request.idempotencyKey,
+    payload: { articleId: request.articleId, finalRevisionId: request.finalRevisionId },
+    baseRevisionId: request.baseRevisionId,
+    approval: request.approval,
+  }, () => ({ articleId: request.articleId }));
   if (!outcome.ok) {
     return { ok: false, code: outcome.code, details: outcome.details };
   }

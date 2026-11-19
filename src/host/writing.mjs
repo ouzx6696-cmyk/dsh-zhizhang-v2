@@ -1,8 +1,8 @@
 import { ContractError } from "../../dist/contracts/index.js";
 import { structuralGates } from "../../dist/domain/toutiao/index.js";
 import { refineArticle } from "../../dist/domain/toutiao/refinement.js";
+import { estimateWritingInput, WRITER_SYSTEM } from "../../dist/workflow/writing-budget.js";
 
-const writerSystem = "你是织章的候选稿写作者。根据给定的作者要求和冻结输入写作。只返回候选正文。维持人物知识边界与锁定设定，不执行外部操作。";
 const qaSystem = '你是头条稿件质检编辑。核对事实需证据，检查结构、标题正文一致性与风险，不把未核实内容视为已核实。只返回 JSON，键为 overall（0–100整数）、passed（布尔）、fails（字符串数组）和 hardGates（字符串数组）。';
 
 function parseQa(source) {
@@ -22,10 +22,10 @@ function parseQa(source) {
 }
 
 // One-shot transport. No Agent session or tool list is passed to the model.
-export async function generateCandidate(llm, run, signal, reserveRefinement, progress = () => {}) {
+export async function generateCandidate(llm, run, signal, reserveRefinement, receipts) {
   let tokens = 0;
   async function complete(phase, system, prompt, maxOutputTokens = Infinity) {
-    const inputReserve = Buffer.byteLength(system + prompt, "utf8") + 128;
+    const inputReserve = estimateWritingInput(system, prompt);
     const maxTokens = Math.min(run.reserved - tokens - inputReserve, maxOutputTokens);
     if (maxTokens < 1) throw new ContractError("budget.exhausted", { scope: "run", reason: "input-reservation" });
 
@@ -36,7 +36,7 @@ export async function generateCandidate(llm, run, signal, reserveRefinement, pro
     let completed = false;
     let length = 0;
     requestSignal.throwIfAborted();
-    progress(phase);
+    const callId = receipts.begin(phase, inputReserve, maxTokens);
     let counts = [];
     try {
       for await (const chunk of call.stream({
@@ -55,7 +55,7 @@ export async function generateCandidate(llm, run, signal, reserveRefinement, pro
     } finally {
       counts = usage ? [usage.inputTokens, usage.outputTokens, usage.cacheReadTokens ?? 0, usage.cacheWriteTokens ?? 0] : [];
       if (usage && counts.every((value) => Number.isSafeInteger(value) && value >= 0)) {
-        progress(phase, counts);
+        receipts.receive(callId, counts);
         tokens += counts.reduce((a, b) => a + b, 0);
       }
     }
@@ -72,7 +72,7 @@ export async function generateCandidate(llm, run, signal, reserveRefinement, pro
   }
 
   try {
-    const body = await complete("write", writerSystem, run.frozenInput);
+    const body = await complete("write", WRITER_SYSTEM, run.frozenInput);
     if (!run.autoQa || signal.aborted) return { body, tokens };
     const { title, mode, scenario } = JSON.parse(run.frozenInput);
     const result = await refineArticle(
@@ -86,7 +86,7 @@ export async function generateCandidate(llm, run, signal, reserveRefinement, pro
       (draft, qa) => {
         signal.throwIfAborted();
         reserveRefinement();
-        return complete("refine", writerSystem, JSON.stringify({
+        return complete("refine", WRITER_SYSTEM, JSON.stringify({
           title, scenario, text: draft, instruction: "只处理未通过项与硬门，再给出完整正文。",
           fails: qa.fails, hardGates: qa.hardGates,
         }));
