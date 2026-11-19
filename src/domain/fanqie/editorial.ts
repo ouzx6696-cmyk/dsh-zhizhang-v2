@@ -1,5 +1,5 @@
 import { ContractError } from "../../contracts/errors.ts";
-import { isEffective, precedes, type Anchor, type ValidityInterval } from "../shared/anchors.ts";
+import { type Anchor, type ValidityInterval } from "../shared/anchors.ts";
 
 export const CHAPTER_STATES = ["planned", "drafting", "drafted", "reviewed", "final"] as const;
 export type ChapterState = (typeof CHAPTER_STATES)[number];
@@ -37,11 +37,23 @@ export function settingsAt(
   at: Anchor,
   characterId: string,
 ): SettingFact[] {
-  return entries.filter((entry) => {
-    if (!isEffective(entry, at, order)) return false;
+  const positions = new Map<string, number>();
+  order.forEach((id, index) => { if (!positions.has(id)) positions.set(id, index); });
+  const before = (left: Anchor, right: Anchor) => {
+    const a = positions.get(left.chapterId) ?? order.length;
+    const b = positions.get(right.chapterId) ?? order.length;
+    return a === b ? left.point < right.point : a < b;
+  };
+  const effective = new Map<string, SettingFact>();
+  for (const entry of entries) {
+    if (before(at, entry.effectiveFrom) || (entry.effectiveTo && !before(at, entry.effectiveTo))) continue;
+    const prior = effective.get(entry.id);
+    if (!prior || !before(entry.effectiveFrom, prior.effectiveFrom)) effective.set(entry.id, entry);
+  }
+  return [...effective.values()].filter((entry) => {
     if (entry.kind === "agreement") return false;
     const known = Object.hasOwn(entry.knownFrom, characterId) ? entry.knownFrom[characterId] : undefined;
-    return known !== undefined && !precedes(at, known, order);
+    return known !== undefined && !before(at, known);
   });
 }
 

@@ -67,9 +67,12 @@ export function apply(ctx, config) {
     const disposers = [];
     const generations = new Map();
     let closing = false;
+    let workspaceOnClose = () => {};
     try {
       db.exec("PRAGMA busy_timeout = 5000;");
       const workspace = openAuthorWorkspace(db, (id, contents) => writeDelivery(exports, id, contents));
+      workspaceOnClose = workspace.recoverGenerations;
+      workspace.recoverGenerations();
       workspace.resumeExports();
       function route(path, methods, fetch) {
         disposers.push(ctx.connection.fetch.register({ path: base + path, methods, requestBody: methods.includes("GET") ? "buffered" : "streaming", fetch }));
@@ -104,18 +107,21 @@ export function apply(ctx, config) {
           if (typeof action !== "string") throw new ContractError("input.invalid", { field: "action", reason: "required" });
           if (closing || request.signal.aborted) return new Response(null, { status: 503 });
           if (action === "run.generate") {
-            const run = workspace.generationInput(input);
+            const run = workspace.generationInput(input, true);
             if (generations.has(run.id)) throw new ContractError("gate.denied", { action, reason: "generation-in-progress" });
             const controller = new AbortController();
             const task = generateCandidate(ctx.llm, run, controller.signal, () => {
               controller.signal.throwIfAborted();
               workspace.reserveRefinement(run.id);
+            }, (phase, usage) => {
+              if (!closing) workspace.generationProgress(run.attemptId, phase, usage);
             })
               .then((result) => {
-                if (!closing) workspace.mutation("run.complete", { runId: run.id, ...result });
+                if (!closing) workspace.finishGeneration(run.attemptId, result, null);
               })
               .catch((error) => {
-                if (!closing) workspace.failGeneration(run.id, Number.isSafeInteger(error?.settledTokens) ? error.settledTokens : 0);
+                if (!closing) workspace.finishGeneration(run.attemptId, null,
+                  error instanceof ContractError ? error.code : controller.signal.aborted ? "cancelled" : "generation.failed");
               })
               .finally(() => { generations.delete(run.id); });
             generations.set(run.id, { controller, task });
@@ -132,8 +138,9 @@ export function apply(ctx, config) {
             const status = error.code === "input.not_found" ? 404 : error.code === "input.invalid" ? 400 : 409;
             return json({ ok: false, ...error.toEnvelope() }, status);
           }
-          ctx.logger.error("zhizhang: request failed", error);
-          return json({ ok: false, code: "internal.error" }, 500);
+          const diagnosticId = randomUUID();
+          ctx.logger.error("zhizhang: request failed", { diagnosticId, name: error?.name });
+          return json({ ok: false, code: "internal.error", diagnosticId }, 500);
         }
       });
     } catch (error) {
@@ -145,7 +152,7 @@ export function apply(ctx, config) {
       closing = true;
       for (const { controller } of generations.values()) controller.abort();
       await Promise.all(disposers.map((dispose) => dispose()));
-      db.close();
+      try { workspaceOnClose(); } finally { db.close(); }
     };
   }, "zhizhang: author workbench");
 }

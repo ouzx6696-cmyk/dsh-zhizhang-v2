@@ -34,8 +34,14 @@ declare module "node:fs/promises" {
   export function readFile(path: string, encoding: "utf8"): Promise<string>;
   export function readFile(path: string): Promise<Uint8Array>;
   export function writeFile(path: string, data: string | Uint8Array): Promise<void>;
-  export function mkdir(path: string, options?: { recursive?: boolean }): Promise<string | undefined>;
+  export function mkdir(path: string, options?: { recursive?: boolean; mode?: number }): Promise<string | undefined>;
+  interface FileInfo {
+    isFile(): boolean;
+    isDirectory(): boolean;
+  }
+  export function lstat(path: string): Promise<FileInfo>;
   export function readdir(path: string): Promise<string[]>;
+  export function readdir(path: string, options: { withFileTypes: true }): Promise<(FileInfo & { name: string })[]>;
   export function copyFile(source: string, destination: string): Promise<void>;
   export function rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
 }

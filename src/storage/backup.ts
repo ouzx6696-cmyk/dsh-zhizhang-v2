@@ -17,12 +17,12 @@
 // is directly comparable with the fixture) and `pruneBackups` adds the disk
 // side around it.
 
-import { copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { StorageError } from "./errors.ts";
 import { openDatabase } from "./driver.ts";
-import { readSchemaId } from "./store.ts";
+import { openStore, readSchemaId } from "./store.ts";
 
 /** One file inside a backup, with the hash its bytes must still produce. */
 export interface BackupEntry {
@@ -58,7 +58,11 @@ async function sha256OfFile(path: string): Promise<string> {
 }
 
 /** Copies a closed store into `backupDir` and writes its manifest. */
-export async function createBackup(sourceFile: string, backupDir: string): Promise<BackupManifest> {
+export async function createBackup(
+  sourceFile: string,
+  backupDir: string,
+  deliveriesDirectory?: string,
+): Promise<BackupManifest> {
   await mkdir(backupDir, { recursive: true });
   await copyFile(sourceFile, join(backupDir, STORE_NAME));
   // The manifest records the schema the copy actually holds. A backup of a
@@ -71,10 +75,19 @@ export async function createBackup(sourceFile: string, backupDir: string): Promi
   } finally {
     copied.close();
   }
-  const manifest: BackupManifest = {
-    schema,
-    entries: [{ path: STORE_NAME, sha256: await sha256OfFile(join(backupDir, STORE_NAME)) }],
-  };
+  const entries = [{ path: STORE_NAME, sha256: await sha256OfFile(join(backupDir, STORE_NAME)) }];
+  if (deliveriesDirectory) {
+    const items = await readdir(deliveriesDirectory, { withFileTypes: true });
+    for (const item of items) {
+      if (!item.isFile() || !/^[a-f0-9-]{36}\.md$/iu.test(item.name)) continue;
+      const path = `deliveries/${item.name}`;
+      const target = join(backupDir, path);
+      await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+      await copyFile(join(deliveriesDirectory, item.name), target);
+      entries.push({ path, sha256: await sha256OfFile(target) });
+    }
+  }
+  const manifest: BackupManifest = { schema, entries };
   await writeFile(join(backupDir, MANIFEST_NAME), JSON.stringify(manifest));
   return manifest;
 }
@@ -93,13 +106,21 @@ export async function verifyBackup(backupDir: string): Promise<BackupManifest> {
   } catch {
     throw new StorageError("storage.format_unsupported", { reason: "backup-manifest-unreadable" });
   }
-  if (!Array.isArray(manifest.entries)) {
+  if (!manifest || typeof manifest.schema !== "string" || !Array.isArray(manifest.entries) ||
+      !manifest.entries.some((entry) => entry?.path === STORE_NAME) ||
+      new Set(manifest.entries.map((entry) => entry?.path)).size !== manifest.entries.length ||
+      manifest.entries.some((entry) => !entry || typeof entry.path !== "string" ||
+        (entry.path !== STORE_NAME && !/^deliveries\/[a-f0-9-]{36}\.md$/iu.test(entry.path)) ||
+        typeof entry.sha256 !== "string" || !/^[a-f0-9]{64}$/u.test(entry.sha256))) {
     throw new StorageError("storage.format_unsupported", { reason: "backup-manifest-unreadable" });
   }
   for (const entry of manifest.entries) {
     let bytes: Uint8Array;
     try {
-      bytes = await readFile(join(backupDir, entry.path));
+      const file = join(backupDir, entry.path);
+      if (entry.path !== STORE_NAME && !(await lstat(dirname(file))).isDirectory()) throw new Error("invalid directory");
+      if (!(await lstat(file)).isFile()) throw new Error("invalid file");
+      bytes = await readFile(file);
     } catch {
       throw new StorageError("storage.format_unsupported", {
         reason: "backup-entry-missing",
@@ -145,10 +166,38 @@ export async function restoreBackup(
   }
   await mkdir(targetDir, { recursive: true });
   for (const entry of manifest.entries) {
-    await copyFile(join(backupDir, entry.path), join(targetDir, entry.path));
+    const target = join(targetDir, entry.path);
+    await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+    await copyFile(join(backupDir, entry.path), target);
   }
   await writeFile(join(targetDir, MANIFEST_NAME), JSON.stringify(manifest));
   return targetDir;
+}
+
+/** Offline backup of the real host layout. The caller must stop the profile. */
+export async function backupWorkspace(directory: string, target: string) {
+  await mkdir(target, { mode: 0o700 });
+  return createBackup(join(directory, "workspace.sqlite"), target, join(directory, "deliveries"));
+}
+
+/** Restore a verified snapshot into a new host data directory. */
+export async function restoreWorkspace(backup: string, target: string) {
+  const manifest = await verifyBackup(backup);
+  const source = openStore(join(backup, STORE_NAME));
+  try {
+    const integrity = source.prepare("PRAGMA quick_check;").get() as { quick_check?: string } | undefined;
+    if (integrity?.quick_check !== "ok" || readSchemaId(source) !== manifest.schema) {
+      throw new StorageError("storage.format_unsupported", { reason: "backup-database-invalid" });
+    }
+  } finally {
+    source.close();
+  }
+  await mkdir(target, { mode: 0o700 });
+  await mkdir(join(target, "deliveries"), { mode: 0o700 });
+  for (const { path } of manifest.entries) {
+    await copyFile(join(backup, path), join(target, path === STORE_NAME ? "workspace.sqlite" : path));
+  }
+  return target;
 }
 
 /**

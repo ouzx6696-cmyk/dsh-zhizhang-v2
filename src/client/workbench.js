@@ -29,33 +29,96 @@ async function request(action, input, ifSequence) {
   const response = await fetch(url, options);
   if (!response.headers.get("content-type")?.startsWith("application/json")) throw new Error("请从 DsH 已登录页面打开织章。");
   const packet = await response.json();
+  if (!packet || typeof packet.ok !== "boolean") throw new Error("工作台返回了无法识别的结果。");
   if (!packet.ok) {
     const fields = packet.details ?? {};
     const reason = fields.reason ?? fields.field;
     const message = packet.code === "version.conflict" ? "稿件版本已更新。本地编辑已保留，请刷新后核对再保存。" : [packet.code, reason].filter(Boolean).join(" · ");
-    throw new Error(message);
+    throw new Error(packet.diagnosticId ? `${message}（诊断号 ${packet.diagnosticId}）` : message);
   }
   return packet.result;
 }
 
+const localDrafts = new Map();
+let stashTimer;
+let storageUnavailable = false;
+let composing = false;
+let directoryKey = "";
+let toolDocument;
+
 function stashKey(id) { return `zhizhang:draft:${id}`; }
 function readStash(id) {
-  const value = localStorage.getItem(stashKey(id));
-  try { return value ? JSON.parse(value) : null; } catch { return null; }
+  if (localDrafts.has(id)) return localDrafts.get(id);
+  try {
+    return JSON.parse(localStorage.getItem(stashKey(id)) ?? "null");
+  } catch {
+    return null;
+  }
+}
+function writeStash(id, draft) {
+  localDrafts.set(id, draft);
+  try {
+    if (draft) localStorage.setItem(stashKey(id), JSON.stringify(draft));
+    else localStorage.removeItem(stashKey(id));
+    storageUnavailable = false;
+  } catch {
+    storageUnavailable = true;
+    notice("浏览器暂时无法保留本地草稿。请保存正文后再离开。", true);
+  }
 }
 function stash() {
+  clearTimeout(stashTimer);
   const active = snapshot.active;
   if (!active) return;
-  if (editor.value === (active.body ?? "")) localStorage.removeItem(stashKey(active.id));
-  else localStorage.setItem(stashKey(active.id), JSON.stringify({ body: editor.value, revisionId: active.revisionId }));
+  const revisionId = readStash(active.id)?.revisionId;
+  const base = revisionId === undefined ? active.revisionId : revisionId;
+  const unchanged = base === active.revisionId && editor.value === (active.body ?? "");
+  writeStash(active.id, unchanged ? null : { body: editor.value, revisionId: base });
 }
+function dirty() { return editor.value !== (snapshot.active?.body ?? ""); }
 function element(tag, label) {
   const entry = document.createElement(tag);
   entry.textContent = label;
   return entry;
 }
 function candidate() { return snapshot.runs?.find((run) => run.state === "awaiting-author"); }
+function uncertainRun() { return snapshot.runs?.find((run) => run.generationState === "uncertain"); }
 function currentRun() { return snapshot.runs?.find((run) => run.state === "running"); }
+
+function appendSettings(target, entries) {
+  for (const entry of entries) {
+    const row = element("section", "");
+    row.append(element("p", `${entry.fact.id} · ${entry.fact.note} · ${({ approved: "已确认", rejected: "已拒绝", pending: "待确认" })[entry.decision]}`));
+    if (entry.decision === "pending") {
+      for (const [label, accept] of [["确认设定", true], ["拒绝提案", false]]) {
+        const button = element("button", label);
+        button.onclick = () => perform(() => change("setting.decide", { projectId, proposalId: entry.id, accept }));
+        row.append(button);
+      }
+    }
+    target.append(row);
+  }
+}
+
+function titleCount(field, output, titled) {
+  const length = [...field.value.trim()].length;
+  output.textContent = titled ? `${length} / 34 字符` : "";
+  field.setCustomValidity(titled && length > 34 ? "标题最多 34 个字符" : "");
+}
+
+function showBudget() {
+  const form = byId("start-run");
+  const active = snapshot.active;
+  if (!active) return;
+  const input = JSON.stringify([active.body, active.title, snapshot.planning, snapshot.scenario, form.elements.instruction.value]);
+  const estimate = new TextEncoder().encode(input).length + 1024;
+  const recommended = Math.max(8000, Math.ceil((estimate * 2 + 2400) / 1000) * 1000);
+  const field = form.elements.tokenLimit;
+  if (toolDocument !== active.id || !field.value || field.value === field.dataset.suggested) field.value = recommended;
+  field.dataset.suggested = recommended;
+  byId("budget-hint").textContent = `正文与规划的保守输入估算约 ${estimate} token。建议总额 ${recommended}，含输出余量；多轮质检另消耗额度。`;
+  byId("run-point").hidden = active.product !== "fanqie";
+}
 
 function render() {
   const projects = byId("projects");
@@ -65,28 +128,33 @@ function render() {
   const article = project?.product === "toutiao";
   const hasDraft = Boolean(active?.revisionId);
   const locked = ["final", "已验收", "已交稿"].includes(active?.state);
-  projects.replaceChildren(element("option", "选择项目"));
-  projects.firstChild.value = "";
-  for (const item of snapshot.projects ?? []) {
-    const choice = element("option", item.name);
-    choice.value = item.id;
-    projects.append(choice);
-  }
-  projects.value = projectId;
-  navigation.replaceChildren();
-  for (const item of snapshot.documents ?? []) {
-    const button = element("button", item.title || "微头条");
-    button.setAttribute("aria-current", String(item.id === documentId));
-    button.onclick = () => perform(async () => {
-      stash();
-      byId("known-settings").replaceChildren();
-      documentId = item.id;
-      await load();
-    });
-    navigation.append(button);
+  const nextDirectoryKey = JSON.stringify([projectId, documentId, snapshot.projects, snapshot.documents]);
+  if (nextDirectoryKey !== directoryKey) {
+    directoryKey = nextDirectoryKey;
+    projects.replaceChildren(element("option", "选择项目"));
+    projects.firstChild.value = "";
+    for (const item of snapshot.projects ?? []) {
+      const choice = element("option", item.name);
+      choice.value = item.id;
+      projects.append(choice);
+    }
+    projects.value = projectId;
+    navigation.replaceChildren();
+    for (const item of snapshot.documents ?? []) {
+      const button = element("button", item.title || "微头条");
+      button.setAttribute("aria-current", String(item.id === documentId));
+      button.onclick = () => perform(async () => {
+        stash();
+        byId("known-settings").replaceChildren();
+        documentId = item.id;
+        await load();
+      });
+      navigation.append(button);
+    }
   }
   byId("document-tools").hidden = !project;
   byId("article-options").hidden = !article;
+  updateNewTitle();
   byId("empty").hidden = Boolean(active);
   byId("manuscript").hidden = !active;
   byId("flow-empty").hidden = Boolean(active);
@@ -98,21 +166,55 @@ function render() {
   byId("state").textContent = stages[active.state] ?? active.state;
   const saved = readStash(active.id);
   const stale = saved && saved.revisionId !== active.revisionId;
-  editor.value = saved?.body ?? active.body ?? "";
-  editor.readOnly = locked;
+  const visibleBody = saved?.body ?? active.body ?? "";
+  if (editor.value !== visibleBody && !composing) editor.value = visibleBody;
+  editor.readOnly = locked || Boolean(stale);
   byId("save").disabled = locked;
   const draftStatus = byId("draft-status");
   draftStatus.replaceChildren(document.createTextNode(stale ? "有一份基于旧版本的本地编辑。" : saved ? "已恢复本地编辑" : hasDraft ? "已保存" : "尚未保存"));
   if (stale) {
+    const compare = element("details", "");
+    compare.append(element("summary", "查看服务器正文"), element("pre", active.body ?? ""));
+    draftStatus.append(compare);
+    const copy = element("button", "复制本地稿");
+    copy.onclick = () => perform(async () => {
+      await navigator.clipboard.writeText(editor.value);
+      notice("已复制本地稿");
+    });
+    draftStatus.append(" ", copy);
     byId("save").disabled = true;
     const restore = element("button", "使用服务器版本");
     restore.onclick = () => {
       if (!window.confirm("丢弃这份基于旧版本的本地编辑？")) return;
-      localStorage.removeItem(stashKey(active.id));
+      writeStash(active.id, null);
       render();
     };
     draftStatus.append(" ", restore);
   }
+  const rename = byId("rename");
+  rename.hidden = !article || active.mode === "micro" || locked;
+  if (rename.dataset.title !== active.title) {
+    rename.dataset.title = active.title;
+    rename.elements.title.value = active.title;
+  }
+  titleCount(rename.elements.title, byId("title-count"), !rename.hidden);
+  const titles = byId("title-choices");
+  const plannedTitles = snapshot.planning?.titleMatrix?.valid?.map(({text}) => text) ?? [];
+  if (titles.dataset.titles !== JSON.stringify(plannedTitles)) {
+    titles.dataset.titles = JSON.stringify(plannedTitles);
+    titles.replaceChildren(new Option("选择候选", ""), ...plannedTitles.map(title => new Option(title)));
+  }
+  const report = snapshot.report;
+  byId("article-report").hidden = !report;
+  byId("article-report").textContent = report?.overall !== undefined
+    ? [`最近质检 ${report.overall} 分`, ...(report.hardGates ?? []), ...(report.fails ?? [])].join(" · ")
+    : report ? `验收退回 ${report.reason || "请修订后重新质检"}` : "";
+  const exportStatus = snapshot.exportStatus;
+  byId("export-status").hidden = !exportStatus;
+  byId("export-status").textContent = ({
+    exported: "已写入交稿文件", pending: "已记录交稿，等待写入文件",
+    failed: String(exportStatus?.error).includes("export.conflict") ? "存在同名的不同文件，请处理冲突后重试" : "已记录交稿，文件写入失败",
+  })[exportStatus?.state] ?? "";
   byId("chapter-outline").hidden = article;
   byId("article-plan").hidden = !article;
   if (planDocument !== active.id) {
@@ -140,18 +242,9 @@ function render() {
   byId("continuity").hidden = article;
   const settingList = byId("settings");
   settingList.replaceChildren();
-  for (const entry of snapshot.settings ?? []) {
-    const row = element("section", "");
-    row.append(element("p", `${entry.fact.id} · ${entry.fact.note} · ${({ approved: "已确认", rejected: "已拒绝", pending: "待确认" })[entry.decision]}`));
-    if (entry.decision === "pending") {
-      for (const [label, accept] of [["确认设定", true], ["拒绝提案", false]]) {
-        const button = element("button", label);
-        button.onclick = () => perform(() => change("setting.decide", { projectId, proposalId: entry.id, accept }));
-        row.append(button);
-      }
-    }
-    settingList.append(row);
-  }
+  appendSettings(settingList, snapshot.settings ?? []);
+  byId("settings-more").hidden = !snapshot.settingsCursor;
+  byId("settings-more").dataset.cursor = snapshot.settingsCursor ?? "";
   const position = snapshot.documents.findIndex(({ id }) => id === active.id);
   byId("move-up").disabled = position < 1;
   byId("move-down").disabled = position >= snapshot.documents.length - 1;
@@ -175,7 +268,7 @@ function render() {
   if (deliveryUrl) download.href = deliveryUrl;
 
   const pending = candidate();
-  const run = currentRun() ?? snapshot.runs?.[0];
+  const run = currentRun() ?? uncertainRun() ?? snapshot.runs?.[0];
   byId("comparison").hidden = !pending || locked;
   byId("candidate").value = pending?.candidateBody ?? "";
   const candidateQa = pending?.candidateQa ? JSON.parse(pending.candidateQa) : undefined;
@@ -185,11 +278,26 @@ function render() {
   byId("automatic-qa").hidden = !article;
   byId("adopt").disabled = pending?.baseRevisionId !== active.revisionId;
   byId("run-content").hidden = !run;
-  byId("start-run").querySelector("button").disabled = !hasDraft || locked || Boolean(currentRun());
+  byId("start-run").querySelector("button").disabled = !hasDraft || locked || Boolean(currentRun() || pending) || run?.generationState === "uncertain";
+  showBudget();
+  if (toolDocument !== active.id) {
+    toolDocument = active.id;
+    byId("run-history-list").replaceChildren();
+    byId("run-input").hidden = true;
+  }
   byId("run-status").textContent = run ? ({ running: "等待候选稿", "awaiting-author": "等待作者决定", applied: "已采纳", discarded: "已舍弃", failed: "任务失败", cancelled: "已取消" })[run.state] ?? run.state : "";
-  byId("run-input").textContent = run ? JSON.stringify(JSON.parse(run.frozenInput), null, 2) : "";
+  if (run?.generationError) byId("run-status").append(` · ${run.generationError}`);
+  const uncertain = run?.generationState === "uncertain";
+  byId("reconcile").hidden = !uncertain;
+  if (uncertain) byId("run-status").append(" · 请先查 DsH 提供方用量，再确认未记账部分");
+  byId("run-detail").dataset.run = run?.id ?? "";
   byId("complete-run").hidden = run?.state !== "running";
-  byId("generate-run").hidden = !["running", "failed"].includes(run?.state);
+  byId("generate-run").hidden = locked || uncertain || !["running", "failed"].includes(run?.state);
+  if (!poll && run?.state === "running" && ["prepared", "inflight", "received"].includes(run.generationState)) {
+    poll = setInterval(() => {
+      if (!document.hidden && !composing) void perform(() => load(snapshot.asOfSeq));
+    }, 2000);
+  }
   if (poll && run?.state !== "running") {
     clearInterval(poll);
     poll = undefined;
@@ -199,6 +307,9 @@ function render() {
 
 async function load(ifSequence) {
   const next = await request(undefined, undefined, ifSequence);
+  if (!next || !Array.isArray(next.projects) && next.unchanged !== true) throw new Error("工作台响应格式有误，请刷新后重试。");
+  if (snapshot.active && documentId === snapshot.active.id && editor.dataset.saved !== documentId) stash();
+  delete editor.dataset.saved;
   if (next.unchanged) return;
   if (poll && next.active?.id !== snapshot.active?.id) {
     clearInterval(poll);
@@ -228,11 +339,18 @@ function activeInput(extra) {
   return { documentId, baseRevisionId: snapshot.active?.revisionId ?? null, ...extra };
 }
 async function change(action, extra = {}, options = {}) {
+  if (options.savedVersion && dirty()) throw new Error("请先保存正文，或复制本地稿后切回已保存版本。");
+  const id = documentId;
+  const submitted = editor.value;
   stash();
   const result = await request(action, activeInput(extra));
-  if (options.clearDraft) localStorage.removeItem(stashKey(documentId));
+  if (options.clearDraft) {
+    const remaining = editor.value === submitted ? null : { body: editor.value, revisionId: result.revisionId };
+    editor.dataset.saved = id;
+    writeStash(id, remaining);
+  }
   await load();
-  notice(options.message ?? "已保存");
+  if (!storageUnavailable) notice(options.message ?? "已保存");
   return result;
 }
 
@@ -249,7 +367,15 @@ for (const region of ["navigation", "pipeline"]) {
     requestAnimationFrame(() => { scrollBox.scrollTop = ratio * (scrollBox.scrollHeight - scrollBox.clientHeight); });
   };
 }
-editor.addEventListener("input", stash);
+editor.addEventListener("input", () => {
+  clearTimeout(stashTimer);
+  stashTimer = setTimeout(stash, 250);
+});
+editor.addEventListener("compositionstart", () => { composing = true; });
+editor.addEventListener("compositionend", () => { composing = false; stash(); });
+editor.addEventListener("blur", stash);
+window.addEventListener("pagehide", stash);
+document.addEventListener("visibilitychange", () => { if (document.hidden) stash(); });
 byId("projects").onchange = (event) => {
   const selected = event.currentTarget.value;
   void perform(async () => {
@@ -273,38 +399,38 @@ form("new-document", async (values, node) => {
   await load();
 });
 click("save", () => change("draft.save", { body: editor.value }, { clearDraft: true }));
-click("review-pass", () => change("chapter.review", { accept: true }));
-click("review-reject", () => change("chapter.review", { accept: false }));
-click("finalize", () => change("draft.finalize"));
+click("review-pass", () => change("chapter.review", { accept: true }, { savedVersion: true }));
+click("review-reject", () => change("chapter.review", { accept: false }, { savedVersion: true }));
+click("finalize", () => change("draft.finalize", {}, { savedVersion: true }));
 form("qa", async (values) => {
   const result = await change("article.qa", {
     score: Number(values.score), passed: values.passed === "on",
     fails: values.fails.split("\n").map((line) => line.trim()).filter(Boolean),
-  });
+  }, { savedVersion: true });
   notice([...result.hardGates, ...result.fails].join(" · ") || `质检已记录 · ${result.overall} 分`);
 });
 click("refine", () => change("article.refine", { body: editor.value }, { clearDraft: true }));
-click("accept", () => change("article.accept", { accept: true }));
-click("reject", () => change("article.accept", { accept: false }));
+click("accept", () => change("article.accept", { accept: true }, { savedVersion: true }));
+click("reject", () => {
+  const reason = window.prompt("验收退回原因", "");
+  if (reason !== null) return change("article.accept", { accept: false, reason }, { savedVersion: true });
+});
 click("approve", () => window.confirm("批准将当前版本导出为交稿单？") && change("approval.decide", { confirmed: true }));
 click("deliver", async () => {
   const result = await change("article.deliver", { key: `delivery:${snapshot.active.revisionId}` });
   notice(result.state === "exported" ? "交稿单已生成" : "已记录交稿，文件导出失败，可从此处重试。", result.state !== "exported");
 });
-form("start-run", (values) => change("run.start", { ...values, tokenLimit: Number(values.tokenLimit) }));
+form("start-run", (values) => change("run.start", { ...values, tokenLimit: Number(values.tokenLimit), point: Number(values.point) }, { savedVersion: true }));
 form("complete-run", async (values, node) => {
   await change("run.complete", { ...values, tokens: Number(values.tokens), runId: currentRun().id });
   node.reset();
 });
-click("adopt", () => window.confirm("以这份候选稿更新工作稿？") && change("candidate.adopt", { key: candidate().candidateId, runId: candidate().id }, { clearDraft: true }));
+click("adopt", () => window.confirm("以这份候选稿更新工作稿？") && change("candidate.adopt", { key: candidate().candidateId, runId: candidate().id }, { clearDraft: true, savedVersion: true }));
 click("discard", () => change("run.discard", { runId: candidate().id }));
 click("cancel", () => change("run.cancel", { runId: currentRun().id }));
 form("generate-run", async (values) => {
-  const run = currentRun() ?? snapshot.runs?.[0];
+  const run = currentRun() ?? uncertainRun() ?? snapshot.runs?.[0];
   await change("run.generate", { ...values, autoQa: values.autoQa === "on", runId: run.id }, { message: "DsH 正在生成候选稿" });
-  if (!poll) poll = setInterval(() => {
-    if (!document.hidden) void perform(() => load(snapshot.asOfSeq));
-  }, 2000);
 });
 click("refresh-run", async () => { stash(); await load(); });
 form("chapter-outline", async (values) => {
@@ -322,7 +448,7 @@ form("setting-proposal", async (values, node) => {
 form("settings-read", async (values) => {
   const result = await request("settings.read", { projectId, character: values.character, at: { chapterId: documentId, point: Number(values.point) } });
   byId("known-settings").replaceChildren(...(result.entries.length
-    ? result.entries.map(({ note }) => element("p", note))
+    ? result.entries.map(({ note, source, locked, effectiveFrom, effectiveTo }) => element("p", [note, `来源 ${source}`, locked ? "已锁定" : "", `自第 ${effectiveFrom.point} 段生效`, effectiveTo ? `至第 ${effectiveTo.point} 段失效` : ""].filter(Boolean).join(" · ")))
     : [element("p", "此时该人物没有已确认的知情设定。")]));
 });
 for (const [id, offset] of [["move-up", -1], ["move-down", 1]]) {
@@ -337,4 +463,70 @@ for (const [id, offset] of [["move-up", -1], ["move-down", 1]]) {
     }
   });
 }
+const newDocument = byId("new-document");
+function updateNewTitle() {
+  const titled = !byId("article-options").hidden && newDocument.elements.mode.value !== "micro";
+  titleCount(newDocument.elements.title, byId("new-title-count"), titled);
+}
+newDocument.addEventListener("input", updateNewTitle);
+const rename = byId("rename");
+rename.elements.title.addEventListener("input", () => titleCount(rename.elements.title, byId("title-count"), true));
+byId("title-choices").onchange = (event) => {
+  if (event.target.value) rename.elements.title.value = event.target.value;
+  titleCount(rename.elements.title, byId("title-count"), true);
+};
+form("rename", (values) => change("article.rename", values, { savedVersion: true, clearDraft: true }));
+byId("start-run").elements.instruction.addEventListener("input", showBudget);
+form("record-evidence", async (values) => {
+  await change("evidence.record", values, { savedVersion: true, message: "已记录当前修订的正文证据" });
+});
+click("evidence-detail", async () => {
+  const factId = byId("record-evidence").elements.factId.value;
+  const { value } = await request("evidence.detail", activeInput({ factId }));
+  const output = byId("evidence-result");
+  const current = value.anchor?.chapterId === documentId && value.revisionId === snapshot.active.revisionId;
+  output.textContent = current ? `第 ${value.anchor.point} 段 · ${snapshot.active.body.slice(value.quoteRange.start, value.quoteRange.end)}`
+    : value.revisionId ? `第 ${value.anchor.point} 段 · 修订 ${value.revisionId}` : "暂无正文证据";
+});
+async function showRunDetail(runId) {
+  const detail = await request("run.detail", activeInput({ runId }));
+  const target = byId("run-input");
+  target.hidden = false;
+  target.textContent = JSON.stringify({
+    frozenInput: JSON.parse(detail.frozenInput), candidate: detail.candidate, attempts: detail.attempts,
+  }, null, 2);
+  return detail;
+}
+click("run-detail", () => showRunDetail(byId("run-detail").dataset.run));
+click("run-history", async () => {
+  const target = byId("run-history-list");
+  target.replaceChildren();
+  async function page(before) {
+    const entries = await request("run.history", activeInput({ before }));
+    for (const entry of entries) {
+      const button = element("button", `${entry.state} · ${entry.settled} / ${entry.reserved} token`);
+      button.onclick = () => perform(() => showRunDetail(entry.id));
+      target.append(button);
+    }
+    if (entries.length === 25) {
+      const more = element("button", "下一页");
+      more.onclick = () => perform(async () => { await page(entries.at(-1).cursor); more.remove(); });
+      target.append(more);
+    }
+  }
+  await page();
+});
+form("reconcile", async (values) => {
+  const runId = byId("run-detail").dataset.run;
+  const detail = await showRunDetail(runId);
+  const attemptId = detail.attempts.find(({state}) => state === "uncertain")?.id;
+  await change("run.reconcile", { runId, attemptId, tokens: Number(values.tokens) });
+});
+click("settings-more", async () => {
+  const button = byId("settings-more");
+  const result = await request("settings.history", { projectId, before: Number(button.dataset.cursor) });
+  appendSettings(byId("settings"), result.entries);
+  button.dataset.cursor = result.cursor ?? "";
+  button.hidden = !result.cursor;
+});
 void perform(load);

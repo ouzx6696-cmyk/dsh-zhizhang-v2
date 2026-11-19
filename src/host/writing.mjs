@@ -22,9 +22,9 @@ function parseQa(source) {
 }
 
 // One-shot transport. No Agent session or tool list is passed to the model.
-export async function generateCandidate(llm, run, signal, reserveRefinement) {
+export async function generateCandidate(llm, run, signal, reserveRefinement, progress = () => {}) {
   let tokens = 0;
-  async function complete(system, prompt, maxOutputTokens = Infinity) {
+  async function complete(phase, system, prompt, maxOutputTokens = Infinity) {
     const inputReserve = Buffer.byteLength(system + prompt, "utf8") + 128;
     const maxTokens = Math.min(run.reserved - tokens - inputReserve, maxOutputTokens);
     if (maxTokens < 1) throw new ContractError("budget.exhausted", { scope: "run", reason: "input-reservation" });
@@ -35,24 +35,33 @@ export async function generateCandidate(llm, run, signal, reserveRefinement) {
     let usage;
     let completed = false;
     let length = 0;
-    for await (const chunk of call.stream({
-      ...call.config, system, signal: requestSignal,
-      messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
-    })) {
-      if (chunk.type === "text-delta") {
-        length += chunk.text.length;
-        if (length > 1_000_000) throw new Error("Candidate too long");
-        blocks.set(chunk.index, (blocks.get(chunk.index) ?? "") + chunk.text);
+    requestSignal.throwIfAborted();
+    progress(phase);
+    let counts = [];
+    try {
+      for await (const chunk of call.stream({
+        ...call.config, system, signal: requestSignal,
+        messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
+      })) {
+        if (chunk.type === "text-delta") {
+          length += chunk.text.length;
+          if (length > 1_000_000) throw new Error("Candidate too long");
+          blocks.set(chunk.index, (blocks.get(chunk.index) ?? "") + chunk.text);
+        }
+        if (chunk.type === "block-end" && chunk.block.type === "text") blocks.set(chunk.index, chunk.block.text);
+        if (chunk.type === "usage") usage = chunk.usage;
+        if (chunk.type === "finish") completed = chunk.reason.kind === "stop";
       }
-      if (chunk.type === "block-end" && chunk.block.type === "text") blocks.set(chunk.index, chunk.block.text);
-      if (chunk.type === "usage") usage = chunk.usage;
-      if (chunk.type === "finish") completed = chunk.reason.kind === "stop";
+    } finally {
+      counts = usage ? [usage.inputTokens, usage.outputTokens, usage.cacheReadTokens ?? 0, usage.cacheWriteTokens ?? 0] : [];
+      if (usage && counts.every((value) => Number.isSafeInteger(value) && value >= 0)) {
+        progress(phase, counts);
+        tokens += counts.reduce((a, b) => a + b, 0);
+      }
     }
-    const counts = usage ? [usage.inputTokens, usage.outputTokens, usage.cacheReadTokens ?? 0, usage.cacheWriteTokens ?? 0] : [];
     if (!usage || counts.some((value) => !Number.isSafeInteger(value) || value < 0)) {
       throw new ContractError("usage.uncertain", { reason: "missing-token-usage" });
     }
-    tokens += counts.reduce((a, b) => a + b, 0);
     const body = [...blocks.entries()].sort(([a], [b]) => a - b).map(([, value]) => value).join("\n");
     if (signal.aborted) return body;
     if (tokens > run.reserved) throw new ContractError("budget.exhausted", { scope: "run", reason: "actual-usage" });
@@ -63,21 +72,21 @@ export async function generateCandidate(llm, run, signal, reserveRefinement) {
   }
 
   try {
-    const body = await complete(writerSystem, run.frozenInput);
+    const body = await complete("write", writerSystem, run.frozenInput);
     if (!run.autoQa || signal.aborted) return { body, tokens };
     const { title, mode, scenario } = JSON.parse(run.frozenInput);
     const result = await refineArticle(
       body,
       async (draft) => {
         signal.throwIfAborted();
-        const output = await complete(qaSystem, JSON.stringify({ title, mode, scenario, text: draft }), 1200);
+        const output = await complete("qa", qaSystem, JSON.stringify({ title, mode, scenario, text: draft }), 1200);
         const qa = parseQa(output);
         return { ...qa, hardGates: [...qa.hardGates, ...structuralGates(mode, title, draft)] };
       },
       (draft, qa) => {
         signal.throwIfAborted();
         reserveRefinement();
-        return complete(writerSystem, JSON.stringify({
+        return complete("refine", writerSystem, JSON.stringify({
           title, scenario, text: draft, instruction: "只处理未通过项与硬门，再给出完整正文。",
           fails: qa.fails, hardGates: qa.hardGates,
         }));

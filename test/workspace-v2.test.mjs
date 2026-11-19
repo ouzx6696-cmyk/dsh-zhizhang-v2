@@ -65,6 +65,8 @@ test("a cancelled run records usage without a candidate and over-budget results 
   assert.equal(runs[0].state, "failed");
   assert.equal(runs[1].state, "cancelled");
   assert.equal(runs[1].settled, 30);
+  const replayed = app.mutation("read.model", { projectId: context.projectId, model: "run", runId: cancelled });
+  assert.equal(replayed.value.budget.settled, 30);
   assert.ok(runs.every((run) => run.candidateBody === null));
 });
 
@@ -208,4 +210,72 @@ test("the automatic refinement limit survives failure, retry and reopening of th
   assert.equal(restored.generationInput({ runId, provider: "fixture", model: "test", autoQa: true }).reserved, 7900);
   restored.reserveRefinement(runId);
   assert.throws(() => restored.reserveRefinement(runId), { code: "gate.denied" });
+});
+
+test("approved settings agree across reversed decisions, narrative points, replay and frozen input", (t) => {
+  const { app, db, writer } = withWorkspace(t);
+  const context = setup(app, "fanqie");
+  const { projectId, documentId } = context;
+  const fields = { ...context, factId: "secret", source: "笔记", character: "林" };
+  const propose = (note, point) => app.mutation("setting.propose", {
+    ...fields, note, from: { chapterId: documentId, point },
+  }).id;
+  const earlier = propose("早期", 1);
+  const first = propose("最后确认", 3);
+  const second = propose("先确认", 3);
+  for (const proposalId of [second, first, earlier]) app.mutation("setting.decide", { ...fields, proposalId, accept: true });
+  const reopened = openAuthorWorkspace(db, writer);
+  for (const [point, note] of [[1, "早期"], [3, "最后确认"]]) {
+    assert.equal(reopened.mutation("settings.read", { projectId, character: "林", at: { chapterId: documentId, point } }).entries[0].note, note);
+    assert.equal(reopened.mutation("read.model", { projectId, model: "settings-view", asOfChapter: documentId, characterId: "林", point }).value.entries[0].note, note);
+  }
+  app.mutation("chapter.outline", { ...context, viewpoint: "林", lockedFacts: "甲", knowledge: "乙", target: 2000,
+    剧情梗概: "甲", 核心冲突与看点: "乙", 情节推进节点: "丙", 章末落点: "丁" });
+  const { id: runId } = app.mutation("run.start", { ...context, point: 3, instruction: "补稿", tokenLimit: 8000 });
+  assert.equal(JSON.parse(app.generationInput({ runId, provider: "fixture", model: "test" }).frozenInput).knownFacts[0].note, "最后确认");
+  assert.throws(() => reopened.mutation("run.start", { ...context, instruction: "重复", tokenLimit: 8000 }), { code: "gate.denied" });
+});
+
+test("host generation survives restart without guessing unreturned usage", (t) => {
+  const { app, db, writer } = withWorkspace(t);
+  const context = setup(app, "fanqie");
+  const { id: runId } = app.mutation("run.start", { ...context, instruction: "写", tokenLimit: 8000 });
+  const input = { runId, provider: "fixture", model: "model" };
+  const { attemptId } = app.generationInput(input, true);
+  app.generationProgress(attemptId, "write");
+  app.generationProgress(attemptId, "write", [20, 10, 0, 3]);
+  app.generationProgress(attemptId, "qa");
+  const reopened = openAuthorWorkspace(db, writer);
+  reopened.recoverGenerations();
+  reopened.recoverGenerations();
+  assert.throws(() => reopened.generationInput(input, true), { code: "gate.denied" });
+  assert.equal(reopened.mutation("run.detail", { ...context, runId }).settled, 33);
+  reopened.mutation("run.reconcile", { ...context, runId, attemptId, tokens: 7 });
+  assert.throws(() => reopened.mutation("run.reconcile", { ...context, runId, attemptId, tokens: 7 }), { code: "gate.denied" });
+  const projected = reopened.mutation("read.model", { projectId: context.projectId, model: "run", runId });
+  assert.equal(projected.value.budget.settled, 40);
+  const retry = reopened.generationInput(input, true);
+  reopened.generationProgress(retry.attemptId, "write");
+  reopened.generationProgress(retry.attemptId, "write", [5, 2, 0, 0]);
+  reopened.finishGeneration(retry.attemptId, { body: "候选" }, null);
+  reopened.finishGeneration(retry.attemptId, { body: "重复" }, null);
+  assert.equal(reopened.mutation("run.detail", { ...context, runId }).settled, 47);
+});
+
+test("long candidate history stays out of the first response and supports detail and pagination", (t) => {
+  const { app } = withWorkspace(t);
+  const context = setup(app, "fanqie");
+  const body = "千".repeat(10_000);
+  context.baseRevisionId = app.mutation("draft.save", { ...context, body }).revisionId;
+  for (let i = 0; i < 100; i++) {
+    const { id: runId } = app.mutation("run.start", { ...context, instruction: "改", tokenLimit: 8000 });
+    app.mutation("run.complete", { runId, body, tokens: 40 });
+    app.mutation("run.discard", { runId });
+  }
+  assert.ok(Buffer.byteLength(JSON.stringify(app.snapshot(context.projectId, context.documentId))) < 150 * 1024);
+  const page = app.mutation("run.history", context);
+  assert.equal(page.length, 25);
+  const next = app.mutation("run.history", { ...context, before: page.at(-1).cursor });
+  assert.ok(next[0].cursor < page.at(-1).cursor);
+  assert.equal(app.mutation("run.detail", { ...context, runId: next[0].id }).candidate.body, body);
 });

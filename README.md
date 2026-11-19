@@ -1,8 +1,8 @@
-# 织章 V2.0
+# 织章 V2.0.1
 
 织章是 DeepSeek Harness 上的作者工作台，包含番茄连载和头条创作两条流程。使用同一套版本记录、候选对照和作者决策，把设定、草稿、审稿和交稿串起来。
 
-[安装、架构、规则裁决与验收](docs/V2.md)
+[安装、架构、规则裁决与验收](docs/V2.md) · [优化计划](docs/V2-优化计划.md)
 
 `npm run verify` 执行 TypeScript 检查与核心离线测试。历史规则取证可用 `npm run test:evidence` 单独复核，完整离线验收用 `npm run test:all`。`npm run build` 构建宿主代码，之后可用 `npm pack --ignore-scripts` 打包，并在 DsH Web 0.2.2-rc.4 的插件管理器安装。
 

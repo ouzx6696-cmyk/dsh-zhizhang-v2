@@ -1,6 +1,6 @@
 {
   "name": "@zhizhang/dsh-workbench",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
   "description": "Author-controlled Fanqie and Toutiao workbench for DeepSeek Harness",
   "type": "module",
@@ -14,6 +14,7 @@
     "test": "node --test \"test/*-d02.test.mjs\" \"test/*-w02.test.mjs\" test/smoke.test.mjs test/workspace-v2.test.mjs",
     "test:evidence": "node --test \"test/*-?01.test.mjs\"",
     "test:all": "node --test \"test/*.test.mjs\"",
+    "test:browser": "node scripts/browser-check.mjs",
     "verify": "npm run check && npm test"
   },
   "devDependencies": {

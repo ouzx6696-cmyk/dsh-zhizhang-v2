@@ -35,9 +35,9 @@ function navigation(definition: ReadDefinition, projectId: string) {
         businessState: event.state as string ?? (event.mode ? "初稿待改" : "planned"),
       }] };
     }
-    if (event.kind === "document.state" || event.kind === "chapter.reviewed") {
+    if (event.kind === "document.state" || event.kind === "chapter.reviewed" || event.kind === "document.renamed") {
       return { ...state, chapters: state.chapters.map((chapter) => chapter.chapterId === event.documentId
-        ? { ...chapter, businessState: event.state as string } : chapter) };
+        ? { ...chapter, title: (event.title as string | undefined) ?? chapter.title, businessState: (event.state as string | undefined) ?? chapter.businessState } : chapter) };
     }
     if (event.kind === "chapter.reordered") {
       const ids = event.chapterIds as string[];
@@ -72,17 +72,17 @@ function revisions(definition: ReadDefinition, documentId: string) {
 }
 
 function settings(definition: ReadDefinition, chapterId: string, characterId: string, point: number) {
-  return project(definition, () => ({ order: [] as string[], facts: {} as Record<string, SettingFact> }), (state, event) => {
+  return project(definition, () => ({ order: [] as string[], facts: [] as SettingFact[] }), (state, event) => {
     if (event.kind === "document.created") return { ...state, order: [...state.order, event.documentId as string] };
     if (event.kind === "chapter.reordered") return { ...state, order: event.chapterIds as string[] };
     if (event.kind === "setting.decided" && event.decision === "approved" && event.fact) {
       const fact = event.fact as SettingFact;
-      return { ...state, facts: { ...state.facts, [fact.id]: fact } };
+      return { ...state, facts: [...state.facts, fact] };
     }
     return state;
   }, ({ order, facts }) => ({
     query: { asOfChapter: chapterId, characterId },
-    entries: settingsAt(Object.values(facts), order, anchor(chapterId, point), characterId).map((fact) => ({
+    entries: settingsAt(facts, order, anchor(chapterId, point), characterId).map((fact) => ({
       factId: fact.id, note: fact.note, effectiveFrom: fact.effectiveFrom.chapterId,
     })),
   }));
@@ -98,7 +98,7 @@ function evidence(definition: ReadDefinition, factId: string) {
 function run(definition: ReadDefinition, runId: string) {
   return project(definition, () => ({
     state: "running", nextStage: "draft.write.candidate" as string | null,
-    budget: { reserved: 0, settled: 0 }, checkpoints: [] as View[], attempts: [] as View[],
+    budget: { reserved: 0, settled: 0 }, checkpoints: [] as View[], attempts: [] as View[], lateSettled: false,
   }), (state, event) => {
     if (event.runId !== runId) return state;
     if (event.kind === "run.started") return { ...state, budget: { ...state.budget, reserved: Number(event.reserved ?? 0) } };
@@ -111,14 +111,14 @@ function run(definition: ReadDefinition, runId: string) {
         budget: { ...state.budget, settled: state.budget.settled + Number(event.usage ?? 0) },
       };
     }
-    if (event.kind === "run.usage.late") {
-      return { ...state, budget: { ...state.budget, settled: state.budget.settled + Number(event.usage ?? 0) } };
+    if (event.kind === "run.usage.late" && !state.lateSettled) {
+      return { ...state, lateSettled: true, budget: { ...state.budget, settled: state.budget.settled + Number(event.usage ?? 0) } };
     }
     if (event.kind === "run.state") {
       return { ...state, state: event.state as string, nextStage: event.state === "running" ? "draft.write.candidate" : null };
     }
     return state;
-  }, (state) => state);
+  }, ({ lateSettled: _lateSettled, ...state }) => state);
 }
 
 function approvals(definition: ReadDefinition) {
@@ -138,7 +138,11 @@ export function createAuthorModelReader(db: SqliteDatabase) {
     const definition = READ_MODELS.find(({ id }) => id === name);
     if (!definition) throw new ContractError("input.invalid", { field: "model", reason: "unknown-read-model" });
     const identity = definition.key.slice(1).map((field) => required(input, field));
-    const key = JSON.stringify([projectId, name, ...identity]);
+    const point = name === "settings-view" ? input.point ?? 1 : 1;
+    if (typeof point !== "number" || !Number.isSafeInteger(point) || point < 1) {
+      throw new ContractError("input.invalid", { field: "point", reason: "positive-integer-required" });
+    }
+    const key = JSON.stringify([projectId, name, ...identity, point]);
     let entry = cache.get(key);
     if (!entry || entry.store.seqOf() > currentSeq(db, projectId)) {
       const [first, second] = identity;
@@ -146,7 +150,7 @@ export function createAuthorModelReader(db: SqliteDatabase) {
       switch (name) {
         case "navigation": unit = navigation(definition, projectId); break;
         case "revision-candidate": unit = revisions(definition, first); break;
-        case "settings-view": unit = settings(definition, first, second, 1); break;
+        case "settings-view": unit = settings(definition, first, second, point); break;
         case "evidence": unit = evidence(definition, first); break;
         case "run": unit = run(definition, first); break;
         default: unit = approvals(definition); break;

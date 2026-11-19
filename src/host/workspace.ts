@@ -4,12 +4,13 @@ import { assertChapterFinalizable, EDITORIAL_REJECTION_LIMIT, planReorder, setti
 import type { ChapterState, SettingFact } from "../domain/fanqie/index.ts";
 import {
   articleScenario, assertArticleTransition, formatDelivery, qaPassed, structuralGates,
-  QA_REFINEMENT_LIMIT, validateTitleMatrix, type ArticleMode, type ArticleQa, type ArticleStatus,
+  QA_REFINEMENT_LIMIT, TITLE_MAX, validateTitleMatrix, type ArticleMode, type ArticleQa, type ArticleStatus,
 } from "../domain/toutiao/index.ts";
 import {
   appendEvent, appendRevision, attemptExport, createCandidate, createCommandSchema, createDeliverySchema,
   createDocument, createEventLogSchema, currentSeq, executeCommand, insertDeliveryRow, pendingExports, type SqliteDatabase,
 } from "../storage/index.ts";
+import { createGenerationLedger } from "../storage/author-generation.ts";
 import { anchor, precedes, type Anchor } from "../domain/shared/index.ts";
 import { createAuthorModelReader } from "../workflow/author-reads.ts";
 import { isLegalTransition, type Concern, type RunState } from "../workflow/index.ts";
@@ -60,6 +61,16 @@ function count(input: Input, field: string): number {
 function requiredRow<T>(row: unknown, objectType: string, objectId: string): T {
   if (!row) throw new ContractError("input.not_found", { objectType, objectId });
   return row as T;
+}
+
+function titleFor(mode: string | null, title: string): string {
+  if (mode === "micro" ? !!title : !title) invalid("title", mode === "micro" ? "micro-has-no-title" : "required");
+  if (mode && [...title].length > TITLE_MAX) invalid("title", "title-limit");
+  return title;
+}
+
+function locked(row: DocumentRow): boolean {
+  return ["final", "已验收", "已交稿"].includes(row.state);
 }
 
 function refuse(action: string, reason: string): never {
@@ -113,8 +124,13 @@ export function openAuthorWorkspace(
     CREATE INDEX IF NOT EXISTS author_documents_by_project ON author_documents(project_id);
     CREATE INDEX IF NOT EXISTS author_runs_by_document ON author_runs(document_id);
     CREATE INDEX IF NOT EXISTS author_settings_by_project ON author_settings(project_id);
+    CREATE INDEX IF NOT EXISTS author_settings_decision_events ON event_log(project_id, json_extract(payload, '$.id'))
+      WHERE kind = 'setting.decided';
+    CREATE INDEX IF NOT EXISTS author_article_reports ON event_log(project_id, json_extract(payload, '$.revisionId'), seq)
+      WHERE kind IN ('article.qa','article.rejected');
   `);
 
+  const generation = createGenerationLedger(db);
   const readAuthorModel = createAuthorModelReader(db);
   const documentQuery = `
     SELECT a.id, a.project_id AS projectId, a.title, p.product, a.state, a.mode, a.line,
@@ -171,7 +187,7 @@ export function openAuthorWorkspace(
   }
 
   function addRevision(row: DocumentRow, body: string): { revisionId: string } {
-    if (row.state === "final" || row.state === "已验收" || row.state === "已交稿") {
+    if (locked(row)) {
       refuse("draft.save", "revision-locked");
     }
     const revision = appendRevision(db, { revisionId: randomUUID(), documentId: row.id, body, createdAt: Date.now() });
@@ -237,14 +253,12 @@ export function openAuthorWorkspace(
 
   function facts(projectId: string): SettingFact[] {
     const rows = db.prepare(`
-      SELECT value FROM author_settings WHERE project_id = ? AND decision = 'approved' ORDER BY sequence;
+      SELECT s.value FROM author_settings s JOIN event_log e
+        ON e.project_id = s.project_id AND e.kind = 'setting.decided'
+        AND json_extract(e.payload, '$.id') = s.id
+      WHERE s.project_id = ? AND s.decision = 'approved' ORDER BY e.seq;
     `).all(projectId) as readonly { value: string }[];
-    const latest = new Map<string, SettingFact>();
-    for (const row of rows) {
-      const value: SettingFact = JSON.parse(row.value);
-      latest.set(value.id, value);
-    }
-    return [...latest.values()];
+    return rows.map(({ value }) => JSON.parse(value) as SettingFact);
   }
 
   function settingAnchor(input: Input, field: string, order: readonly string[]): Anchor {
@@ -259,8 +273,9 @@ export function openAuthorWorkspace(
 
   function proposedOrder(input: Input, before: readonly string[]): string[] {
     const next = input.chapterIds;
+    const known = new Set(before);
     if (!Array.isArray(next) || next.length !== before.length || new Set(next).size !== before.length ||
-      next.some((id) => typeof id !== "string" || !before.includes(id))) invalid("chapterIds", "order-must-contain-every-chapter-once");
+      next.some((id) => typeof id !== "string" || !known.has(id))) invalid("chapterIds", "order-must-contain-every-chapter-once");
     return next as string[];
   }
 
@@ -279,12 +294,24 @@ export function openAuthorWorkspace(
     return { ...planReorder(relations, before, after), chapterIds: after, asOfSeq: currentSeq(db, projectId) };
   }
 
+  function settingsPage(projectId: string, before = Number.MAX_SAFE_INTEGER) {
+    const rows = db.prepare(`
+      SELECT sequence, id, decision, value FROM author_settings
+      WHERE project_id = ? AND sequence < ? ORDER BY sequence DESC LIMIT 51;
+    `).all(projectId, before) as readonly { sequence: number; id: string; decision: string; value: string }[];
+    return {
+      entries: rows.slice(0, 50).map(({ id, decision, value }) => ({ id, decision, fact: JSON.parse(value) as SettingFact })),
+      cursor: rows.length > 50 ? rows[49].sequence : null,
+    };
+  }
+
   function continuity(action: string, input: Input) {
     const projectId = text(input, "projectId");
     const project = requiredRow<{ product: Product }>(
       db.prepare("SELECT product FROM author_projects WHERE id = ?;").get(projectId), "project", projectId,
     );
     if (project.product !== "fanqie") invalid("projectId", "novel-required");
+    if (action === "settings.history") return settingsPage(projectId, count(input, "before"));
     const order = chapterOrder(projectId);
     if (action === "reorder.impact") return reorder(projectId, input);
     if (action === "settings.read") {
@@ -361,6 +388,34 @@ export function openAuthorWorkspace(
     event(row.projectId, "chapter", "document.planning", { documentId: row.id });
   }
 
+  function completeRun(current: RunRow, row: DocumentRow, input: Input) {
+    const usage = count(input, "tokens");
+    if (!Number.isSafeInteger(current.settled + usage)) invalid("tokens", "usage-overflow");
+    if (current.state !== "running") refuse("run.complete", "run-no-longer-running");
+    db.prepare("UPDATE author_runs SET settled = settled + ? WHERE id = ?;").run(usage, current.id);
+    if (usage + current.settled > current.reserved) {
+      event(row.projectId, "run", "run.attempt", { runId: current.id, usage, outcome: "budget.exhausted" });
+      stage(current, "failed");
+      return { id: current.id, state: "failed" };
+    }
+    const body = text(input, "body");
+    const id = randomUUID();
+    createCandidate(db, { candidateId: id, documentId: row.id, baseRevisionId: current.baseRevisionId, body });
+    if (input.qa && typeof input.qa === "object" && row.mode) {
+      const reported = input.qa as Input;
+      const qa = qaReport({ ...reported, score: reported.overall }, structuralGates(row.mode, row.title, body));
+      const rounds = count(input, "rounds");
+      if (rounds > QA_REFINEMENT_LIMIT) invalid("rounds", "qa-refinement-limit");
+      db.prepare("INSERT INTO author_candidate_qa (candidate_id, report, rounds) VALUES (?, ?, ?);")
+        .run(id, JSON.stringify(qa), rounds);
+    }
+    db.prepare("UPDATE author_runs SET candidate_id = ? WHERE id = ?;").run(id, current.id);
+    event(row.projectId, "run", "run.attempt", { runId: current.id, usage, outputRef: id, outcome: "completed" });
+    stage(current, "awaiting-author");
+    event(row.projectId, "candidate", "candidate.produced", { documentId: row.id, candidateId: id, runId: current.id });
+    return { id: current.id, candidateId: id };
+  }
+
   function mutation(action: string, input: Input) {
     switch (action) {
       case "read.model": {
@@ -370,6 +425,7 @@ export function openAuthorWorkspace(
       }
       case "setting.propose":
       case "setting.decide":
+      case "settings.history":
       case "settings.read":
       case "reorder.impact":
       case "reorder.commit":
@@ -395,7 +451,7 @@ export function openAuthorWorkspace(
         const mode = article ? text(input, "mode") : null;
         const line = article ? text(input, "line") : null;
         if (mode && line) articleScenario(mode, line);
-        if (mode === "micro" ? !!title : !title) invalid("title", mode === "micro" ? "micro-has-no-title" : "required");
+        titleFor(mode, title);
         const id = randomUUID();
         return atomic(() => {
           createDocument(db, id);
@@ -416,43 +472,54 @@ export function openAuthorWorkspace(
             stage(current, action === "run.cancel" ? "cancelled" : "discarded");
             return { id: current.id };
           }
+          if (generation.pending(current.id)) {
+            refuse(action, "generation-needs-reconciliation");
+          }
           const usage = count(input, "tokens");
           if (current.state === "cancelled") {
-            if (!current.candidateId) {
+            if (current.candidateId === null && generation.history(current.id).length === 0) {
               db.prepare("UPDATE author_runs SET settled = settled + ?, candidate_id = '' WHERE id = ? AND candidate_id IS NULL;")
                 .run(usage, current.id);
               event(row.projectId, "run", "run.usage.late", { runId: current.id, usage });
             }
             return { id: current.id };
           }
-          if (current.state !== "running") refuse(action, "run-no-longer-running");
-          db.prepare("UPDATE author_runs SET settled = settled + ? WHERE id = ?;").run(usage, current.id);
-          if (usage + current.settled > current.reserved) {
-            event(row.projectId, "run", "run.attempt", { runId: current.id, usage, outcome: "budget.exhausted" });
-            stage(current, "failed");
-            return { id: current.id, state: "failed" };
-          }
-          const body = text(input, "body");
-          const id = randomUUID();
-          createCandidate(db, { candidateId: id, documentId: row.id, baseRevisionId: current.baseRevisionId, body });
-          if (input.qa && typeof input.qa === "object" && row.mode) {
-            const reported = input.qa as Input;
-            const qa = qaReport({ ...reported, score: reported.overall }, structuralGates(row.mode, row.title, body));
-            const rounds = count(input, "rounds");
-            if (rounds > QA_REFINEMENT_LIMIT) invalid("rounds", "qa-refinement-limit");
-            db.prepare("INSERT INTO author_candidate_qa (candidate_id, report, rounds) VALUES (?, ?, ?);")
-              .run(id, JSON.stringify(qa), rounds);
-          }
-          db.prepare("UPDATE author_runs SET candidate_id = ? WHERE id = ?;").run(id, current.id);
-          event(row.projectId, "run", "run.attempt", { runId: current.id, usage, outputRef: id, outcome: "completed" });
-          stage(current, "awaiting-author");
-          event(row.projectId, "candidate", "candidate.produced", { documentId: row.id, candidateId: id, runId: current.id });
-          return { id: current.id, candidateId: id };
+          return completeRun(current, row, input);
         });
       }
     }
     const row = document(text(input, "documentId"));
     switch (action) {
+      case "run.history":
+        return db.prepare(`
+          SELECT rowid AS cursor, id, state, reserved, settled FROM author_runs
+          WHERE document_id = ? AND rowid < ? ORDER BY rowid DESC LIMIT 25;
+        `).all(row.id, input.before === undefined ? Number.MAX_SAFE_INTEGER : count(input, "before"));
+      case "run.reconcile": {
+        return atomic(() => {
+          const id = text(input, "attemptId");
+          const detail = run(text(input, "runId"));
+          if (detail.documentId !== row.id) invalid("runId", "document-mismatch");
+          const tokens = count(input, "tokens");
+          if (!Number.isSafeInteger(detail.settled + tokens)) invalid("tokens", "usage-overflow");
+          if (!generation.reconcile(id, detail.id)) {
+            refuse(action, "no-uncertain-attempt");
+          }
+          db.prepare("UPDATE author_runs SET settled = settled + ? WHERE id = ?;").run(tokens, detail.id);
+          event(row.projectId, "run", "run.attempt", { runId: detail.id, attemptId: id, usage: tokens, outcome: "reconciled" });
+          return { id };
+        });
+      }
+      case "run.detail": {
+        const detail = run(text(input, "runId"));
+        if (detail.documentId !== row.id) invalid("runId", "document-mismatch");
+        const candidate = detail.candidateId ? db.prepare("SELECT body FROM candidates WHERE candidate_id = ?;").get(detail.candidateId) : null;
+        return { ...detail, candidate, attempts: generation.history(detail.id) };
+      }
+      case "evidence.detail": {
+        if (row.product !== "fanqie") invalid("documentId", "chapter-required");
+        return readAuthorModel(row.projectId, { model: "evidence", factId: text(input, "factId") });
+      }
       case "evidence.record":
         return atomic(() => {
           const current = document(row.id);
@@ -507,22 +574,43 @@ export function openAuthorWorkspace(
           savePlanning(row, value);
           return value;
         });
+      case "article.rename":
+        return atomic(() => {
+          const current = document(row.id);
+          if (!current.mode || current.mode === "micro" || locked(current)) refuse(action, "title-not-editable");
+          if (current.revisionId !== input.baseRevisionId) currentBody(current, input);
+          const title = titleFor(current.mode, text(input, "title").trim());
+          if (title === current.title) return { revisionId: current.revisionId };
+          db.prepare("UPDATE author_documents SET title = ? WHERE id = ?;").run(title, current.id);
+          event(row.projectId, "chapter", "document.renamed", { documentId: row.id, title });
+          return current.revisionId ? addRevision(current, current.body ?? "") : { revisionId: null };
+        });
       case "draft.save":
         return dispatch(action, row, input, () => addRevision(document(row.id), text(input, "body")));
       case "run.start":
         return dispatch(action, row, input, () => {
           const current = document(row.id);
           currentBody(current, input);
+          if (locked(current)) refuse(action, "revision-locked");
+          const existing = db.prepare(`
+            SELECT id FROM author_runs WHERE document_id = ? AND state IN ('running','paused','awaiting-author') LIMIT 1;
+          `).get(current.id) as { id: string } | undefined;
+          if (existing) refuse(action, "generation-in-progress");
+          if (generation.uncertainForDocument(current.id)) {
+            refuse(action, "generation-needs-reconciliation");
+          }
           const reserved = count(input, "tokenLimit");
           if (reserved === 0) invalid("tokenLimit", "positive-budget-required");
           const id = randomUUID();
           const plan = planning(row.id);
+          const point = input.point === undefined ? 1 : count(input, "point");
+          if (point === 0) invalid("point", "positive-integer-required");
           const know = plan && typeof plan.viewpoint === "string"
-            ? settingsAt(facts(row.projectId), chapterOrder(row.projectId), anchor(row.id, 1), plan.viewpoint)
+            ? settingsAt(facts(row.projectId), chapterOrder(row.projectId), anchor(row.id, point), plan.viewpoint)
             : [];
           const frozenInput = JSON.stringify({
             title: current.title, revisionId: current.revisionId, text: current.body, instruction: text(input, "instruction"),
-            mode: current.mode, planning: plan, knownFacts: know,
+            mode: current.mode, planning: plan, knownAt: { chapterId: row.id, point }, knownFacts: know,
             scenario: current.mode && current.line ? articleScenario(current.mode, current.line) : null,
           });
           db.prepare(`
@@ -595,6 +683,10 @@ export function openAuthorWorkspace(
           const current = document(row.id);
           if (current.state !== "待验收") refuse(action, "qa-pass-required");
           moveArticle(current, input.accept ? "已验收" : "验收退回");
+          if (!input.accept) event(row.projectId, "evidence", "article.rejected", {
+            documentId: row.id, revisionId: current.revisionId,
+            reason: typeof input.reason === "string" ? input.reason.trim() : "",
+          });
           if (input.accept) db.prepare("UPDATE author_documents SET final_revision_id = ? WHERE id = ?;")
             .run(current.revisionId, current.id);
           return { revisionId: current.revisionId };
@@ -645,44 +737,92 @@ export function openAuthorWorkspace(
     const sorted = order.map((id) => byId.get(id)).filter((entry) => entry !== undefined);
     const active = documentId && byId.has(documentId) ? document(documentId) : undefined;
     const runs = active ? db.prepare(`
-      SELECT r.id, r.state, r.base_revision_id AS baseRevisionId, r.frozen_input AS frozenInput,
-        r.reserved, r.settled, r.candidate_id AS candidateId, c.body AS candidateBody,
-        q.report AS candidateQa, q.rounds AS refinementRounds
-      FROM author_runs r LEFT JOIN candidates c ON c.candidate_id = r.candidate_id
+      SELECT r.id, r.state, r.base_revision_id AS baseRevisionId,
+        r.reserved, r.settled, r.candidate_id AS candidateId,
+        CASE WHEN r.state = 'awaiting-author' THEN c.body END AS candidateBody,
+        q.report AS candidateQa, q.rounds AS refinementRounds,
+        g.state AS generationState, g.error AS generationError
+      FROM author_runs r
+      LEFT JOIN candidates c ON c.candidate_id = r.candidate_id AND r.state = 'awaiting-author'
       LEFT JOIN author_candidate_qa q ON q.candidate_id = c.candidate_id
-      WHERE r.document_id = ? ORDER BY r.rowid DESC;
-    `).all(active.id) : [];
+      LEFT JOIN author_generation_attempts g ON g.rowid = (
+        SELECT MAX(a.rowid) FROM author_generation_attempts a WHERE a.run_id = r.id
+      )
+      WHERE r.document_id = ? AND (
+        r.rowid IN (SELECT rowid FROM author_runs WHERE document_id = ? ORDER BY rowid DESC LIMIT 2)
+        OR r.rowid IN (
+          SELECT MAX(rowid) FROM author_runs WHERE document_id = ?
+          AND state IN ('running', 'awaiting-author') GROUP BY state
+        )
+        OR g.state = 'uncertain'
+      )
+      ORDER BY r.rowid DESC;
+    `).all(active.id, active.id, active.id) : [];
     const approved = !!(active?.revisionId && recordedApproval(active, active.revisionId));
     const delivery = active?.state === "已交稿" ? formatDelivery(active.title, active.body ?? "") : null;
-    const settings = active?.product === "fanqie" ? db.prepare(`
-      SELECT id, decision, value FROM author_settings WHERE project_id = ? ORDER BY sequence DESC;
-    `).all(projectId).map((entry) => {
-      const row = entry as { id: string; decision: string; value: string };
-      return { id: row.id, decision: row.decision, fact: JSON.parse(row.value) as SettingFact };
-    }) : [];
+    const exportStatus = delivery ? db.prepare(`
+      SELECT export_state AS state, export_error AS error FROM deliveries WHERE article_id = ?;
+    `).get(active!.id) : null;
+    const latestReport = active?.revisionId ? db.prepare(`
+      SELECT payload FROM event_log WHERE project_id = ? AND kind IN ('article.qa','article.rejected')
+        AND json_extract(payload, '$.revisionId') = ? ORDER BY seq DESC LIMIT 1;
+    `).get(projectId, active.revisionId) as { payload: string } | undefined : undefined;
+    const settings = active?.product === "fanqie" ? settingsPage(projectId) : null;
     return {
-      projects, documents: sorted, active, runs, approved, delivery, settings,
+      projects, documents: sorted, active, runs, approved, delivery, exportStatus, settings: settings?.entries ?? [], settingsCursor: settings?.cursor, report: latestReport ? JSON.parse(latestReport.payload) : null,
       planning: active ? planning(active.id) : null,
       scenario: active?.mode && active.line ? articleScenario(active.mode, active.line) : null,
       asOfSeq: currentSeq(db, projectId),
     };
   }
 
-  function generationInput(input: Input) {
+  function generationInput(input: Input, claim = false) {
     const provider = text(input, "provider");
     const model = text(input, "model");
-    const current = run(text(input, "runId"));
-    if (current.state === "failed") atomic(() => stage(run(current.id), "running"));
-    else if (current.state !== "running") refuse("run.generate", "run-no-longer-running");
-    return {
-      id: current.id,
-      autoQa: input.autoQa === true && document(current.documentId).product === "toutiao",
-      frozenInput: current.frozenInput,
-      reserved: Math.max(0, current.reserved - current.settled),
-      provider, model,
-    };
+    return atomic(() => {
+      const current = run(text(input, "runId"));
+      const row = document(current.documentId);
+      if (locked(row) || current.baseRevisionId !== row.revisionId) refuse("run.generate", "revision-changed");
+      if (generation.pending(current.id)) refuse("run.generate", "generation-needs-reconciliation");
+      if (current.state === "failed") stage(current, "running");
+      else if (current.state !== "running") refuse("run.generate", "run-no-longer-running");
+      const attemptId = claim ? randomUUID() : null;
+      if (attemptId) {
+        generation.create(attemptId, current.id, provider, model);
+        event(row.projectId, "run", "generation.started", { runId: current.id, attemptId });
+      }
+      return {
+        id: current.id, attemptId,
+        autoQa: input.autoQa === true && row.product === "toutiao",
+        frozenInput: current.frozenInput,
+        reserved: Math.max(0, current.reserved - current.settled),
+        provider, model,
+      };
+    });
   }
 
+  function finishGeneration(id: string, result: Input | null, failure: string | null) {
+    return atomic(() => {
+      const attempt = generation.openAttempt(id);
+      if (!attempt) return;
+      const current = run(attempt.runId);
+      const row = document(current.documentId);
+      const receipts = JSON.parse(attempt.usage) as { usage: number[] }[];
+      const tokens = receipts.reduce((sum, entry) => entry.usage.reduce((total, value) => total + value, sum), 0);
+      const uncertain = attempt.state === "inflight";
+      generation.close(id, uncertain ? "uncertain" : result ? "completed" : "failed", failure);
+      if (current.state === "running" && result && !uncertain) {
+        return completeRun(current, row, { ...result, tokens });
+      }
+      db.prepare("UPDATE author_runs SET settled = settled + ? WHERE id = ?;").run(tokens, current.id);
+      event(row.projectId, "run", "run.attempt", { runId: current.id, attemptId: id, usage: tokens, outcome: uncertain ? "usage.uncertain" : failure ?? "cancelled" });
+      if (current.state === "running") stage(current, "failed");
+    });
+  }
+
+  function recoverGenerations() {
+    for (const { id } of generation.unfinished()) finishGeneration(id, null, "interrupted");
+  }
   function reserveRefinement(id: string): void {
     atomic(() => {
       const current = run(id);
@@ -715,5 +855,5 @@ export function openAuthorWorkspace(
     }
   }
 
-  return { snapshot, projectSeq: (id: string) => currentSeq(db, id), mutation, generationInput, reserveRefinement, failGeneration, resumeExports };
+  return { snapshot, projectSeq: (id: string) => currentSeq(db, id), mutation, generationInput, generationProgress: generation.progress, finishGeneration, recoverGenerations, reserveRefinement, failGeneration, resumeExports };
 }

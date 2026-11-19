@@ -31,7 +31,7 @@
         <details>
           <summary>新建稿件</summary>
           <form id="new-document">
-            <label>名称<input name="title" maxlength="120"></label>
+            <label>名称<input name="title" maxlength="120"></label><output id="new-title-count"></output>
             <div id="article-options" hidden>
               <label>体裁<select name="mode"><option value="short">短图文</option><option value="long">长图文</option><option value="micro">微头条</option></select></label>
               <label>内容线<select name="line"><option>资讯线</option><option>故事线</option></select></label>
@@ -51,6 +51,12 @@
         </div>
         <label for="body" class="visually-hidden">正文</label>
         <textarea id="body" spellcheck="false" placeholder="写下正文…" rows="16"></textarea>
+        <form id="rename" hidden>
+          <label>当前标题<input name="title" required></label>
+          <output id="title-count"></output>
+          <label>应用标题候选<select id="title-choices"><option value="">选择候选</option></select></label>
+          <button type="submit">保存标题</button>
+        </form>
         <div class="editor-footer"><span id="draft-status"></span><button id="save" class="primary">保存正文</button></div>
         <section id="comparison" hidden>
           <h2>候选稿</h2>
@@ -73,7 +79,7 @@
           </div>
         </div>
         <div id="toutiao-actions" hidden>
-          <form id="qa">
+          <p id="article-report" hidden></p><p id="export-status" hidden></p><form id="qa">
             <label>质检评分<input name="score" type="number" min="0" max="100" required></label>
             <label class="check"><input name="passed" type="checkbox">质检已通过</label>
             <label>未通过项<textarea name="fails" rows="2" placeholder="每行一项"></textarea></label>
@@ -123,19 +129,28 @@
             <button type="submit">查看人物所知</button>
           </form>
           <div id="known-settings"></div>
-          <div id="settings"></div>
+          <div id="settings"></div><button id="settings-more" hidden>更多设定</button>
+          <form id="record-evidence">
+            <label>设定编号<input name="factId" required></label>
+            <label>已保存正文中的原句<input name="quote" required></label>
+            <button>记录正文证据</button><button type="button" id="evidence-detail">查看最近证据</button><output id="evidence-result"></output>
+          </form>
           <div class="actions"><button id="move-up">上移本章</button><button id="move-down">下移本章</button></div>
         </details>
         <details id="run-details">
           <summary>候选写作</summary>
           <form id="start-run">
             <label>写作要求<textarea name="instruction" rows="3" required></textarea></label>
-            <label>令牌预算<input name="tokenLimit" type="number" min="1" value="8000" required></label>
+            <label>令牌预算<input name="tokenLimit" type="number" min="1" required></label>
+            <output id="budget-hint"></output>
+            <label id="run-point">知情查询段落<input name="point" type="number" min="1" value="1"></label>
             <button type="submit">创建写作任务</button>
           </form>
           <div id="run-content" hidden>
             <p id="run-status"></p>
-            <details><summary>已冻结的写作输入</summary><pre id="run-input"></pre></details>
+            <button type="button" id="run-detail">查看冻结输入和调用记录</button><pre id="run-input" hidden></pre>
+            <button type="button" id="run-history">查看任务历史</button><div id="run-history-list"></div>
+            <form id="reconcile" hidden><label>未记账的令牌数<input name="tokens" type="number" min="0" required></label><button>确认用量</button></form>
             <form id="generate-run">
               <label>DsH 模型提供方<input name="provider" value="deepseek-account" required></label>
               <label>模型<input name="model" value="deepseek-flash" required></label>
