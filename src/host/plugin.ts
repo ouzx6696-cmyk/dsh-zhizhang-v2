@@ -2,8 +2,9 @@ import { existsSync, linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSyn
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ContractError } from "../contracts/index.ts";
+import { CLIENT_ENTRY_CSS, CLIENT_ENTRY_HTML, CLIENT_JS_MODULES } from "../client/manifest.ts";
 import { createStore, openStore } from "../storage/index.ts";
-import { generateCandidate, type LlmTransport } from "./writing.ts";
+import { executeGenerationWithRunner, type LlmTransport } from "./writing.ts";
 import { openAuthorWorkspace } from "./workspace.ts";
 
 export interface DsHPluginConfig {
@@ -30,22 +31,22 @@ export interface DsHPluginContext {
   effect(setup: () => () => Promise<void> | void, name: string): void;
 }
 
+export interface WorkbenchPluginDeps {
+  readonly readAsset?: (kind: "html" | "css" | "js", path: string) => Uint8Array;
+}
+
 export const inject = ["connection", "llm"] as const;
 
 const BASE_PATH = "/api/zhizhang";
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 const CSP_HEADER = "default-src 'self'; frame-ancestors 'self'; base-uri 'none'; object-src 'none'";
 
-const CLIENT_MODULE_PATHS = [
-  "workbench/main.js",
-  "workbench/types.js",
-  "workbench/diff.js",
-  "workbench/api.js",
-  "workbench/draft-vault.js",
-  "workbench/modal.js",
-  "workbench/views/diff-view.js",
-  "workbench/views/run-inspector.js",
-] as const;
+function defaultReadAsset(kind: "html" | "css" | "js", path: string): Uint8Array {
+  const url = kind === "js"
+    ? new URL(`../client/${path}`, import.meta.url)
+    : new URL(`../../src/client/${path}`, import.meta.url);
+  return readFileSync(url);
+}
 
 function json(value: unknown, status = 200): Response {
   return Response.json(value, { status, headers: { "Cache-Control": "no-store" } });
@@ -109,10 +110,15 @@ function writeDelivery(directory: string, id: string, contents: string): void {
   }
 }
 
-export function apply(ctx: DsHPluginContext, config: DsHPluginConfig): void {
+export function applyWorkbench(
+  ctx: DsHPluginContext,
+  config: DsHPluginConfig,
+  deps?: WorkbenchPluginDeps,
+): void {
   if (typeof config.dataDirectory !== "string" || !config.dataDirectory) {
     throw new Error("织章缺少 dataDirectory");
   }
+  const readAsset = deps?.readAsset ?? defaultReadAsset;
   ctx.effect(() => {
     mkdirSync(config.dataDirectory, { recursive: true, mode: 0o700 });
     const exportsDir = join(config.dataDirectory, "deliveries");
@@ -126,11 +132,12 @@ export function apply(ctx: DsHPluginContext, config: DsHPluginConfig): void {
     let workspaceOnClose: () => void = () => {};
 
     try {
+      db.exec("PRAGMA journal_mode = WAL;");
       db.exec("PRAGMA busy_timeout = 5000;");
       const workspace = openAuthorWorkspace(db, (id, contents) => writeDelivery(exportsDir, id, contents));
       workspaceOnClose = workspace.recoverGenerations;
       workspace.recoverGenerations();
-      workspace.resumeExports();
+      workspace.recoverStartup();
 
       const route = (
         path: string,
@@ -147,13 +154,13 @@ export function apply(ctx: DsHPluginContext, config: DsHPluginConfig): void {
         );
       };
 
-      const htmlBytes = readFileSync(new URL("../../src/client/workbench.html", import.meta.url));
-      const cssBytes = readFileSync(new URL("../../src/client/workbench.css", import.meta.url));
+      const htmlBytes = readAsset("html", CLIENT_ENTRY_HTML);
+      const cssBytes = readAsset("css", CLIENT_ENTRY_CSS);
       route("/workbench", ["GET"], async () => staticResponse(htmlBytes, "text/html"));
       route("/workbench.css", ["GET"], async () => staticResponse(cssBytes, "text/css"));
 
-      for (const modulePath of CLIENT_MODULE_PATHS) {
-        const bytes = readFileSync(new URL(`../client/${modulePath}`, import.meta.url));
+      for (const modulePath of CLIENT_JS_MODULES) {
+        const bytes = readAsset("js", modulePath);
         route(`/${modulePath}`, ["GET"], async () => staticResponse(bytes, "text/javascript"));
       }
 
@@ -183,7 +190,7 @@ export function apply(ctx: DsHPluginContext, config: DsHPluginConfig): void {
             const run = workspace.generationInput(input, true);
             const attemptId = run.attemptId!;
             const controller = new AbortController();
-            const task = generateCandidate(
+            const task = executeGenerationWithRunner(
               ctx.llm,
               run,
               controller.signal,
@@ -199,6 +206,7 @@ export function apply(ctx: DsHPluginContext, config: DsHPluginConfig): void {
                   if (!closing) workspace.recordGenerationReceipt(attemptId, callId, usage);
                 },
               },
+              workspace.generationRunner(run.product),
             )
               .then((result) => {
                 if (!closing) workspace.finishGeneration(attemptId, { ...result }, null);
@@ -256,4 +264,8 @@ export function apply(ctx: DsHPluginContext, config: DsHPluginConfig): void {
       }
     };
   }, "zhizhang: author workbench");
+}
+
+export function apply(ctx: DsHPluginContext, config: DsHPluginConfig): void {
+  applyWorkbench(ctx, config);
 }

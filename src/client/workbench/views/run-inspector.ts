@@ -1,4 +1,4 @@
-import type { RunDetailDto, SettingFactDto } from "../types.ts";
+import type { RunDetailDto, SettingFactDto } from "../../../contracts/workspace-dto.ts";
 
 interface ParsedFrozenInput {
   readonly title?: string;

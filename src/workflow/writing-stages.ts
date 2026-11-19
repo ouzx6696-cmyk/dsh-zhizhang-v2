@@ -9,6 +9,18 @@ export const WRITING_STAGE_IDS = {
 
 export type WritingPhase = keyof typeof WRITING_STAGE_IDS;
 
+export interface SingleShotCallRequest {
+  readonly phase: WritingPhase;
+  readonly system: string;
+  readonly prompt: string;
+  readonly maxOutputTokens?: number;
+}
+
+export interface SingleShotLlmCaller {
+  complete(request: SingleShotCallRequest): Promise<string>;
+  usedTokens(): number;
+}
+
 export const MAX_CANDIDATE_LENGTH = 1_000_000;
 
 function isValidCandidateText(output: unknown): boolean {

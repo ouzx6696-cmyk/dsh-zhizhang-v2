@@ -1,6 +1,4 @@
 import { ContractError } from "../contracts/errors.ts";
-import { settingsAt, type SettingFact } from "../domain/fanqie/index.ts";
-import { anchor } from "../domain/shared/index.ts";
 import {
   createProjectionStore,
   currentSeq,
@@ -13,11 +11,18 @@ import {
 import { READ_MODELS, readKey, type ReadDefinition } from "./readmodels.ts";
 import { serveReadFromLog } from "./readserve.ts";
 
-type Fields = Record<string, unknown>;
+export type Fields = Record<string, unknown>;
 type View = Record<string, unknown>;
-type Event = Fields & { kind: string };
+export type AuthorReadEvent = Fields & { kind: string };
 type Chapter = { chapterId: string; title: string; businessState: string };
-type Reducer<S> = (state: S, event: Event) => S;
+type Reducer<S> = (state: S, event: AuthorReadEvent) => S;
+
+export type AuthorReadUnitFactory = (
+  definition: ReadDefinition,
+  projectId: string,
+  identity: readonly string[],
+  point: number,
+) => ProjectionUnit<unknown>;
 
 function required(input: Fields, key: string): string {
   const value = input[key];
@@ -27,7 +32,7 @@ function required(input: Fields, key: string): string {
   return value;
 }
 
-function project<S>(
+export function projectReadUnit<S>(
   definition: ReadDefinition,
   init: () => S,
   apply: Reducer<S>,
@@ -36,13 +41,13 @@ function project<S>(
   return {
     version: definition.version,
     init,
-    apply: (state, event) => apply(state as S, event as Event),
+    apply: (state, event) => apply(state as S, event as AuthorReadEvent),
     view: (state) => view(state as S),
   };
 }
 
 function navigation(definition: ReadDefinition, projectId: string) {
-  return project(
+  return projectReadUnit(
     definition,
     () => ({ title: "", chapters: [] as Chapter[] }),
     (state, event) => {
@@ -55,7 +60,7 @@ function navigation(definition: ReadDefinition, projectId: string) {
             {
               chapterId: event.documentId as string,
               title: event.title as string,
-              businessState: (event.state as string | undefined) ?? (event.mode ? "初稿待改" : "planned"),
+              businessState: typeof event.state === "string" ? event.state : "planned",
             },
           ],
         };
@@ -99,7 +104,7 @@ function navigation(definition: ReadDefinition, projectId: string) {
 }
 
 function revisions(definition: ReadDefinition, documentId: string) {
-  return project(
+  return projectReadUnit(
     definition,
     () => ({
       currentRevisionId: "",
@@ -132,43 +137,8 @@ function revisions(definition: ReadDefinition, documentId: string) {
   );
 }
 
-function settings(definition: ReadDefinition, chapterId: string, characterId: string, point: number) {
-  return project(
-    definition,
-    () => ({ order: [] as string[], facts: [] as SettingFact[] }),
-    (state, event) => {
-      if (event.kind === "document.created") return { ...state, order: [...state.order, event.documentId as string] };
-      if (event.kind === "chapter.reordered") return { ...state, order: event.chapterIds as string[] };
-      if (event.kind === "setting.decided" && event.decision === "approved" && event.fact) {
-        return { ...state, facts: [...state.facts, event.fact as SettingFact] };
-      }
-      return state;
-    },
-    ({ order, facts }) => ({
-      query: { asOfChapter: chapterId, characterId },
-      entries: settingsAt(facts, order, anchor(chapterId, point), characterId).map((fact) => ({
-        factId: fact.id,
-        note: fact.note,
-        effectiveFrom: fact.effectiveFrom.chapterId,
-      })),
-    }),
-  );
-}
-
-function evidence(definition: ReadDefinition, factId: string) {
-  return project(
-    definition,
-    () => ({ record: null as View | null }),
-    (state, event) => {
-      if (event.kind !== "evidence.recorded" || event.factId !== factId) return state;
-      return { record: event.record as View };
-    },
-    ({ record }) => record ?? {},
-  );
-}
-
 function run(definition: ReadDefinition, runId: string) {
-  return project(
+  return projectReadUnit(
     definition,
     () => ({
       state: "running",
@@ -217,52 +187,29 @@ function run(definition: ReadDefinition, runId: string) {
   );
 }
 
-function approvals(definition: ReadDefinition) {
-  return project(
-    definition,
-    () => ({ entries: [] as View[] }),
-    (state, event) => {
-      if (event.kind !== "delivery.approved" || typeof event.approvalId !== "string") return state;
-      return {
-        entries: [
-          ...state.entries,
-          {
-            approvalId: event.approvalId,
-            actor: "author",
-            action: "article.deliver",
-            target: event.documentId,
-            targetVersion: event.versionNumber,
-            decision: "approved",
-            at: event.at,
-          },
-        ],
-      };
-    },
-    (state) => state,
-  );
-}
-
 function buildUnit(
   name: string,
   definition: ReadDefinition,
   projectId: string,
   identity: readonly string[],
   point: number,
+  extraFactories: Readonly<Record<string, AuthorReadUnitFactory>>,
 ): ProjectionUnit<unknown> {
-  const [first, second] = identity;
+  const [first] = identity;
   switch (name) {
     case "navigation":
       return navigation(definition, projectId);
     case "revision-candidate":
       return revisions(definition, first);
-    case "settings-view":
-      return settings(definition, first, second, point);
-    case "evidence":
-      return evidence(definition, first);
     case "run":
       return run(definition, first);
-    default:
-      return approvals(definition);
+    default: {
+      const factory = extraFactories[name];
+      if (!factory) {
+        throw new ContractError("input.invalid", { field: "model", reason: "unknown-read-model" });
+      }
+      return factory(definition, projectId, identity, point);
+    }
   }
 }
 
@@ -282,20 +229,24 @@ function loadDurableCheckpoint(
   return [{ key: unitKey, ver: row.version, seq: row.seq, val: JSON.parse(row.state) as unknown }];
 }
 
-function saveDurableCheckpoint(
+function saveDurableCheckpointRow(
   db: SqliteDatabase,
   projectId: string,
   cacheKey: string,
-  store: ProjectionStore,
+  row: CheckpointRow,
 ): void {
-  const [row] = store.checkpoint();
-  if (!row) return;
   db.prepare(`
     INSERT INTO author_read_checkpoints (project_id, cache_key, version, seq, state)
     VALUES (?, ?, ?, ?, ?)
     ON CONFLICT (project_id, cache_key)
-    DO UPDATE SET version = excluded.version, seq = excluded.seq, state = excluded.state;
+    DO UPDATE SET version = excluded.version, seq = excluded.seq, state = excluded.state
+    WHERE excluded.seq >= author_read_checkpoints.seq OR excluded.version != author_read_checkpoints.version;
   `).run(projectId, cacheKey, row.ver, row.seq, JSON.stringify(row.val));
+}
+
+export interface ReadTransactionRunner {
+  readonly read: <T>(query: () => T) => T;
+  readonly atomic: <T>(apply: () => T) => T;
 }
 
 /**
@@ -303,7 +254,11 @@ function saveDurableCheckpoint(
  * (`author_read_checkpoints`) and an in-memory LRU cache. Cold opens restore
  * from the checkpoint and replay only the event-log tail via `ProjectionStore`.
  */
-export function createAuthorModelReader(db: SqliteDatabase) {
+export function createAuthorModelReader(
+  db: SqliteDatabase,
+  tx: ReadTransactionRunner = { read: (fn) => fn(), atomic: (fn) => fn() },
+  extraFactories: Readonly<Record<string, AuthorReadUnitFactory>> = {},
+) {
   const cache = new Map<string, { store: ProjectionStore; unit: ProjectionUnit<unknown> }>();
 
   return function readAuthorModel(projectId: string, input: Fields) {
@@ -319,39 +274,52 @@ export function createAuthorModelReader(db: SqliteDatabase) {
     }
     const cacheKey = JSON.stringify([projectId, name, ...identity, point]);
     const unitKey = readKey(definition.id, definition.version);
-    const logHead = currentSeq(db, projectId);
-    let entry = cache.get(cacheKey);
-    let hydratedFromCheckpoint = false;
 
-    if (!entry || entry.store.seqOf() > logHead) {
-      const unit = buildUnit(name, definition, projectId, identity, point);
-      const store = createProjectionStore(db, projectId);
-      store.register(unitKey, unit);
+    const computed = tx.read(() => {
+      const logHead = currentSeq(db, projectId);
+      let entry = cache.get(cacheKey);
+      let hydratedFromCheckpoint = false;
 
-      const saved = loadDurableCheckpoint(db, projectId, cacheKey, unitKey);
-      if (saved.length > 0 && saved[0].seq <= logHead) {
-        const floor = store.restoreFloor(saved);
-        if (floor !== undefined && floor >= 0) {
-          const tail = readTail(db, projectId, floor);
-          if (tail.events.length > 0 || saved[0].seq === 0) {
-            store.restore(saved, tail.events, tail.baseSeq);
-            hydratedFromCheckpoint = true;
+      if (!entry || entry.store.seqOf() > logHead) {
+        const unit = buildUnit(name, definition, projectId, identity, point, extraFactories);
+        const store = createProjectionStore(db, projectId);
+        store.register(unitKey, unit);
+
+        const saved = loadDurableCheckpoint(db, projectId, cacheKey, unitKey);
+        if (saved.length > 0 && saved[0].seq <= logHead) {
+          const floor = store.restoreFloor(saved);
+          if (floor !== undefined && floor >= 0) {
+            const tail = readTail(db, projectId, floor);
+            if (tail.events.length > 0 || saved[0].seq === 0) {
+              store.restore(saved, tail.events, tail.baseSeq);
+              hydratedFromCheckpoint = true;
+            }
           }
         }
+        entry = { store, unit };
       }
-      entry = { store, unit };
+
+      const { store, unit } = entry;
+      const result = serveReadFromLog(db, projectId, store, { definition, unit }, { afterSeq: store.seqOf() });
+      const checkpointToPersist = result.folded > 0 || hydratedFromCheckpoint
+        ? store.checkpoint()[0]
+        : undefined;
+
+      cache.delete(cacheKey);
+      cache.set(cacheKey, entry);
+      if (cache.size > 32) cache.delete(cache.keys().next().value!);
+
+      return {
+        result: structuredClone(result),
+        checkpointToPersist,
+      };
+    });
+
+    if (computed.checkpointToPersist) {
+      const row = computed.checkpointToPersist;
+      tx.atomic(() => saveDurableCheckpointRow(db, projectId, cacheKey, row));
     }
 
-    const { store, unit } = entry;
-    const result = serveReadFromLog(db, projectId, store, { definition, unit }, { afterSeq: store.seqOf() });
-
-    if (result.folded > 0 || hydratedFromCheckpoint) {
-      saveDurableCheckpoint(db, projectId, cacheKey, store);
-    }
-
-    cache.delete(cacheKey);
-    cache.set(cacheKey, entry);
-    if (cache.size > 32) cache.delete(cache.keys().next().value!);
-    return structuredClone(result);
+    return computed.result;
   };
 }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { generateCandidate } from "../src/host/writing.ts";
+import { createToutiaoGenerationRunner } from "../src/application/products/toutiao.ts";
+import { executeGenerationWithRunner } from "../src/host/writing.ts";
 
 const run = { provider: "fixture", model: "test", reserved: 24000, autoQa: true, frozenInput: JSON.stringify({
   title: "长文", mode: "long", scenario: {}, instruction: "修订", text: "稿".repeat(3000),
@@ -33,7 +34,8 @@ const ledger = {
   receive(id, usage) { receipts.get(id).usage = usage; },
 };
 const signal = new AbortController().signal;
-const result = await generateCandidate(llm, run, signal, () => { refinements++; }, ledger);
+const runner = createToutiaoGenerationRunner();
+const result = await executeGenerationWithRunner(llm, run, signal, () => { refinements++; }, ledger, runner);
 assert.equal(result.body, body);
 assert.equal(result.qa.overall, 84);
 assert.equal(refinements, 1);
@@ -41,12 +43,12 @@ assert.equal(result.tokens, 5760);
 assert.deepEqual([...receipts.values()].map(({ phase }) => phase), ["write", "qa", "refine", "qa"]);
 assert.deepEqual(receipts.get(1).usage, [1000, 400, 30, 10]);
 
-await assert.rejects(generateCandidate(llm, { ...run, reserved: 100 }, signal, () => {}, ledger), { code: "budget.exhausted" });
+await assert.rejects(executeGenerationWithRunner(llm, { ...run, reserved: 100 }, signal, () => {}, ledger, runner), { code: "budget.exhausted" });
 assert.equal(calls, 4);
 const missingUsage = {
   async prepareCall() {
     return { config: {}, async *stream() { yield { type: "finish", reason: { kind: "stop" } }; } };
   },
 };
-await assert.rejects(generateCandidate(missingUsage, run, signal, () => {}, ledger), { code: "usage.uncertain" });
+await assert.rejects(executeGenerationWithRunner(missingUsage, run, signal, () => {}, ledger, runner), { code: "usage.uncertain" });
 console.log("通过 3000 字长稿与 QA 回改、四类用量、预算不足和缺失回执验证");

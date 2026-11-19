@@ -13,8 +13,8 @@
     "rewriteRelativeImportExtensions": true,
     "noEmit": false,
     "noEmitOnError": true,
-    "rootDir": "src/client",
-    "outDir": "dist/client",
+    "rootDir": "src",
+    "outDir": "dist",
     "types": []
   },
   "include": ["src/client/slot.ts", "src/client/workbench/**/*.ts"],

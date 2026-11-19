@@ -9,75 +9,66 @@ import {
   type Input,
   type Product,
 } from "./context.ts";
-import { createFanqieService } from "./fanqie-service.ts";
+import { createProductLineRegistry } from "./product-line.ts";
+import { createFanqieModule } from "./products/fanqie.ts";
+import { createToutiaoModule } from "./products/toutiao.ts";
 import { createRunService } from "./run-service.ts";
 import { createSnapshotService } from "./snapshot-service.ts";
-import { createToutiaoService } from "./toutiao-service.ts";
 
 /**
  * Composition root for the Author Workspace application layer.
- * Routes author actions to isolated Fanqie, Toutiao, Run, and Snapshot services.
+ * Registers isolated Fanqie and Toutiao product-line modules on top of the
+ * shared workspace, run, snapshot, and event-projection platform.
  */
 export function openAuthorWorkspace(
   db: SqliteDatabase,
-  writeDelivery: (documentId: string, text: string) => void,
+  writeDelivery: (documentId: string, text: string) => void = () => {},
 ) {
-  const ctx = createWorkspaceContext(db);
-  const fanqie = createFanqieService(ctx);
-  const toutiao = createToutiaoService(ctx, writeDelivery);
+  const fanqieModule = createFanqieModule();
+  const toutiaoModule = createToutiaoModule(writeDelivery);
+  const registry = createProductLineRegistry([fanqieModule, toutiaoModule]);
+  const ctx = createWorkspaceContext(db, registry);
 
   function saveDraftForRow(row: DocumentRow, body: string): { revisionId: string } {
-    return ctx.appendDraftRevision(
-      row,
-      body,
-      row.product === "fanqie" ? fanqie.onDraftSaved : toutiao.onDraftSaved,
-    );
+    const mod = registry.require(row.product);
+    return ctx.appendDraftRevision(row, body, (saved) => mod.onDraftSaved(ctx, saved));
   }
 
-  const runs = createRunService(ctx, fanqie, toutiao, saveDraftForRow);
-  const snapshots = createSnapshotService(ctx, fanqie, toutiao);
+  const runs = createRunService(ctx, registry, saveDraftForRow);
+  const snapshots = createSnapshotService(ctx, registry);
 
   function mutation(action: string, input: Input) {
     switch (action) {
       case "read.model": {
         const projectId = text(input, "projectId");
         requiredRow(db.prepare("SELECT id FROM author_projects WHERE id = ?;").get(projectId), "project", projectId);
-        return ctx.read(() => ctx.readAuthorModel(projectId, input));
+        return ctx.readAuthorModel(projectId, input);
       }
-      case "setting.propose":
-      case "setting.decide":
-      case "settings.history":
-      case "settings.read":
-      case "reorder.impact":
-      case "reorder.commit":
-        return fanqie.handleContinuity(action, input);
       case "project.create": {
         const name = text(input, "name").trim();
         const product = input.product;
-        if (product !== "fanqie" && product !== "toutiao") invalid("product", "unknown-product");
+        const mod = typeof product === "string" ? registry.get(product) : undefined;
+        if (!mod) invalid("product", "unknown-product");
         const id = randomUUID();
         return ctx.atomic(() => {
           db.prepare("INSERT INTO author_projects (id, name, product, created_at) VALUES (?, ?, ?, ?);")
-            .run(id, name, product, Date.now());
-          ctx.event(id, "chapter", "project.created", { name, product });
+            .run(id, name, mod.id, Date.now());
+          ctx.event(id, "chapter", "project.created", { name, product: mod.id });
           return { id };
         });
       }
       case "document.create": {
         const projectId = text(input, "projectId");
-        const title = typeof input.title === "string" ? input.title.trim() : "";
+        const rawTitle = typeof input.title === "string" ? input.title.trim() : "";
         const project = requiredRow<{ product: Product }>(
           db.prepare("SELECT product FROM author_projects WHERE id = ?;").get(projectId),
           "project",
           projectId,
         );
-        const isArticle = project.product === "toutiao";
-        const mode = isArticle ? text(input, "mode") : null;
-        const line = isArticle ? text(input, "line") : null;
-        if (mode && line) toutiao.resolveScenario(mode, line);
-        toutiao.validateArticleTitle(mode, title);
+        const mod = registry.require(project.product);
+        const { title, mode, line } = mod.validateCreate(input, rawTitle);
         const id = randomUUID();
-        const initialState = isArticle ? "初稿待改" : "planned";
+        const initialState = mod.initialState;
         return ctx.atomic(() => {
           createDocument(db, id);
           db.prepare(`
@@ -100,34 +91,19 @@ export function openAuthorWorkspace(
         return runs.handleRunLifecycle(action, input);
     }
 
+    const productAction = registry.resolveAction(action);
+    if (productAction && productAction.scope === "project") {
+      return productAction.handler(ctx, input);
+    }
+
     const row = ctx.document(text(input, "documentId"));
+    if (productAction && productAction.scope === "document") {
+      return productAction.handler(ctx, input, row);
+    }
+
     switch (action) {
       case "draft.save":
         return ctx.dispatch(action, row, input, () => saveDraftForRow(ctx.document(row.id), text(input, "body")));
-      case "chapter.outline":
-        return fanqie.saveOutline(row, input);
-      case "chapter.review":
-        return fanqie.reviewChapter(row, input);
-      case "draft.finalize":
-        return fanqie.finalizeChapter(row, input);
-      case "evidence.record":
-        return fanqie.recordEvidence(row, input);
-      case "evidence.detail":
-        return fanqie.evidenceDetail(row, input);
-      case "article.plan":
-        return toutiao.planArticle(row, input);
-      case "article.rename":
-        return toutiao.renameArticle(row, input);
-      case "article.qa":
-        return toutiao.recordQa(row, input);
-      case "article.refine":
-        return toutiao.refineDraft(row, input);
-      case "article.accept":
-        return toutiao.acceptArticle(row, input);
-      case "approval.decide":
-        return toutiao.decideApproval(row, input);
-      case "article.deliver":
-        return toutiao.deliverArticle(row, input);
       case "run.preview":
         return runs.previewBudget(row, input);
       case "run.start":
@@ -145,18 +121,26 @@ export function openAuthorWorkspace(
     }
   }
 
+  function recoverStartup(): void {
+    for (const mod of registry.all()) {
+      mod.onStartupRecover?.(ctx);
+    }
+  }
+
   return {
     snapshot: snapshots.snapshot,
     readState: snapshots.readState,
     projectSeq: snapshots.projectSeq,
     mutation,
     generationInput: runs.generationInput,
+    generationRunner: runs.generationRunner,
     beginGenerationCall: runs.beginGenerationCall,
     recordGenerationReceipt: runs.recordGenerationReceipt,
     finishGeneration: runs.finishGeneration,
     recoverGenerations: runs.recoverGenerations,
     reserveRefinement: runs.reserveRefinement,
     failGeneration: runs.failGeneration,
-    resumeExports: toutiao.resumeExports,
+    recoverStartup,
+    resumeExports: () => toutiaoModule.onStartupRecover?.(ctx),
   };
 }

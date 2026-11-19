@@ -1,5 +1,5 @@
 import { computeParagraphDiff, type ParagraphDiffRow } from "../diff.ts";
-import type { CandidateQaReport } from "../types.ts";
+import type { CandidateQaReport } from "../../../contracts/workspace-dto.ts";
 
 export type DiffDisplayMode = "split" | "inline" | "raw";
 

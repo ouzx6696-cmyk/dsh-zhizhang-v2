@@ -1,11 +1,13 @@
-// Shared browser-safe workspace DTOs and constants.
+// Browser-safe shared DTOs and state types.
 //
-// Imported by the application layer, host HTTP adapter, and browser client so
-// state shapes, action names, locked-state sets, and budget constants have a
-// single strongly typed source of truth without pulling any Node built-ins into
-// browser bundles.
+// Strictly type-only (`export type` / `export interface`): compiled away by
+// TypeScript (`verbatimModuleSyntax`), so browser bundles import zero Node or
+// cross-directory runtime modules while sharing one source of truth with the
+// application and host layers.
 
 export type Product = "fanqie" | "toutiao";
+export type ProductKind = Product;
+
 export type ArticleModeId = "long" | "short" | "micro";
 export type ContentLineId = "资讯线" | "故事线";
 
@@ -34,61 +36,29 @@ export type GenerationAttemptState =
 export type SettingDecision = "pending" | "approved" | "rejected";
 export type ExportStatusWord = "pending" | "exported" | "failed";
 
-export const WORKSPACE_TITLE_MAX = 34;
-export const WORKSPACE_QA_PASS_SCORE = 84;
-export const WORKSPACE_EDITORIAL_REJECTION_LIMIT = 2;
-export const WORKSPACE_QA_REFINEMENT_LIMIT = 2;
-export const WORKSPACE_LOCKED_STATES: readonly DocumentStatusWord[] = ["final", "已验收", "已交稿"];
-
-export function isLockedDocumentState(state: string | null | undefined): boolean {
-  return typeof state === "string" && (WORKSPACE_LOCKED_STATES as readonly string[]).includes(state);
-}
-
-export const FANQIE_STAGE_LABELS: Readonly<Record<ChapterStatusWord, string>> = {
-  planned: "待写",
-  drafting: "写作中",
-  drafted: "已有草稿",
-  reviewed: "已审稿",
-  final: "已定稿",
-};
-
-export const RUN_STATE_LABELS: Readonly<Record<RunStatusWord, string>> = {
-  running: "等待候选稿",
-  paused: "已暂停",
-  "awaiting-author": "等待作者决定",
-  applied: "已采纳",
-  discarded: "已舍弃",
-  failed: "任务失败",
-  cancelled: "已取消",
-};
-
-export const SETTING_DECISION_LABELS: Readonly<Record<SettingDecision, string>> = {
-  approved: "已确认",
-  rejected: "已拒绝",
-  pending: "待确认",
-};
-
-export interface NarrativeAnchorDto {
+export interface AnchorPoint {
   readonly chapterId: string;
   readonly point: number;
 }
+export type NarrativeAnchorDto = AnchorPoint;
 
 export interface SettingFactDto {
   readonly id: string;
   readonly note: string;
-  readonly knownFrom: Readonly<Record<string, NarrativeAnchorDto>>;
+  readonly source: string;
   readonly kind: "fact" | "agreement";
   readonly locked: boolean;
-  readonly source: string;
-  readonly effectiveFrom: NarrativeAnchorDto;
-  readonly effectiveTo?: NarrativeAnchorDto;
+  readonly effectiveFrom: AnchorPoint;
+  readonly effectiveTo?: AnchorPoint;
+  readonly knownFrom: Readonly<Record<string, AnchorPoint>>;
 }
 
-export interface SettingProposalEntry {
+export interface SettingEntryDto {
   readonly id: string;
   readonly decision: SettingDecision;
   readonly fact: SettingFactDto;
 }
+export type SettingProposalEntry = SettingEntryDto;
 
 export interface ProjectSummary {
   readonly id: string;
@@ -96,18 +66,19 @@ export interface ProjectSummary {
   readonly product: Product;
 }
 
-export interface DocumentListItem {
+export interface DocumentSummary {
   readonly id: string;
   readonly title: string;
 }
+export type DocumentListItem = DocumentSummary;
 
-export interface ActiveDocumentView {
+export interface ActiveDocument {
   readonly id: string;
   readonly projectId: string;
   readonly title: string;
   readonly product: Product;
-  readonly state: DocumentStatusWord;
-  readonly mode: ArticleModeId | null;
+  readonly state: string;
+  readonly mode: string | null;
   readonly line: string | null;
   readonly revisionId: string | null;
   readonly finalRevisionId: string | null;
@@ -115,10 +86,18 @@ export interface ActiveDocumentView {
   readonly editorialRejections: number;
   readonly qaRounds: number;
 }
+export type ActiveDocumentView = ActiveDocument;
 
-export interface RunSummaryView {
+export interface CandidateQaReport {
+  readonly overall: number;
+  readonly passed: boolean;
+  readonly fails: readonly string[];
+  readonly hardGates: readonly string[];
+}
+
+export interface RunSummary {
   readonly id: string;
-  readonly state: RunStatusWord;
+  readonly state: string;
   readonly baseRevisionId: string;
   readonly reserved: number;
   readonly settled: number;
@@ -126,29 +105,31 @@ export interface RunSummaryView {
   readonly candidateBody: string | null;
   readonly candidateQa: string | null;
   readonly refinementRounds: number | null;
-  readonly generationState: GenerationAttemptState | null;
+  readonly generationState: string | null;
   readonly generationError: string | null;
 }
+export type RunSummaryView = RunSummary;
 
 export interface RunHistoryItem {
   readonly cursor: number;
   readonly id: string;
-  readonly state: RunStatusWord;
+  readonly state: string;
   readonly reserved: number;
   readonly settled: number;
 }
 
-export interface GenerationAttemptRecord {
+export interface GenerationAttemptDto {
   readonly id: string;
   readonly provider: string;
   readonly model: string;
-  readonly state: GenerationAttemptState;
+  readonly state: string;
   readonly stage: string | null;
   readonly usage: string;
   readonly error: string | null;
 }
+export type GenerationAttemptRecord = GenerationAttemptDto;
 
-export interface GenerationCallRecord {
+export interface GenerationCallDto {
   readonly id: string;
   readonly attemptId: string;
   readonly phase: string;
@@ -156,55 +137,61 @@ export interface GenerationCallRecord {
   readonly maxOutput: number;
   readonly usage: string | null;
 }
+export type GenerationCallRecord = GenerationCallDto;
 
-export interface RunDetailView {
+export interface RunDetailDto {
   readonly id: string;
   readonly documentId: string;
-  readonly state: RunStatusWord;
+  readonly state: string;
   readonly baseRevisionId: string;
   readonly frozenInput: string;
   readonly reserved: number;
   readonly settled: number;
   readonly candidateId: string | null;
   readonly candidate: { readonly body: string } | null;
-  readonly attempts: readonly GenerationAttemptRecord[];
-  readonly calls: readonly GenerationCallRecord[];
+  readonly attempts: readonly GenerationAttemptDto[];
+  readonly calls: readonly GenerationCallDto[];
 }
+export type RunDetailView = RunDetailDto;
 
-export interface ArticleScenarioView {
-  readonly label: string;
-  readonly length: readonly [number, number];
-  readonly main: readonly [number, number] | null;
-  readonly extension: readonly [number, number] | null;
-  readonly drivers: readonly string[];
-  readonly openings: readonly string[];
-  readonly endings: readonly string[];
-  readonly extensions: readonly string[];
-  readonly hasTitle: boolean;
+export interface ExportStatusDto {
+  readonly state: ExportStatusWord;
+  readonly error: string | null;
+  readonly hash: string | null;
+  readonly revisionId: string;
 }
+export type ExportStatusView = ExportStatusDto;
 
-export interface ArticleReportView {
+export interface ArticleReportDto {
   readonly overall?: number;
   readonly passed?: boolean;
   readonly fails?: readonly string[];
   readonly hardGates?: readonly string[];
   readonly reason?: string;
 }
+export type ArticleReportView = ArticleReportDto;
 
-export interface ExportStatusView {
-  readonly state: ExportStatusWord;
-  readonly error: string | null;
-  readonly hash: string | null;
-  readonly revisionId: string;
+export interface ArticleScenarioDto {
+  readonly label: string;
+  readonly length: readonly [number, number];
+  readonly main?: readonly [number, number] | null;
+  readonly extension?: readonly [number, number] | null;
+  readonly drivers: readonly string[];
+  readonly openings: readonly string[];
+  readonly endings: readonly string[];
+  readonly extensions?: readonly string[];
+  readonly hasTitle: boolean;
 }
+export type ArticleScenarioView = ArticleScenarioDto;
 
-export interface TitleMatrixView {
+export interface TitleMatrixDto {
   readonly valid: readonly { readonly text: string; readonly motif: string }[];
   readonly motifCount: number;
   readonly passed: boolean;
 }
+export type TitleMatrixView = TitleMatrixDto;
 
-export interface PlanningView {
+export interface PlanningDto {
   readonly viewpoint?: string;
   readonly target?: number;
   readonly lockedFacts?: string;
@@ -213,22 +200,24 @@ export interface PlanningView {
   readonly driver?: string;
   readonly opening?: string;
   readonly ending?: string;
-  readonly titleMatrix?: TitleMatrixView;
+  readonly titleMatrix?: TitleMatrixDto;
 }
+export type PlanningView = PlanningDto;
 
 export interface WorkspaceSnapshot {
-  readonly projects: readonly ProjectSummary[];
-  readonly documents?: readonly DocumentListItem[];
-  readonly active?: ActiveDocumentView;
-  readonly runs?: readonly RunSummaryView[];
+  readonly unchanged?: boolean;
+  readonly projects?: readonly ProjectSummary[];
+  readonly documents?: readonly DocumentSummary[];
+  readonly active?: ActiveDocument;
+  readonly runs?: readonly RunSummary[];
   readonly approved?: boolean;
   readonly delivery?: string | null;
-  readonly exportStatus?: ExportStatusView | null;
-  readonly settings?: readonly SettingProposalEntry[];
+  readonly exportStatus?: ExportStatusDto | null;
+  readonly settings?: readonly SettingEntryDto[];
   readonly settingsCursor?: number | null;
-  readonly report?: ArticleReportView | null;
-  readonly planning?: PlanningView | null;
-  readonly scenario?: ArticleScenarioView | null;
+  readonly report?: ArticleReportDto | null;
+  readonly planning?: PlanningDto | null;
+  readonly scenario?: ArticleScenarioDto | null;
   readonly asOfSeq?: number;
 }
 

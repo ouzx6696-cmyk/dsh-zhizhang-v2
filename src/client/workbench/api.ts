@@ -1,4 +1,4 @@
-import type { WorkspaceSnapshot } from "./types.ts";
+import type { WorkspaceSnapshot } from "../../contracts/workspace-dto.ts";
 
 interface ApiPacket<T> {
   readonly ok: boolean;

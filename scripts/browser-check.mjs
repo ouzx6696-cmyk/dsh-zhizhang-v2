@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { CLIENT_ENTRY_CSS, CLIENT_ENTRY_HTML, CLIENT_JS_MODULES } from "../src/client/manifest.ts";
 import { openAuthorWorkspace } from "../src/host/workspace.ts";
 import { openDatabase } from "../src/storage/index.ts";
 
@@ -36,16 +37,12 @@ let delay = true;
 let refresh;
 
 const STATIC_ASSETS = new Map([
-  ["/workbench", { file: "../src/client/workbench.html", type: "text/html" }],
-  ["/workbench.css", { file: "../src/client/workbench.css", type: "text/css" }],
-  ["/workbench/main.js", { file: "../dist/client/workbench/main.js", type: "text/javascript" }],
-  ["/workbench/types.js", { file: "../dist/client/workbench/types.js", type: "text/javascript" }],
-  ["/workbench/diff.js", { file: "../dist/client/workbench/diff.js", type: "text/javascript" }],
-  ["/workbench/api.js", { file: "../dist/client/workbench/api.js", type: "text/javascript" }],
-  ["/workbench/draft-vault.js", { file: "../dist/client/workbench/draft-vault.js", type: "text/javascript" }],
-  ["/workbench/modal.js", { file: "../dist/client/workbench/modal.js", type: "text/javascript" }],
-  ["/workbench/views/diff-view.js", { file: "../dist/client/workbench/views/diff-view.js", type: "text/javascript" }],
-  ["/workbench/views/run-inspector.js", { file: "../dist/client/workbench/views/run-inspector.js", type: "text/javascript" }],
+  ["/workbench", { file: `../src/client/${CLIENT_ENTRY_HTML}`, type: "text/html" }],
+  ["/workbench.css", { file: `../src/client/${CLIENT_ENTRY_CSS}`, type: "text/css" }],
+  ...CLIENT_JS_MODULES.map((modulePath) => [
+    `/${modulePath}`,
+    { file: `../dist/client/${modulePath}`, type: "text/javascript" },
+  ]),
 ]);
 
 try {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { ContractError } from "../contracts/index.ts";
+import { ContractError } from "../../contracts/index.ts";
 import {
   assertChapterFinalizable,
   chapterLengthWarnings,
@@ -9,9 +9,10 @@ import {
   settingsAt,
   type ChapterState,
   type SettingFact,
-} from "../domain/fanqie/index.ts";
-import { anchor, precedes, type Anchor } from "../domain/shared/index.ts";
-import { currentSeq } from "../storage/index.ts";
+} from "../../domain/fanqie/index.ts";
+import { anchor, precedes, type Anchor } from "../../domain/shared/index.ts";
+import { currentSeq, type SqliteDatabase } from "../../storage/index.ts";
+import { projectReadUnit, type AuthorReadUnitFactory } from "../../workflow/author-reads.ts";
 import {
   count,
   invalid,
@@ -22,23 +23,51 @@ import {
   type Input,
   type Product,
   type WorkspaceContext,
-} from "./context.ts";
+} from "../context.ts";
+import type { ActionDefinition, ProductLineModule } from "../product-line.ts";
 
 /**
- * Fanqie (serialized novel) vertical slice.
+ * Fanqie (serialized novel) product-line module.
  * Depends strictly on `domain/fanqie` and `domain/shared` — never `domain/toutiao`.
  */
-export function createFanqieService(ctx: WorkspaceContext) {
-  const { db } = ctx;
-
-  function onDraftSaved(row: DocumentRow): void {
-    const next: ChapterState = row.state === "planned" || row.state === "drafting" ? "drafting" : "drafted";
-    db.prepare("UPDATE author_documents SET state = ? WHERE id = ?;").run(next, row.id);
-    ctx.event(row.projectId, "chapter", "document.state", { documentId: row.id, state: next });
+export function createFanqieModule(): ProductLineModule {
+  function initSchema(db: SqliteDatabase): void {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS author_chapter_order (
+        project_id TEXT PRIMARY KEY REFERENCES author_projects(id),
+        chapter_ids TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS author_settings (
+        sequence INTEGER PRIMARY KEY,
+        id TEXT NOT NULL UNIQUE,
+        project_id TEXT NOT NULL REFERENCES author_projects(id),
+        fact_id TEXT NOT NULL,
+        value TEXT NOT NULL,
+        decision TEXT NOT NULL DEFAULT 'pending',
+        decided_seq INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS author_evidence (
+        snapshot_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES author_projects(id),
+        document_id TEXT NOT NULL REFERENCES author_documents(id),
+        fact_id TEXT NOT NULL,
+        revision_id TEXT NOT NULL,
+        point INTEGER NOT NULL,
+        quote_start INTEGER NOT NULL,
+        quote_end INTEGER NOT NULL,
+        verification_kind TEXT NOT NULL,
+        verification_score INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS author_settings_by_project ON author_settings(project_id);
+      CREATE INDEX IF NOT EXISTS author_settings_approved_order
+        ON author_settings(project_id, decided_seq) WHERE decision = 'approved';
+      CREATE INDEX IF NOT EXISTS author_evidence_by_fact
+        ON author_evidence(project_id, fact_id);
+    `);
   }
 
-  function approvedFacts(projectId: string): SettingFact[] {
-    const rows = db.prepare(`
+  function approvedFacts(ctx: WorkspaceContext, projectId: string): SettingFact[] {
+    const rows = ctx.db.prepare(`
       SELECT value FROM author_settings
       WHERE project_id = ? AND decision = 'approved'
       ORDER BY decided_seq ASC, sequence ASC;
@@ -89,10 +118,10 @@ export function createFanqieService(ctx: WorkspaceContext) {
     return next as string[];
   }
 
-  function computeReorder(projectId: string, input: Input) {
+  function computeReorder(ctx: WorkspaceContext, projectId: string, input: Input) {
     const before = ctx.chapterOrder(projectId);
     const after = proposedOrder(input, before);
-    const relations = approvedFacts(projectId).map((fact) => ({
+    const relations = approvedFacts(ctx, projectId).map((fact) => ({
       id: fact.id,
       relations: [
         ...(fact.effectiveTo ? [{ from: fact.effectiveFrom, to: fact.effectiveTo, label: "设定有效期" }] : []),
@@ -103,11 +132,11 @@ export function createFanqieService(ctx: WorkspaceContext) {
         })),
       ],
     }));
-    return { ...planReorder(relations, before, after), chapterIds: after, asOfSeq: currentSeq(db, projectId) };
+    return { ...planReorder(relations, before, after), chapterIds: after, asOfSeq: currentSeq(ctx.db, projectId) };
   }
 
-  function settingsPage(projectId: string, before = Number.MAX_SAFE_INTEGER) {
-    const rows = db.prepare(`
+  function settingsPage(ctx: WorkspaceContext, projectId: string, before = Number.MAX_SAFE_INTEGER) {
+    const rows = ctx.db.prepare(`
       SELECT sequence, id, decision, value FROM author_settings
       WHERE project_id = ? AND sequence < ? ORDER BY sequence DESC LIMIT 51;
     `).all(projectId, before) as readonly { sequence: number; id: string; decision: string; value: string }[];
@@ -121,12 +150,8 @@ export function createFanqieService(ctx: WorkspaceContext) {
     };
   }
 
-  function knownFactsForChapter(projectId: string, chapterId: string, point: number, viewpoint?: string): SettingFact[] {
-    if (!viewpoint) return [];
-    return settingsAt(approvedFacts(projectId), ctx.chapterOrder(projectId), anchor(chapterId, point), viewpoint);
-  }
-
-  function handleContinuity(action: string, input: Input) {
+  function handleContinuity(action: string, ctx: WorkspaceContext, input: Input) {
+    const { db } = ctx;
     const projectId = text(input, "projectId");
     const project = requiredRow<{ product: Product }>(
       db.prepare("SELECT product FROM author_projects WHERE id = ?;").get(projectId),
@@ -135,22 +160,22 @@ export function createFanqieService(ctx: WorkspaceContext) {
     );
     if (project.product !== "fanqie") invalid("projectId", "novel-required");
 
-    if (action === "settings.history") return settingsPage(projectId, count(input, "before"));
-    if (action === "reorder.impact") return ctx.read(() => computeReorder(projectId, input));
+    if (action === "settings.history") return settingsPage(ctx, projectId, count(input, "before"));
+    if (action === "reorder.impact") return ctx.read(() => computeReorder(ctx, projectId, input));
     if (action === "settings.read") {
       return ctx.read(() => {
         const order = ctx.chapterOrder(projectId);
         const at = settingAnchor(input, "at", order);
         const characterId = text(input, "character");
         return {
-          entries: settingsAt(approvedFacts(projectId), order, at, characterId),
+          entries: settingsAt(approvedFacts(ctx, projectId), order, at, characterId),
           asOfSeq: currentSeq(db, projectId),
         };
       });
     }
     if (action === "reorder.commit") {
       return ctx.atomic(() => {
-        const plan = computeReorder(projectId, input);
+        const plan = computeReorder(ctx, projectId, input);
         if (input.asOfSeq !== plan.asOfSeq) {
           throw new ContractError("version.conflict", {
             documentId: projectId,
@@ -208,7 +233,7 @@ export function createFanqieService(ctx: WorkspaceContext) {
       );
       if (proposal.decision !== "pending") refuse(action, "decision-already-recorded");
       if (typeof input.accept !== "boolean") invalid("accept");
-      if (input.accept && approvedFacts(projectId).some((fact) => fact.id === proposal.fact_id && fact.locked)) {
+      if (input.accept && approvedFacts(ctx, projectId).some((fact) => fact.id === proposal.fact_id && fact.locked)) {
         refuse(action, "setting-is-locked");
       }
       const decision = input.accept ? "approved" : "rejected";
@@ -224,7 +249,8 @@ export function createFanqieService(ctx: WorkspaceContext) {
     });
   }
 
-  function recordEvidence(row: DocumentRow, input: Input) {
+  function recordEvidence(ctx: WorkspaceContext, row: DocumentRow, input: Input) {
+    if (row.product !== "fanqie") invalid("documentId", "chapter-required");
     return ctx.atomic(() => {
       const current = ctx.document(row.id);
       ctx.currentBody(current, input);
@@ -245,7 +271,7 @@ export function createFanqieService(ctx: WorkspaceContext) {
         quoteRange: { start, end },
         verification: { kind: "exact", score: 100 },
       };
-      db.prepare(`
+      ctx.db.prepare(`
         INSERT INTO author_evidence (
           snapshot_id, project_id, document_id, fact_id, revision_id,
           point, quote_start, quote_end, verification_kind, verification_score
@@ -256,12 +282,12 @@ export function createFanqieService(ctx: WorkspaceContext) {
     });
   }
 
-  function evidenceDetail(row: DocumentRow, input: Input) {
+  function evidenceDetail(ctx: WorkspaceContext, row: DocumentRow, input: Input) {
     if (row.product !== "fanqie") invalid("documentId", "chapter-required");
-    return ctx.read(() => ctx.readAuthorModel(row.projectId, { model: "evidence", factId: text(input, "factId") }));
+    return ctx.readAuthorModel(row.projectId, { model: "evidence", factId: text(input, "factId") });
   }
 
-  function saveOutline(row: DocumentRow, input: Input) {
+  function saveOutline(ctx: WorkspaceContext, row: DocumentRow, input: Input) {
     return ctx.atomic(() => {
       if (row.product !== "fanqie") invalid("documentId", "chapter-required");
       const viewpoint = text(input, "viewpoint");
@@ -280,7 +306,7 @@ export function createFanqieService(ctx: WorkspaceContext) {
     });
   }
 
-  function reviewChapter(row: DocumentRow, input: Input) {
+  function reviewChapter(ctx: WorkspaceContext, row: DocumentRow, input: Input) {
     return ctx.atomic(() => {
       const current = ctx.document(row.id);
       ctx.currentBody(current, input);
@@ -292,7 +318,7 @@ export function createFanqieService(ctx: WorkspaceContext) {
         refuse("chapter.review", "editorial-rejection-limit");
       }
       const state: ChapterState = input.accept ? "reviewed" : "drafted";
-      db.prepare(`
+      ctx.db.prepare(`
         UPDATE author_documents
         SET state = ?, editorial_rejections = editorial_rejections + ?
         WHERE id = ?;
@@ -302,14 +328,14 @@ export function createFanqieService(ctx: WorkspaceContext) {
     });
   }
 
-  function finalizeChapter(row: DocumentRow, input: Input) {
+  function finalizeChapter(ctx: WorkspaceContext, row: DocumentRow, input: Input) {
     return ctx.dispatch("draft.finalize", row, input, () => {
       const current = ctx.document(row.id);
       if (current.product !== "fanqie" || !current.revisionId) {
         refuse("draft.finalize", "chapter-required");
       }
       assertChapterFinalizable(current.state as ChapterState, current.editorialRejections);
-      db.prepare("UPDATE author_documents SET state = 'final', final_revision_id = ? WHERE id = ?;")
+      ctx.db.prepare("UPDATE author_documents SET state = 'final', final_revision_id = ? WHERE id = ?;")
         .run(current.revisionId, row.id);
       ctx.event(row.projectId, "chapter", "document.state", { documentId: row.id, state: "final" });
       ctx.event(row.projectId, "revision", "revision.finalized", {
@@ -320,18 +346,94 @@ export function createFanqieService(ctx: WorkspaceContext) {
     });
   }
 
+  const readModels: Readonly<Record<string, AuthorReadUnitFactory>> = {
+    "settings-view": (definition, _projectId, identity, point) => {
+      const [chapterId, characterId] = identity;
+      return projectReadUnit(
+        definition,
+        () => ({ order: [] as string[], facts: [] as SettingFact[] }),
+        (state, event) => {
+          if (event.kind === "document.created") {
+            return { ...state, order: [...state.order, event.documentId as string] };
+          }
+          if (event.kind === "chapter.reordered") {
+            return { ...state, order: event.chapterIds as string[] };
+          }
+          if (event.kind === "setting.decided" && event.decision === "approved" && event.fact) {
+            return { ...state, facts: [...state.facts, event.fact as SettingFact] };
+          }
+          return state;
+        },
+        ({ order, facts }) => ({
+          query: { asOfChapter: chapterId, characterId },
+          entries: settingsAt(facts, order, anchor(chapterId, point), characterId).map((fact) => ({
+            factId: fact.id,
+            note: fact.note,
+            effectiveFrom: fact.effectiveFrom.chapterId,
+          })),
+        }),
+      );
+    },
+    evidence: (definition, _projectId, identity) => {
+      const [factId] = identity;
+      return projectReadUnit(
+        definition,
+        () => ({ record: null as Record<string, unknown> | null }),
+        (state, event) => {
+          if (event.kind !== "evidence.recorded" || event.factId !== factId) return state;
+          return { record: event.record as Record<string, unknown> };
+        },
+        ({ record }) => record ?? {},
+      );
+    },
+  };
+
+  const actions: Readonly<Record<string, ActionDefinition>> = {
+    "setting.propose": { scope: "project", handler: (ctx, input) => handleContinuity("setting.propose", ctx, input) },
+    "setting.decide": { scope: "project", handler: (ctx, input) => handleContinuity("setting.decide", ctx, input) },
+    "settings.history": { scope: "project", handler: (ctx, input) => handleContinuity("settings.history", ctx, input) },
+    "settings.read": { scope: "project", handler: (ctx, input) => handleContinuity("settings.read", ctx, input) },
+    "reorder.impact": { scope: "project", handler: (ctx, input) => handleContinuity("reorder.impact", ctx, input) },
+    "reorder.commit": { scope: "project", handler: (ctx, input) => handleContinuity("reorder.commit", ctx, input) },
+    "chapter.outline": { scope: "document", handler: (ctx, input, row) => saveOutline(ctx, row!, input) },
+    "chapter.review": { scope: "document", handler: (ctx, input, row) => reviewChapter(ctx, row!, input) },
+    "draft.finalize": { scope: "document", handler: (ctx, input, row) => finalizeChapter(ctx, row!, input) },
+    "evidence.record": { scope: "document", handler: (ctx, input, row) => recordEvidence(ctx, row!, input) },
+    "evidence.detail": { scope: "document", handler: (ctx, input, row) => evidenceDetail(ctx, row!, input) },
+  };
+
   return {
-    onDraftSaved,
-    approvedFacts,
-    settingsPage,
-    knownFactsForChapter,
-    handleContinuity,
-    recordEvidence,
-    evidenceDetail,
-    saveOutline,
-    reviewChapter,
-    finalizeChapter,
+    id: "fanqie",
+    initialState: "planned",
+    lockedStates: ["final"],
+    supportsAutoQa: false,
+    initSchema,
+    validateCreate(_input, title) {
+      if (!title) invalid("title", "required");
+      return { title, mode: null, line: null };
+    },
+    onDraftSaved(ctx, row) {
+      const next: ChapterState = row.state === "planned" || row.state === "drafting" ? "drafting" : "drafted";
+      ctx.db.prepare("UPDATE author_documents SET state = ? WHERE id = ?;").run(next, row.id);
+      ctx.event(row.projectId, "chapter", "document.state", { documentId: row.id, state: next });
+    },
+    buildFrozenContext(ctx, row, input) {
+      const plan = ctx.planning(row.id);
+      const point = input.point === undefined ? 1 : count(input, "point");
+      if (point === 0) invalid("point", "positive-integer-required");
+      const at = anchor(row.id, point);
+      const viewpoint = typeof plan?.viewpoint === "string" ? plan.viewpoint : undefined;
+      const knownFacts = viewpoint
+        ? settingsAt(approvedFacts(ctx, row.projectId), ctx.chapterOrder(row.projectId), at, viewpoint)
+        : [];
+      return { knownAt: at, knownFacts, scenario: null };
+    },
+    actions,
+    contributeSnapshot(ctx, projectId, active) {
+      if (!active) return {};
+      const page = settingsPage(ctx, projectId);
+      return { settings: page.entries, settingsCursor: page.cursor };
+    },
+    readModels,
   };
 }
-
-export type FanqieService = ReturnType<typeof createFanqieService>;

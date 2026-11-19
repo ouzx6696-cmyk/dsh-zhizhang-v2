@@ -12,9 +12,16 @@
     "check": "tsc --project tsconfig.json --noEmit && tsc --project tsconfig.client.json --noEmit",
     "build": "tsc --project tsconfig.build.json && tsc --project tsconfig.client.json",
     "dev": "node scripts/dev-server.mjs",
-    "test": "node --test \"test/*-d02.test.mjs\" \"test/*-w02.test.mjs\" test/smoke.test.mjs test/workspace-v2.test.mjs test/refactor-v2.test.mjs",
+    "test": "node --test \"test/*-d02.test.mjs\" \"test/*-w02.test.mjs\" \"test/*-v2.test.mjs\" test/smoke.test.mjs",
+    "test:contracts": "node --test \"test/*-d02.test.mjs\" \"test/*-w02.test.mjs\"",
+    "test:v2": "node --test \"test/*-v2.test.mjs\" test/smoke.test.mjs",
+    "test:host": "node --test test/host-plugin-v2.test.mjs test/generation-v2.test.mjs test/backup-v2.test.mjs",
+    "test:client": "node --test test/client-v2.test.mjs",
+    "test:arch": "node --test test/smoke.test.mjs test/refactor-v2.test.mjs",
     "test:evidence": "node --test \"test/*-?01.test.mjs\"",
     "test:all": "node --test \"test/*.test.mjs\"",
+    "test:model": "node scripts/model-check.mjs",
+    "test:bench": "node scripts/workspace-bench.mjs",
     "test:browser": "node scripts/browser-check.mjs",
     "verify": "npm run check && npm test"
   },
@@ -32,7 +39,7 @@
     "src/client/workbench.css",
     "src/bundle/cordis.patch.yml",
     "src/bundle/locale",
-    "docs/V2.md"
+    "docs"
   ],
   "dsh": {
     "bundle": {

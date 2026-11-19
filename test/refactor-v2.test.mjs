@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { CLIENT_ENTRY_CSS, CLIENT_ENTRY_HTML, CLIENT_JS_MODULES } from "../src/client/manifest.ts";
 import {
   computeParagraphDiff,
   countNonWhitespaceChars,
@@ -205,14 +208,45 @@ test("writing stage registry validates stage outputs and host writing transport 
 });
 
 test("architecture boundaries enforce domain isolation and zero native browser dialogs", () => {
-  const fanqieService = readFileSync(new URL("../src/application/fanqie-service.ts", import.meta.url), "utf8");
-  const toutiaoService = readFileSync(new URL("../src/application/toutiao-service.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(fanqieService, /from\s+["'][^"']*domain\/toutiao/);
-  assert.doesNotMatch(toutiaoService, /from\s+["'][^"']*domain\/fanqie/);
+  const fanqieModule = readFileSync(new URL("../src/application/products/fanqie.ts", import.meta.url), "utf8");
+  const toutiaoModule = readFileSync(new URL("../src/application/products/toutiao.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(fanqieModule, /from\s+["'][^"']*(domain\/toutiao|products\/toutiao)/);
+  assert.doesNotMatch(toutiaoModule, /from\s+["'][^"']*(domain\/fanqie|products\/fanqie)/);
+
+  const hostFiles = ["../src/host/writing.ts", "../src/host/plugin.ts"];
+  for (const relativePath of hostFiles) {
+    const source = readFileSync(new URL(relativePath, import.meta.url), "utf8");
+    assert.doesNotMatch(source, /from\s+["'][^"']*domain\//);
+  }
+
+  const basePlatformFiles = [
+    "../src/application/context.ts",
+    "../src/application/run-service.ts",
+    "../src/application/snapshot-service.ts",
+    "../src/workflow/author-reads.ts",
+  ];
+  for (const relativePath of basePlatformFiles) {
+    const source = readFileSync(new URL(relativePath, import.meta.url), "utf8");
+    assert.doesNotMatch(source, /from\s+["'][^"']*(domain\/fanqie|domain\/toutiao|products\/fanqie|products\/toutiao)/);
+  }
+
+  const shellSource = readFileSync(new URL("../src/client/workbench/shell.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(shellSource, /from\s+["'][^"']*plugins\/(fanqie|toutiao)/);
+
+  const fanqieUi = readFileSync(new URL("../src/client/workbench/plugins/fanqie.ts", import.meta.url), "utf8");
+  const toutiaoUi = readFileSync(new URL("../src/client/workbench/plugins/toutiao.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(fanqieUi, /from\s+["'][^"']*plugins\/toutiao/);
+  assert.doesNotMatch(toutiaoUi, /from\s+["'][^"']*plugins\/fanqie/);
 
   const clientFiles = [
     "../src/client/workbench/main.ts",
+    "../src/client/workbench/shell.ts",
+    "../src/client/workbench/api.ts",
+    "../src/client/workbench/diff.ts",
+    "../src/client/workbench/draft-vault.ts",
     "../src/client/workbench/modal.ts",
+    "../src/client/workbench/plugins/fanqie.ts",
+    "../src/client/workbench/plugins/toutiao.ts",
     "../src/client/workbench/views/diff-view.ts",
     "../src/client/workbench/views/run-inspector.ts",
   ];
@@ -223,4 +257,102 @@ test("architecture boundaries enforce domain isolation and zero native browser d
       assert.doesNotMatch(source, /(?<![.\w])(confirm|prompt|alert)\s*\(/);
     }
   }
+});
+
+function walkTsFiles(relativeDir) {
+  const files = [];
+  function visit(dir) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) visit(full);
+      else if (entry.isFile() && entry.name.endsWith(".ts")) files.push(full);
+    }
+  }
+  visit(fileURLToPath(new URL(relativeDir, import.meta.url)));
+  return files;
+}
+
+function importSpecifiers(source) {
+  const specs = [];
+  for (const match of source.matchAll(/\b(?:import|export)\b[\s\S]*?\bfrom\s+["']([^"']+)["']/g)) {
+    specs.push(match[1]);
+  }
+  for (const match of source.matchAll(/^\s*import\s+["']([^"']+)["']/gm)) {
+    specs.push(match[1]);
+  }
+  return specs;
+}
+
+test("all layers satisfy recursive static dependency boundaries and workspace-dto remains strictly type-only", async () => {
+  const rules = [
+    {
+      dir: "../src/domain/fanqie/",
+      forbidden: [/(^|\/)domain\/toutiao/, /(^|\/)host(\/|$)/, /(^|\/)client(\/|$)/, /(^|\/)application(\/|$)/],
+    },
+    {
+      dir: "../src/domain/toutiao/",
+      forbidden: [/(^|\/)domain\/fanqie/, /(^|\/)host(\/|$)/, /(^|\/)client(\/|$)/, /(^|\/)application(\/|$)/],
+    },
+    {
+      dir: "../src/domain/shared/",
+      forbidden: [/fanqie/, /toutiao/, /(^|\/)storage(\/|$)/, /(^|\/)workflow(\/|$)/, /(^|\/)application(\/|$)/, /(^|\/)host(\/|$)/, /(^|\/)client(\/|$)/],
+    },
+    {
+      dir: "../src/storage/",
+      forbidden: [/(^|\/)domain(\/|$)/, /(^|\/)application(\/|$)/, /(^|\/)host(\/|$)/, /(^|\/)client(\/|$)/],
+    },
+    {
+      dir: "../src/client/",
+      forbidden: [/(^|\/)storage(\/|$)/, /(^|\/)host(\/|$)/, /(^|\/)application(\/|$)/, /^node:/],
+    },
+  ];
+
+  for (const rule of rules) {
+    const files = walkTsFiles(rule.dir);
+    assert.ok(files.length > 0, `No .ts files found in ${rule.dir}`);
+    for (const file of files) {
+      const source = readFileSync(file, "utf8");
+      for (const spec of importSpecifiers(source)) {
+        for (const pattern of rule.forbidden) {
+          assert.doesNotMatch(spec, pattern, `Forbidden import "${spec}" in ${file}`);
+        }
+      }
+    }
+  }
+
+  // Browser-safe DTO module must emit zero runtime code.
+  const dtoPath = fileURLToPath(new URL("../src/contracts/workspace-dto.ts", import.meta.url));
+  const dtoSource = readFileSync(dtoPath, "utf8");
+  assert.doesNotMatch(dtoSource, /^\s*export\s+(?:const|let|var|function|class|enum)\b/m);
+  const dtoRuntime = await import("../src/contracts/workspace-dto.ts");
+  assert.deepEqual(Object.keys(dtoRuntime), []);
+});
+
+test("AGENTS.md test layout invariant keeps shared helpers outside test/ and only *.test.mjs inside test/", () => {
+  const testDir = fileURLToPath(new URL("../test/", import.meta.url));
+  const entries = readdirSync(testDir, { withFileTypes: true });
+  assert.ok(entries.length > 0);
+  for (const entry of entries) {
+    assert.equal(entry.isFile(), true, `Unexpected non-file entry in test/: ${entry.name}`);
+    assert.equal(entry.name.endsWith(".test.mjs"), true, `Non-test module found in test/: ${entry.name}`);
+  }
+  assert.equal(existsSync(fileURLToPath(new URL("../support/a01.mjs", import.meta.url))), true);
+  assert.equal(existsSync(fileURLToPath(new URL("../support/v2-harness.mjs", import.meta.url))), true);
+});
+
+test("client manifest, package.json, and cordis.patch.yml metadata stay synchronized with zero runtime dependencies", () => {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(!pkg.dependencies || Object.keys(pkg.dependencies).length === 0, true);
+
+  for (const entryFile of [CLIENT_ENTRY_HTML, CLIENT_ENTRY_CSS]) {
+    assert.equal(existsSync(fileURLToPath(new URL(`../src/client/${entryFile}`, import.meta.url))), true);
+    assert.equal(pkg.files.includes(`src/client/${entryFile}`), true);
+  }
+  for (const modulePath of CLIENT_JS_MODULES) {
+    const tsRelative = `../src/client/${modulePath.replace(/\.js$/, ".ts")}`;
+    assert.equal(existsSync(fileURLToPath(new URL(tsRelative, import.meta.url))), true, `Missing TS source for ${modulePath}`);
+  }
+
+  const patch = readFileSync(new URL("../src/bundle/cordis.patch.yml", import.meta.url), "utf8");
+  assert.ok(patch.includes(`'${pkg.name}'`), `cordis.patch.yml must reference ${pkg.name}`);
 });

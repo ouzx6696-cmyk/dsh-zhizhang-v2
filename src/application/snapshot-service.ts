@@ -1,13 +1,8 @@
 import { currentSeq } from "../storage/index.ts";
 import type { WorkspaceContext } from "./context.ts";
-import type { FanqieService } from "./fanqie-service.ts";
-import type { ToutiaoService } from "./toutiao-service.ts";
+import type { ProductLineRegistry } from "./product-line.ts";
 
-export function createSnapshotService(
-  ctx: WorkspaceContext,
-  fanqie: FanqieService,
-  toutiao: ToutiaoService,
-) {
+export function createSnapshotService(ctx: WorkspaceContext, registry: ProductLineRegistry) {
   const { db } = ctx;
 
   function buildSnapshot(projectId?: string, documentId?: string) {
@@ -52,32 +47,23 @@ export function createSnapshotService(
         `).all(active.id, active.id, active.id)
       : [];
 
-    const approved = Boolean(active?.revisionId && toutiao.recordedApproval(active, active.revisionId));
-    const delivery = active?.state === "已交稿" ? toutiao.approvedMarkdown(active.id) : null;
-    const exportStatus = delivery
-      ? db.prepare(`
-          SELECT export_state AS state, export_error AS error,
-            export_hash AS hash, final_revision_id AS revisionId
-          FROM deliveries WHERE article_id = ?;
-        `).get(active!.id)
-      : null;
-
-    const report = active?.revisionId ? toutiao.latestReport(projectId, active.revisionId) : null;
-    const settings = active?.product === "fanqie" ? fanqie.settingsPage(projectId) : null;
+    const activeModule = active ? registry.get(active.product) : undefined;
+    const productContribution = activeModule ? activeModule.contributeSnapshot(ctx, projectId, active) : {};
 
     return {
       projects,
       documents: sorted,
       active,
       runs,
-      approved,
-      delivery,
-      exportStatus,
-      settings: settings?.entries ?? [],
-      settingsCursor: settings?.cursor ?? null,
-      report,
+      approved: false,
+      delivery: null,
+      exportStatus: null,
+      settings: [],
+      settingsCursor: null,
+      report: null,
       planning: active ? ctx.planning(active.id) : null,
-      scenario: active ? toutiao.resolveScenario(active.mode, active.line) : null,
+      scenario: null,
+      ...productContribution,
       asOfSeq: currentSeq(db, projectId),
     };
   }

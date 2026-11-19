@@ -1,6 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { anchor } from "../domain/shared/index.ts";
-import { QA_REFINEMENT_LIMIT } from "../domain/toutiao/index.ts";
 import { createCandidate } from "../storage/index.ts";
 import {
   estimateWritingInput,
@@ -12,7 +10,6 @@ import { WRITING_STAGE_IDS } from "../workflow/writing-stages.ts";
 import {
   count,
   invalid,
-  isLockedState,
   refuse,
   requiredRow,
   text,
@@ -21,26 +18,19 @@ import {
   type RunRow,
   type WorkspaceContext,
 } from "./context.ts";
-import type { FanqieService } from "./fanqie-service.ts";
-import type { ToutiaoService } from "./toutiao-service.ts";
+import type { ProductGenerationRunner, ProductLineRegistry } from "./product-line.ts";
 
 export function createRunService(
   ctx: WorkspaceContext,
-  fanqie: FanqieService,
-  toutiao: ToutiaoService,
+  registry: ProductLineRegistry,
   saveDraftForRow: (row: DocumentRow, body: string) => { revisionId: string },
 ) {
   const { db, generation } = ctx;
 
   function freezeWriting(row: DocumentRow, input: Input): string {
     const plan = ctx.planning(row.id);
-    const point = input.point === undefined ? 1 : count(input, "point");
-    if (point === 0) invalid("point", "positive-integer-required");
-    const at = anchor(row.id, point);
-    const viewpoint = typeof plan?.viewpoint === "string" ? plan.viewpoint : undefined;
-    const knownFacts = row.product === "fanqie"
-      ? fanqie.knownFactsForChapter(row.projectId, row.id, point, viewpoint)
-      : [];
+    const mod = registry.require(row.product);
+    const productContext = mod.buildFrozenContext(ctx, row, input);
     return JSON.stringify({
       title: row.title,
       revisionId: row.revisionId,
@@ -48,9 +38,7 @@ export function createRunService(
       instruction: text(input, "instruction"),
       mode: row.mode,
       planning: plan,
-      knownAt: at,
-      knownFacts,
-      scenario: toutiao.resolveScenario(row.mode, row.line),
+      ...productContext,
     });
   }
 
@@ -77,14 +65,8 @@ export function createRunService(
       baseRevisionId: current.baseRevisionId,
       body,
     });
-    if (input.qa && typeof input.qa === "object" && row.mode) {
-      const { title } = JSON.parse(current.frozenInput) as { title: string };
-      const qa = toutiao.buildCandidateQa(row.mode, title, body, input.qa as Input);
-      const rounds = count(input, "rounds");
-      if (rounds > QA_REFINEMENT_LIMIT) invalid("rounds", "qa-refinement-limit");
-      db.prepare("INSERT INTO author_candidate_qa (candidate_id, report, rounds) VALUES (?, ?, ?);")
-        .run(candidateId, JSON.stringify(qa), rounds);
-    }
+    const mod = registry.require(row.product);
+    mod.onCandidateCreated?.(ctx, row, candidateId, body, current.frozenInput, input);
     db.prepare("UPDATE author_runs SET candidate_id = ? WHERE id = ?;").run(candidateId, current.id);
     ctx.event(row.projectId, "run", "run.attempt", {
       runId: current.id,
@@ -116,7 +98,7 @@ export function createRunService(
     return ctx.dispatch("run.start", row, input, () => {
       const current = ctx.document(row.id);
       ctx.currentBody(current, input);
-      if (isLockedState(current.state)) refuse("run.start", "revision-locked");
+      if (ctx.isLockedDocument(current)) refuse("run.start", "revision-locked");
       ctx.assertRunAvailable("run.start", current.id);
       const reserved = count(input, "tokenLimit");
       if (reserved === 0) invalid("tokenLimit", "positive-budget-required");
@@ -230,7 +212,7 @@ export function createRunService(
     return ctx.atomic(() => {
       const current = ctx.run(text(input, "runId"));
       const row = ctx.document(current.documentId);
-      if (isLockedState(row.state) || current.baseRevisionId !== row.revisionId) {
+      if (ctx.isLockedDocument(row) || current.baseRevisionId !== row.revisionId) {
         refuse("run.generate", "revision-changed");
       }
       if (generation.pending(current.id)) refuse("run.generate", "generation-needs-reconciliation");
@@ -245,10 +227,12 @@ export function createRunService(
         generation.create(attemptId, current.id, provider, model);
         ctx.event(row.projectId, "run", "generation.started", { runId: current.id, attemptId });
       }
+      const mod = registry.require(row.product);
       return {
         id: current.id,
+        product: row.product,
         attemptId,
-        autoQa: input.autoQa === true && row.product === "toutiao",
+        autoQa: input.autoQa === true && mod.supportsAutoQa,
         frozenInput: current.frozenInput,
         reserved: Math.max(0, current.reserved - current.settled),
         provider,
@@ -312,11 +296,10 @@ export function createRunService(
     ctx.atomic(() => {
       const current = ctx.run(id);
       if (current.state !== "running") refuse("run.generate", "run-no-longer-running");
-      const reserved = db.prepare(`
-        INSERT INTO author_run_refinement_claims (run_id, rounds) VALUES (?, 1)
-        ON CONFLICT (run_id) DO UPDATE SET rounds = rounds + 1 WHERE rounds < ?;
-      `).run(id, QA_REFINEMENT_LIMIT);
-      if (!reserved.changes) refuse("run.generate", "qa-refinement-limit");
+      const row = ctx.document(current.documentId);
+      const mod = registry.require(row.product);
+      if (!mod.reserveRefinement) refuse("run.generate", "refinement-unsupported");
+      mod.reserveRefinement(ctx, id);
     });
   }
 
@@ -337,6 +320,10 @@ export function createRunService(
     });
   }
 
+  function generationRunner(product: string): ProductGenerationRunner | undefined {
+    return registry.get(product)?.runGeneration;
+  }
+
   return {
     previewBudget,
     startRun,
@@ -346,6 +333,7 @@ export function createRunService(
     runDetail,
     reconcileRun,
     generationInput,
+    generationRunner,
     beginGenerationCall,
     recordGenerationReceipt,
     finishGeneration,

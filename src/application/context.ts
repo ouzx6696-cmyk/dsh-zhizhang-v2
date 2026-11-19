@@ -13,6 +13,7 @@ import { createGenerationLedger, type GenerationLedger } from "../storage/author
 import { createAuthorSchema } from "../storage/author-schema.ts";
 import { createAuthorModelReader } from "../workflow/author-reads.ts";
 import { isLegalTransition, type Concern, type RunState } from "../workflow/index.ts";
+import type { ProductLineRegistry } from "./product-line.ts";
 
 export type Input = Record<string, unknown>;
 export type Product = "fanqie" | "toutiao";
@@ -71,18 +72,34 @@ export function refuse(action: string, reason: string): never {
   throw new ContractError("gate.denied", { action, reason });
 }
 
-export function isLockedState(state: string): boolean {
-  return state === "final" || state === "已验收" || state === "已交稿";
-}
-
-export function createWorkspaceContext(db: SqliteDatabase) {
+export function createWorkspaceContext(db: SqliteDatabase, registry: ProductLineRegistry) {
   createCommandSchema(db);
   createEventLogSchema(db);
   createDeliverySchema(db);
   createAuthorSchema(db);
+  for (const mod of registry.all()) mod.initSchema(db);
+
+  function transaction<T>(apply: () => T, begin: "BEGIN" | "BEGIN IMMEDIATE"): T {
+    db.exec(begin);
+    try {
+      const result = apply();
+      db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original failure rather than masking it with rollback errors.
+      }
+      throw error;
+    }
+  }
+
+  const atomic = <T>(apply: () => T): T => transaction(apply, "BEGIN IMMEDIATE");
+  const read = <T>(query: () => T): T => transaction(query, "BEGIN");
 
   const generation: GenerationLedger = createGenerationLedger(db);
-  const readAuthorModel = createAuthorModelReader(db);
+  const readAuthorModel = createAuthorModelReader(db, { read, atomic }, registry.collectReadModels());
 
   const competingRunStmt = db.prepare(`
     SELECT 1 FROM author_runs
@@ -99,21 +116,6 @@ export function createWorkspaceContext(db: SqliteDatabase) {
     JOIN documents d ON d.document_id = a.id
     LEFT JOIN revisions r ON r.revision_id = d.current_revision_id
   `;
-
-  function transaction<T>(apply: () => T, begin: "BEGIN" | "BEGIN IMMEDIATE"): T {
-    db.exec(begin);
-    try {
-      const result = apply();
-      db.exec("COMMIT");
-      return result;
-    } catch (error) {
-      db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  const atomic = <T>(apply: () => T): T => transaction(apply, "BEGIN IMMEDIATE");
-  const read = <T>(query: () => T): T => transaction(query, "BEGIN");
 
   function document(id: string): DocumentRow {
     return requiredRow<DocumentRow>(db.prepare(`${documentSelect} WHERE a.id = ?;`).get(id), "document", id);
@@ -192,12 +194,16 @@ export function createWorkspaceContext(db: SqliteDatabase) {
     }
   }
 
+  function isLockedDocument(row: Pick<DocumentRow, "product" | "state">): boolean {
+    return registry.isLockedState(row.product, row.state);
+  }
+
   function appendDraftRevision(
     row: DocumentRow,
     body: string,
     onSavedState: (doc: DocumentRow) => void,
   ): { revisionId: string } {
-    if (isLockedState(row.state)) refuse("draft.save", "revision-locked");
+    if (isLockedDocument(row)) refuse("draft.save", "revision-locked");
     const revision = appendRevision(db, {
       revisionId: randomUUID(),
       documentId: row.id,
@@ -253,6 +259,7 @@ export function createWorkspaceContext(db: SqliteDatabase) {
     commandInput,
     dispatch,
     currentBody,
+    isLockedDocument,
     appendDraftRevision,
     chapterOrder,
     planning,

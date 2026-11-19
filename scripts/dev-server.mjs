@@ -1,28 +1,25 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join, normalize } from "node:path";
+import { CLIENT_ENTRY_CSS, CLIENT_ENTRY_HTML, CLIENT_JS_MODULES } from "../src/client/manifest.ts";
 import { ContractError } from "../src/contracts/index.ts";
 import { openAuthorWorkspace } from "../src/host/workspace.ts";
 import { createStore, openDatabase, openStore } from "../src/storage/index.ts";
 
 const PORT = Number(process.env.PORT ?? 3000);
-const HOST = process.env.HOST ?? "0.0.0.0";
+const HOST = process.env.HOST ?? "127.0.0.1";
 const DATA_DIR = process.env.ZHIZHANG_DATA_DIR;
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 const CSP_HEADER = "default-src 'self'; frame-ancestors 'self'; base-uri 'none'; object-src 'none'";
 
 const CLIENT_FILES = new Map([
-  ["/", { path: "../src/client/workbench.html", type: "text/html" }],
-  ["/workbench", { path: "../src/client/workbench.html", type: "text/html" }],
-  ["/workbench.css", { path: "../src/client/workbench.css", type: "text/css" }],
-  ["/workbench/main.js", { path: "../dist/client/workbench/main.js", type: "text/javascript" }],
-  ["/workbench/types.js", { path: "../dist/client/workbench/types.js", type: "text/javascript" }],
-  ["/workbench/diff.js", { path: "../dist/client/workbench/diff.js", type: "text/javascript" }],
-  ["/workbench/api.js", { path: "../dist/client/workbench/api.js", type: "text/javascript" }],
-  ["/workbench/draft-vault.js", { path: "../dist/client/workbench/draft-vault.js", type: "text/javascript" }],
-  ["/workbench/modal.js", { path: "../dist/client/workbench/modal.js", type: "text/javascript" }],
-  ["/workbench/views/diff-view.js", { path: "../dist/client/workbench/views/diff-view.js", type: "text/javascript" }],
-  ["/workbench/views/run-inspector.js", { path: "../dist/client/workbench/views/run-inspector.js", type: "text/javascript" }],
+  ["/", { path: `../src/client/${CLIENT_ENTRY_HTML}`, type: "text/html" }],
+  ["/workbench", { path: `../src/client/${CLIENT_ENTRY_HTML}`, type: "text/html" }],
+  ["/workbench.css", { path: `../src/client/${CLIENT_ENTRY_CSS}`, type: "text/css" }],
+  ...CLIENT_JS_MODULES.map((modulePath) => [
+    `/${modulePath}`,
+    { path: `../dist/client/${modulePath}`, type: "text/javascript" },
+  ]),
 ]);
 
 let db;
@@ -34,6 +31,8 @@ if (DATA_DIR) {
   const dbPath = join(DATA_DIR, "workspace.sqlite");
   if (!existsSync(dbPath)) createStore(dbPath);
   db = openStore(dbPath);
+  db.exec("PRAGMA journal_mode = WAL;");
+  db.exec("PRAGMA busy_timeout = 5000;");
 } else {
   db = openDatabase(":memory:");
 }

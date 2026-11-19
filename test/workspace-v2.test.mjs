@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { openAuthorWorkspace } from "../src/host/index.ts";
-import { openDatabase } from "../src/storage/index.ts";
+import {
+  appendEvent,
+  createCommandSchema,
+  createDeliverySchema,
+  createEventLogSchema,
+  openDatabase,
+} from "../src/storage/index.ts";
 import { DELIVERY_ENDING, articleScenario, validateTitleMatrix } from "../src/domain/toutiao/index.ts";
 
 function withWorkspace(t) {
@@ -316,4 +322,101 @@ test("long candidate history stays out of the first response and supports detail
   const next = app.mutation("run.history", { ...context, before: page.at(-1).cursor });
   assert.ok(next[0].cursor < page.at(-1).cursor);
   assert.equal(app.mutation("run.detail", { ...context, runId: next[0].id }).candidate.body, body);
+});
+
+test("legacy 2.0.0 databases upgrade idempotently without index collisions or duplicate late usage", (t) => {
+  const db = openDatabase(":memory:");
+  t.after(() => db.close());
+  createCommandSchema(db);
+  createEventLogSchema(db);
+  createDeliverySchema(db);
+  db.exec(`
+    CREATE TABLE author_projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, product TEXT NOT NULL);
+    CREATE TABLE author_documents (
+      id TEXT PRIMARY KEY REFERENCES documents(document_id),
+      project_id TEXT NOT NULL REFERENCES author_projects(id), title TEXT NOT NULL,
+      state TEXT NOT NULL, mode TEXT, line TEXT, final_revision_id TEXT,
+      editorial_rejections INTEGER NOT NULL DEFAULT 0, qa_rounds INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE author_runs (
+      id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES author_documents(id),
+      state TEXT NOT NULL, base_revision_id TEXT NOT NULL, frozen_input TEXT NOT NULL,
+      reserved INTEGER NOT NULL, settled INTEGER NOT NULL DEFAULT 0, candidate_id TEXT
+    );
+    CREATE TABLE author_planning (document_id TEXT PRIMARY KEY REFERENCES author_documents(id), value TEXT NOT NULL);
+    CREATE TABLE author_run_refinement_claims (run_id TEXT PRIMARY KEY REFERENCES author_runs(id), rounds INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE author_candidate_qa (candidate_id TEXT PRIMARY KEY REFERENCES candidates(candidate_id), report TEXT NOT NULL, rounds INTEGER NOT NULL);
+    CREATE TABLE author_approvals (document_id TEXT NOT NULL REFERENCES author_documents(id), revision_id TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY (document_id, revision_id));
+    CREATE TABLE author_chapter_order (project_id TEXT PRIMARY KEY REFERENCES author_projects(id), chapter_ids TEXT NOT NULL);
+    CREATE TABLE author_settings (
+      sequence INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE,
+      project_id TEXT NOT NULL REFERENCES author_projects(id), fact_id TEXT NOT NULL,
+      value TEXT NOT NULL, decision TEXT NOT NULL DEFAULT 'pending'
+    );
+    CREATE INDEX author_article_reports ON event_log(project_id, json_extract(payload, '$.revisionId'), seq)
+      WHERE kind IN ('article.qa','article.rejected');
+  `);
+
+  db.prepare("INSERT INTO author_projects (id, name, product) VALUES ('p-novel', '旧番茄', 'fanqie');").run();
+  db.prepare("INSERT INTO documents (document_id, current_revision_id) VALUES ('c1', 'rev1');").run();
+  db.prepare("INSERT INTO revisions (revision_id, document_id, body, created_at) VALUES ('rev1', 'c1', '旧正文', 1);").run();
+  db.prepare("INSERT INTO author_documents (id, project_id, title, state) VALUES ('c1', 'p-novel', '第一章', 'drafted');").run();
+
+  const fact1 = { id: "secret", note: "后批胜出", source: "旧笔记", kind: "fact", locked: false, effectiveFrom: { chapterId: "c1", point: 1 }, knownFrom: { 林: { chapterId: "c1", point: 1 } } };
+  const fact2 = { ...fact1, note: "先批被覆" };
+  db.prepare("INSERT INTO author_settings (sequence, id, project_id, fact_id, value, decision) VALUES (1, 'prop1', 'p-novel', 'secret', ?, 'approved');").run(JSON.stringify(fact1));
+  db.prepare("INSERT INTO author_settings (sequence, id, project_id, fact_id, value, decision) VALUES (2, 'prop2', 'p-novel', 'secret', ?, 'approved');").run(JSON.stringify(fact2));
+  appendEvent(db, { projectId: "p-novel", eventId: "e1", kind: "document.created", payload: { concern: "chapter", documentId: "c1", title: "第一章", state: "drafted" } });
+  appendEvent(db, { projectId: "p-novel", eventId: "e2", kind: "setting.decided", payload: { concern: "setting", id: "prop2", factId: "secret", decision: "approved", fact: fact2 } });
+  appendEvent(db, { projectId: "p-novel", eventId: "e3", kind: "setting.decided", payload: { concern: "setting", id: "prop1", factId: "secret", decision: "approved", fact: fact1 } });
+  db.prepare("INSERT INTO author_runs (id, document_id, state, base_revision_id, frozen_input, reserved, settled, candidate_id) VALUES ('r-old', 'c1', 'cancelled', 'rev1', '{}', 500, 55, '');").run();
+
+  db.prepare("INSERT INTO author_projects (id, name, product) VALUES ('p-art', '旧头条', 'toutiao');").run();
+  db.prepare("INSERT INTO documents (document_id, current_revision_id) VALUES ('a1', 'arev1');").run();
+  db.prepare("INSERT INTO revisions (revision_id, document_id, body, created_at) VALUES ('arev1', 'a1', '头条稿', 1);").run();
+  db.prepare("INSERT INTO author_documents (id, project_id, title, state, mode, line) VALUES ('a1', 'p-art', '旧标题', '待验收', 'short', '资讯线');").run();
+  appendEvent(db, { projectId: "p-art", eventId: "ae1", kind: "article.qa", payload: { concern: "evidence", documentId: "a1", revisionId: "arev1", overall: 86, passed: true, fails: [], hardGates: [] } });
+
+  const app = openAuthorWorkspace(db, () => {});
+  // Calling openAuthorWorkspace twice guarantees idempotency.
+  const app2 = openAuthorWorkspace(db, () => {});
+  assert.equal(app2.mutation("settings.read", { projectId: "p-novel", character: "林", at: { chapterId: "c1", point: 1 } }).entries[0].note, "后批胜出");
+  app.mutation("run.complete", { runId: "r-old", body: "迟到结果", tokens: 30 });
+  const runRow = db.prepare("SELECT settled, late_usage_settled, candidate_id FROM author_runs WHERE id = 'r-old';").get();
+  assert.equal(runRow.settled, 55);
+  assert.equal(runRow.late_usage_settled, 1);
+  assert.equal(runRow.candidate_id, null);
+  assert.equal(app.snapshot("p-art", "a1").report.overall, 86);
+});
+
+test("multi-connection WAL reads persist checkpoints without SQLITE_BUSY lock upgrade", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "zhizhang-wal-"));
+  const filename = join(directory, "workspace.sqlite");
+  const writerConn = openDatabase(filename);
+  const readerConn = openDatabase(filename);
+  for (const conn of [writerConn, readerConn]) {
+    conn.exec("PRAGMA journal_mode = WAL;");
+    conn.exec("PRAGMA busy_timeout = 5000;");
+  }
+  t.after(() => { writerConn.close(); readerConn.close(); rmSync(directory, { recursive: true, force: true }); });
+
+  const writerApp = openAuthorWorkspace(writerConn, () => {});
+  const readerApp = openAuthorWorkspace(readerConn, () => {});
+  const { id: projectId } = writerApp.mutation("project.create", { name: "WAL并发", product: "fanqie" });
+  for (let i = 1; i <= 5; i++) {
+    const { id: documentId } = writerApp.mutation("document.create", { projectId, title: `第${i}章` });
+    writerApp.mutation("draft.save", { documentId, baseRevisionId: null, body: `正文 ${i}` });
+    const nav = readerApp.mutation("read.model", { projectId, model: "navigation" });
+    assert.equal(nav.value.volumes[0].chapters.length, i);
+  }
+  const reopenedConn = openDatabase(filename);
+  reopenedConn.exec("PRAGMA busy_timeout = 5000;");
+  try {
+    const reopened = openAuthorWorkspace(reopenedConn, () => {});
+    const finalNav = reopened.mutation("read.model", { projectId, model: "navigation" });
+    assert.equal(finalNav.folded, 0);
+    assert.equal(finalNav.value.volumes[0].chapters.length, 5);
+  } finally {
+    reopenedConn.close();
+  }
 });
