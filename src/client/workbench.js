@@ -152,6 +152,13 @@ function settingChapters(select) {
   if (chapterTitles.has(value)) select.value = value;
 }
 
+function showSettingExpiry() {
+  const form = byId("setting-proposal");
+  const expires = Boolean(form.elements.toChapter.value);
+  byId("setting-to-point").hidden = !expires;
+  form.elements.toPoint.disabled = !expires;
+}
+
 function titleCount(field, output, titled) {
   const length = [...field.value.trim()].length;
   output.textContent = titled ? `${length} / 34 字符` : "";
@@ -170,6 +177,7 @@ function showBudget() {
   field.dataset.suggested = recommended;
   byId("budget-hint").textContent = `正文与规划的保守输入估算约 ${estimate} token。建议总额 ${recommended}，含输出余量；多轮质检另消耗额度。`;
   byId("run-point").hidden = active.product !== "fanqie";
+  form.elements.point.disabled = active.product !== "fanqie";
 }
 
 function render() {
@@ -211,7 +219,7 @@ function render() {
       byId("setting-people").replaceChildren();
     }
     for (const select of byId("setting-proposal").querySelectorAll("[data-setting-chapters]")) settingChapters(select);
-    byId("setting-to-point").hidden = !byId("setting-proposal").elements.toChapter.value;
+    showSettingExpiry();
   }
   projects.value = projectId;
   const selectedButton = directoryButtons.get(documentId);
@@ -502,13 +510,15 @@ click("deliver", async () => {
   const result = await change("article.deliver", { key: `delivery:${snapshot.active.revisionId}` });
   notice(result.state === "exported" ? "交稿单已生成" : "已记录交稿，文件导出失败，可从此处重试。", result.state !== "exported");
 });
-form("start-run", (values) => change("run.start", { ...values, tokenLimit: Number(values.tokenLimit), point: Number(values.point) }, { savedVersion: true }));
+form("start-run", (values) => change("run.start", {
+  ...values, tokenLimit: Number(values.tokenLimit), point: Number(values.point || 1),
+}, { savedVersion: true }));
 click("estimate-budget", async () => {
   if (dirty()) throw new Error("保存当前正文后即可按该修订核算预算。");
   const { instruction, point, tokenLimit } = byId("start-run").elements;
   if (!instruction.reportValidity() || !point.reportValidity()) return;
   const { inputReserve, recommended } = await request("run.preview", activeInput({
-    instruction: instruction.value, point: Number(point.value),
+    instruction: instruction.value, point: point.disabled ? 1 : Number(point.value || 1),
   }));
   if (!tokenLimit.value || tokenLimit.value === tokenLimit.dataset.suggested) tokenLimit.value = recommended;
   tokenLimit.dataset.suggested = recommended;
@@ -532,9 +542,7 @@ form("chapter-outline", async (values) => {
   if (result.warnings.length) notice(result.warnings.join(" · "));
 });
 form("article-plan", (values) => change("article.plan", values));
-byId("setting-proposal").elements.toChapter.onchange = (event) => {
-  byId("setting-to-point").hidden = !event.currentTarget.value;
-};
+byId("setting-proposal").elements.toChapter.onchange = showSettingExpiry;
 byId("setting-add-person").onclick = () => {
   const person = byId("setting-person-template").content.firstElementChild.cloneNode(true);
   settingChapters(person.querySelector("select"));
@@ -559,7 +567,7 @@ form("setting-proposal", async (values, node) => {
   });
   node.reset();
   byId("setting-people").replaceChildren();
-  byId("setting-to-point").hidden = true;
+  showSettingExpiry();
 });
 form("settings-read", async (values) => {
   const result = await request("settings.read", { projectId, character: values.character, at: { chapterId: documentId, point: Number(values.point) } });

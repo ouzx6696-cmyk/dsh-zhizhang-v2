@@ -131,6 +131,8 @@ try {
   await later.locator("[data-person]").fill("林");
   await later.locator("[data-when]").selectOption(secondChapter);
   await later.locator("[data-point]").fill("3");
+  await page.locator('#setting-proposal [name="toChapter"]').selectOption(secondChapter);
+  await page.locator('#setting-proposal [name="toPoint"]').fill("4");
   await page.locator("#setting-proposal button[type=submit]").click();
   await page.getByRole("button", { name: "确认设定" }).click();
   await page.locator('#settings-read [name="character"]').fill("乔");
@@ -159,6 +161,9 @@ try {
   const run = app.mutation("run.history", { documentId: secondChapter })[0];
   const { frozenInput } = app.mutation("run.detail", { documentId: secondChapter, runId: run.id });
   assert.equal(JSON.parse(frozenInput).knownFacts[0].id, "f1");
+  await page.locator('#settings-read [name="point"]').fill("4");
+  await page.locator("#settings-read button").click();
+  await expectText("known-settings", "此时该人物没有已确认的知情设定。");
 
   await open(article, "旧标题");
   await page.locator('#rename [name="title"]').fill("新标题");
