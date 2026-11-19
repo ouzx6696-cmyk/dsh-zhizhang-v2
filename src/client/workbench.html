@@ -6,182 +6,344 @@
   <meta name="color-scheme" content="light dark">
   <title>织章工作台</title>
   <link rel="stylesheet" href="./workbench.css">
-  <script src="./workbench.js" type="module"></script>
+  <script src="./workbench/main.js" type="module"></script>
 </head>
 <body>
   <header class="top">
-    <a href="./workbench" class="brand"><span aria-hidden="true">织</span>织章工作台</a>
-    <div class="regions"><button id="navigation-toggle" aria-pressed="true">目录</button><button id="pipeline-toggle" aria-pressed="true">流程</button></div>
+    <a href="./workbench" class="brand">织章工作台</a>
+    <nav class="top-nav" aria-label="工作区视图控制">
+      <span id="breadcrumb" class="breadcrumb">未选择项目</span>
+      <button id="navigation-toggle" type="button" class="nav-toggle" aria-pressed="true">目录</button>
+      <button id="pipeline-toggle" type="button" class="nav-toggle" aria-pressed="true">流程</button>
+      <button id="theme-toggle" type="button" class="nav-toggle">深色</button>
+    </nav>
+    <div class="top-actions">
+      <button id="save" type="button" class="primary" hidden>保存正文</button>
+    </div>
   </header>
+
   <div class="layout" id="layout">
-    <aside aria-label="目录" id="navigation">
-      <label for="projects">项目</label>
-      <select id="projects"><option value="">选择项目</option></select>
-      <details>
-        <summary>新建项目</summary>
-        <form id="new-project">
-          <label>项目名称<input name="name" required maxlength="120"></label>
-          <label>产品线<select name="product"><option value="fanqie">番茄连载</option><option value="toutiao">头条创作</option></select></label>
-          <button type="submit">创建项目</button>
-        </form>
-      </details>
-      <div id="document-tools" hidden>
-        <h2>稿件</h2>
-        <nav id="documents" aria-label="稿件"></nav>
-        <details>
+    <aside aria-label="目录" id="navigation" class="sidebar sidebar-left">
+      <div class="sidebar-block">
+        <label for="projects" class="field-label">项目</label>
+        <select id="projects"><option value="">选择项目</option></select>
+        <details class="disclosure">
+          <summary>新建项目</summary>
+          <form id="new-project" class="stack-form">
+            <label>项目名称<input name="name" required maxlength="120" placeholder="例如：长风卷 / 产业观察"></label>
+            <label>产品线
+              <select name="product">
+                <option value="fanqie">番茄连载</option>
+                <option value="toutiao">头条创作</option>
+              </select>
+            </label>
+            <button type="submit" class="primary">创建项目</button>
+          </form>
+        </details>
+      </div>
+
+      <div id="document-tools" class="sidebar-block" hidden>
+        <h2 class="section-heading">稿件目录</h2>
+        <nav id="documents" class="doc-list" aria-label="稿件列表"></nav>
+        <details class="disclosure">
           <summary>新建稿件</summary>
-          <form id="new-document">
-            <label>名称<input name="title" maxlength="120"></label><output id="new-title-count"></output>
+          <form id="new-document" class="stack-form">
+            <label>标题或章名<input name="title" maxlength="120" placeholder="微头条可留空"></label>
+            <output id="new-title-count" class="char-counter"></output>
             <div id="article-options" hidden>
-              <label>体裁<select name="mode"><option value="short">短图文</option><option value="long">长图文</option><option value="micro">微头条</option></select></label>
-              <label>内容线<select name="line"><option>资讯线</option><option>故事线</option></select></label>
+              <label>体裁
+                <select name="mode">
+                  <option value="short">短图文</option>
+                  <option value="long">长图文</option>
+                  <option value="micro">微头条</option>
+                </select>
+              </label>
+              <label>内容线
+                <select name="line">
+                  <option>资讯线</option>
+                  <option>故事线</option>
+                </select>
+              </label>
             </div>
-            <button type="submit">创建稿件</button>
+            <button type="submit" class="primary">创建稿件</button>
           </form>
         </details>
       </div>
     </aside>
-    <main>
-      <div id="notice" class="notice" role="status" hidden></div>
-      <section id="empty"><h1>开始写作</h1><p>从目录新建或打开一个项目，再选择一份稿件。</p></section>
-      <section id="manuscript" aria-labelledby="heading" hidden>
-        <div class="heading">
-          <div><p id="document-label" class="eyebrow"></p><h1 id="heading"></h1></div>
-          <span id="state" class="state"></span>
-        </div>
-        <label for="body" class="visually-hidden">正文</label>
-        <textarea id="body" spellcheck="false" placeholder="写下正文…" rows="16"></textarea>
-        <form id="rename" hidden>
-          <label>当前标题<input name="title" required></label>
-          <output id="title-count"></output>
-          <label>应用标题候选<select id="title-choices"><option value="">选择候选</option></select></label>
-          <button type="submit">保存标题</button>
+
+    <main class="canvas">
+      <div id="notice" class="notice" role="status" hidden>
+        <span id="notice-text"></span>
+        <button id="notice-close" type="button" class="notice-dismiss" aria-label="关闭提示">关闭</button>
+      </div>
+
+      <section id="empty" class="empty-stage">
+        <p class="eyebrow">DeepSeek Harness 作者工作台</p>
+        <h1>从这里落笔</h1>
+        <p class="lead">在左侧目录新建或打开一个番茄连载或头条创作项目，稿件修订、人物知情边界、候选差异对照与版本交稿均在同一工作台内闭环管理。</p>
+      </section>
+
+      <section id="manuscript" class="manuscript" aria-labelledby="heading" hidden>
+        <header class="manuscript-header">
+          <div class="manuscript-titles">
+            <p class="eyebrow-row">
+              <span id="document-label"></span>
+              <span aria-hidden="true">·</span>
+              <span id="state" class="state-text"></span>
+            </p>
+            <h1 id="heading"></h1>
+          </div>
+        </header>
+
+        <form id="rename" class="rename-bar" hidden>
+          <div class="rename-row">
+            <label class="rename-input-wrap">
+              <span class="field-label">当前标题</span>
+              <input name="title" required>
+            </label>
+            <label class="rename-select-wrap">
+              <span class="field-label">标题候选</span>
+              <select id="title-choices"><option value="">套用标题候选</option></select>
+            </label>
+            <button type="submit">保存标题</button>
+          </div>
+          <output id="title-count" class="char-counter"></output>
         </form>
-        <div class="editor-footer"><span id="draft-status"></span><button id="save" class="primary">保存正文</button></div>
-        <section id="comparison" hidden>
-          <h2>候选稿</h2>
+
+        <section id="conflict-banner" class="conflict-panel" aria-live="polite" hidden>
+          <p class="conflict-title">有一份基于旧版本的本地编辑。</p>
+          <p class="conflict-copy">服务器正文已在其他标签页或操作中更新。你的本地修改已完整保留，可对照服务器版本或复制后合并。</p>
+          <details class="disclosure">
+            <summary>查看服务器最新正文</summary>
+            <pre id="conflict-server-body" class="server-body-preview"></pre>
+          </details>
+          <div class="actions">
+            <button id="conflict-copy" type="button">复制本地稿</button>
+            <button id="conflict-use-server" type="button" class="danger">使用服务器版本</button>
+          </div>
+        </section>
+
+        <div class="editor-shell">
+          <label for="body" class="visually-hidden">正文</label>
+          <textarea id="body" spellcheck="false" placeholder="写下正文……（支持 Ctrl/Cmd + S 快速保存）" rows="20"></textarea>
+          <footer class="editor-footer">
+            <span id="draft-status" class="status-muted">尚未保存</span>
+            <span id="word-count" class="tabular muted-copy">0 字</span>
+          </footer>
+        </div>
+
+        <section id="comparison" class="comparison-panel" hidden>
+          <header class="comparison-header">
+            <div>
+              <h2>候选稿差异对照</h2>
+              <p id="diff-summary" class="muted-copy tabular"></p>
+            </div>
+            <div class="segmented" role="group" aria-label="差异展示方式">
+              <button type="button" data-diff-mode="split" aria-pressed="true" class="active">并排对照</button>
+              <button type="button" data-diff-mode="inline" aria-pressed="false">行内高亮</button>
+              <button type="button" data-diff-mode="raw" aria-pressed="false">候选原文</button>
+            </div>
+          </header>
+          <p id="candidate-qa" class="qa-summary" hidden></p>
+          <div id="diff-surface" class="diff-surface"></div>
           <label for="candidate" class="visually-hidden">候选正文</label>
-          <textarea id="candidate" readonly rows="8"></textarea>
-          <p id="candidate-qa" hidden></p>
-          <div class="actions"><button id="adopt" class="primary">采纳候选稿</button><button id="discard">舍弃</button></div>
+          <textarea id="candidate" readonly rows="10" hidden></textarea>
+          <div class="actions comparison-actions">
+            <button id="adopt" type="button" class="primary">采纳候选稿</button>
+            <button id="discard" type="button">舍弃</button>
+          </div>
         </section>
       </section>
     </main>
-    <aside aria-label="流程" id="pipeline">
-      <h2>写作流程</h2>
-      <p id="flow-empty">打开一份稿件查看流程。</p>
+
+    <aside aria-label="流程" id="pipeline" class="sidebar sidebar-right">
+      <div class="pipeline-header">
+        <h2 class="section-heading">写作流程</h2>
+      </div>
+      <p id="flow-empty" class="muted-copy">打开一份稿件查看流程、规划、设定与候选任务。</p>
+
       <div id="flow-content" hidden>
-        <div id="fanqie-actions" hidden>
-          <p id="reviews"></p>
-          <div class="actions">
-            <button id="review-pass">审稿通过</button><button id="review-reject">打回</button>
-            <button id="finalize" class="primary">定稿</button>
-          </div>
+        <div class="segmented pipeline-tabs" role="tablist" aria-label="流程分区">
+          <button type="button" role="tab" data-pipeline-tab="workflow" aria-selected="true" class="active">流转</button>
+          <button type="button" role="tab" data-pipeline-tab="planning" aria-selected="false">规划</button>
+          <button type="button" role="tab" id="tab-continuity" data-pipeline-tab="continuity" aria-selected="false">设定</button>
+          <button type="button" role="tab" data-pipeline-tab="runs" aria-selected="false">候选</button>
         </div>
-        <div id="toutiao-actions" hidden>
-          <p id="article-report" hidden></p><p id="export-status" hidden></p><form id="qa">
-            <label>质检评分<input name="score" type="number" min="0" max="100" required></label>
-            <label class="check"><input name="passed" type="checkbox">质检已通过</label>
-            <label>未通过项<textarea name="fails" rows="2" placeholder="每行一项"></textarea></label>
-            <button type="submit">记录质检</button>
-          </form>
-          <div class="actions">
-            <button id="refine">保存回改稿</button><button id="accept">验收</button><button id="reject">退回</button>
-            <button id="approve">批准交稿</button><button id="deliver" class="primary">交稿</button>
+
+        <section data-pipeline-panel="workflow" class="pipeline-panel">
+          <div id="fanqie-actions" hidden>
+            <p id="reviews" class="muted-copy tabular"></p>
+            <div class="actions">
+              <button id="review-pass" type="button">审稿通过</button>
+              <button id="review-reject" type="button">打回</button>
+              <button id="finalize" type="button" class="primary">定稿</button>
+            </div>
           </div>
-          <p id="approved-version" hidden></p>
-          <a id="download" hidden download="交稿单.md">下载获批 Markdown</a>
-        </div>
-        <details id="planning">
-          <summary>写作规划</summary>
-          <form id="chapter-outline" hidden>
-            <label>视角<input name="viewpoint" required></label>
-            <label>目标篇幅<input name="target" type="number" min="1" value="2200" required></label>
+
+          <div id="toutiao-actions" hidden>
+            <p id="article-report" class="report-line" hidden></p>
+            <p id="export-status" class="report-line" hidden></p>
+            <form id="qa" class="stack-form">
+              <label>质检评分（通过线 84）<input name="score" type="number" min="0" max="100" required></label>
+              <label class="check"><input name="passed" type="checkbox">质检已通过</label>
+              <label>未通过项<textarea name="fails" rows="2" placeholder="每行一项"></textarea></label>
+              <button id="qa-submit" type="submit">记录质检</button>
+            </form>
+            <div class="actions">
+              <button id="refine" type="button">保存回改稿</button>
+              <button id="accept" type="button">验收通过</button>
+              <button id="reject" type="button">退回修订</button>
+            </div>
+            <hr class="hairline">
+            <div class="actions">
+              <button id="approve" type="button">批准交稿</button>
+              <button id="deliver" type="button" class="primary">交稿</button>
+            </div>
+            <p id="approved-version" class="muted-copy tabular" hidden></p>
+            <a id="download" class="download-link" hidden download="交稿单.md">下载获批 Markdown</a>
+          </div>
+        </section>
+
+        <section data-pipeline-panel="planning" id="planning" class="pipeline-panel" hidden>
+          <form id="chapter-outline" class="stack-form" hidden>
+            <label>视角人物<input name="viewpoint" required></label>
+            <label>目标篇幅（非空白字符）<input name="target" type="number" min="1" value="2200" required></label>
             <label>锁定事实<textarea name="lockedFacts" rows="2" required></textarea></label>
             <label>人物知识边界<textarea name="knowledge" rows="2" required></textarea></label>
             <label>剧情梗概<textarea name="剧情梗概" rows="2" required></textarea></label>
             <label>核心冲突与看点<textarea name="核心冲突与看点" rows="2" required></textarea></label>
             <label>情节推进节点<textarea name="情节推进节点" rows="2" required></textarea></label>
             <label>章末落点<textarea name="章末落点" rows="2" required></textarea></label>
-            <button type="submit">保存章纲</button>
+            <button type="submit" class="primary">保存章纲</button>
           </form>
-          <form id="article-plan" hidden>
+
+          <form id="article-plan" class="stack-form" hidden>
             <label>驱动<select name="driver" required></select></label>
             <label>开头<select name="opening" required></select></label>
             <label>结尾<select name="ending" required></select></label>
-            <label id="title-matrix">标题候选<textarea name="titles" rows="3" placeholder="每行一个标题 | 母题"></textarea></label>
-            <button type="submit">保存场景规划</button>
+            <label id="title-matrix">标题候选矩阵（≥5 题、≥3 母题）
+              <textarea name="titles" rows="4" placeholder="每行一个：标题文本 | 母题"></textarea>
+            </label>
+            <button type="submit" class="primary">保存场景规划</button>
           </form>
-        </details>
-        <details id="continuity" hidden>
-          <summary>设定与章序</summary>
-          <form id="setting-proposal">
-            <label>设定编号<input name="factId" required></label>
-            <label>设定内容<textarea name="note" rows="3" required></textarea></label>
-            <label>来源<input name="source" required></label>
-            <label>生效章节<select name="fromChapter" data-setting-chapters data-default="当前章"></select></label>
-            <label>生效段落<input name="point" type="number" min="1" value="1" required></label>
-            <label>失效章节<select name="toChapter" data-setting-chapters data-default="长期有效"></select></label>
-            <label id="setting-to-point" hidden>从第几段起失效<input name="toPoint" type="number" min="1" value="1" disabled required></label>
-            <div id="setting-people"></div>
-            <button id="setting-add-person" type="button">添加知情人物</button>
-            <template id="setting-person-template">
-              <fieldset>
-                <legend>知情人物</legend>
-                <label>姓名<input data-person required></label>
-                <label>知情章节<select data-when data-setting-chapters data-default="与生效章相同"></select></label>
-                <label>知情段落<input data-point type="number" min="1" placeholder="留空采用生效点或所选章第一段"></label>
-                <button type="button">移除人物</button>
-              </fieldset>
-            </template>
-            <label class="check"><input name="locked" type="checkbox">锁定设定</label>
-            <button type="submit">提交设定提案</button>
-          </form>
-          <form id="settings-read">
-            <label>查询人物<input name="character" required></label>
+        </section>
+
+        <section data-pipeline-panel="continuity" id="continuity" class="pipeline-panel" hidden>
+          <form id="settings-read" class="stack-form">
+            <h3 class="sub-heading">查询人物所知</h3>
+            <label>人物姓名<input name="character" required placeholder="输入人物名"></label>
             <label>章内段落<input name="point" type="number" min="1" value="1" required></label>
             <button type="submit">查看人物所知</button>
           </form>
-          <div id="known-settings"></div>
-          <div id="settings"></div><button id="settings-more" hidden>更多设定</button>
-          <form id="record-evidence">
+          <div id="known-settings" class="known-list"></div>
+
+          <hr class="hairline">
+
+          <details class="disclosure" open>
+            <summary>提交设定提案</summary>
+            <form id="setting-proposal" class="stack-form">
+              <label>设定编号<input name="factId" required placeholder="例如：secret-letter"></label>
+              <label>设定内容<textarea name="note" rows="2" required></textarea></label>
+              <label>来源<input name="source" required placeholder="例如：作者笔记 / 第一章"></label>
+              <label>生效章节<select name="fromChapter" data-setting-chapters data-default="当前章"></select></label>
+              <label>生效段落<input name="point" type="number" min="1" value="1" required></label>
+              <label>失效章节<select name="toChapter" data-setting-chapters data-default="长期有效"></select></label>
+              <label id="setting-to-point" hidden>从第几段起失效<input name="toPoint" type="number" min="1" value="1" disabled required></label>
+              <div id="setting-people"></div>
+              <button id="setting-add-person" type="button">添加知情人物</button>
+              <template id="setting-person-template">
+                <fieldset class="person-fieldset">
+                  <legend>知情人物</legend>
+                  <label>姓名<input data-person required></label>
+                  <label>知情章节<select data-when data-setting-chapters data-default="与生效章相同"></select></label>
+                  <label>知情段落<input data-point type="number" min="1" placeholder="留空采用生效点或首段"></label>
+                  <button type="button">移除人物</button>
+                </fieldset>
+              </template>
+              <label class="check"><input name="locked" type="checkbox">锁定设定（禁止覆盖）</label>
+              <button type="submit" class="primary">提交设定提案</button>
+            </form>
+          </details>
+
+          <h3 class="sub-heading">设定记录</h3>
+          <div id="settings" class="settings-list"></div>
+          <button id="settings-more" type="button" hidden>加载更多设定</button>
+
+          <hr class="hairline">
+
+          <form id="record-evidence" class="stack-form">
+            <h3 class="sub-heading">正文证据锚点</h3>
             <label>设定编号<input name="factId" required></label>
             <label>已保存正文中的原句<input name="quote" required></label>
-            <button>记录正文证据</button><button type="button" id="evidence-detail">查看最近证据</button><output id="evidence-result"></output>
+            <div class="actions">
+              <button type="submit">记录正文证据</button>
+              <button type="button" id="evidence-detail">查看最近证据</button>
+            </div>
+            <output id="evidence-result" class="muted-copy"></output>
           </form>
-          <div class="actions"><button id="move-up">上移本章</button><button id="move-down">下移本章</button></div>
-        </details>
-        <details id="run-details">
-          <summary>候选写作</summary>
-          <form id="start-run">
-            <label>写作要求<textarea name="instruction" rows="3" required></textarea></label>
+
+          <hr class="hairline">
+
+          <div class="actions">
+            <button id="move-up" type="button">上移本章</button>
+            <button id="move-down" type="button">下移本章</button>
+          </div>
+        </section>
+
+        <section data-pipeline-panel="runs" id="run-details" class="pipeline-panel" hidden>
+          <form id="start-run" class="stack-form">
+            <label>写作要求<textarea name="instruction" rows="3" required placeholder="说明本轮希望扩写、润色或续写的重点"></textarea></label>
             <label>令牌预算<input name="tokenLimit" type="number" min="1" required></label>
-            <output id="budget-hint"></output>
+            <output id="budget-hint" class="muted-copy tabular"></output>
             <label id="run-point">知情查询段落<input name="point" type="number" min="1" value="1"></label>
-            <button type="submit">创建写作任务</button>
-            <button type="button" id="estimate-budget">按当前修订核算</button>
+            <div class="actions">
+              <button id="start-run-submit" type="submit" class="primary">创建写作任务</button>
+              <button type="button" id="estimate-budget">按当前修订核算</button>
+            </div>
           </form>
-          <div id="run-content" hidden>
-            <p id="run-status"></p>
-            <button type="button" id="run-detail">查看冻结输入和调用记录</button><pre id="run-input" hidden></pre>
-            <button type="button" id="run-history">查看任务历史</button><div id="run-history-list"></div>
-            <form id="reconcile" hidden><label>未记账的令牌数<input name="tokens" type="number" min="0" required></label><button>确认用量</button></form>
-            <form id="generate-run">
+
+          <div id="run-content" class="run-panel" hidden>
+            <hr class="hairline">
+            <p id="run-status" class="report-line tabular"></p>
+            <div class="actions">
+              <button type="button" id="run-detail">查看冻结输入与调用明细</button>
+              <button type="button" id="run-history">任务历史</button>
+              <button id="cancel" type="button" class="danger">取消任务</button>
+            </div>
+
+            <div id="run-input" class="run-inspector" hidden></div>
+            <div id="run-history-list" class="history-list"></div>
+
+            <form id="reconcile" class="stack-form" hidden>
+              <label>未记账的令牌数<input name="tokens" type="number" min="0" required></label>
+              <button type="submit" class="primary">确认用量对账</button>
+            </form>
+
+            <form id="generate-run" class="stack-form">
+              <h3 class="sub-heading">通过 DsH 生成候选稿</h3>
               <label>DsH 模型提供方<input name="provider" value="deepseek-account" required></label>
               <label>模型<input name="model" value="deepseek-flash" required></label>
-              <label id="automatic-qa" class="check" hidden><input name="autoQa" type="checkbox">生成后质检，最多自动回改两轮</label>
-              <button type="submit">用 DsH 生成候选稿</button><button type="button" id="refresh-run">刷新任务</button>
+              <label id="automatic-qa" class="check" hidden>
+                <input name="autoQa" type="checkbox">生成后质检，最多自动回改两轮
+              </label>
+              <div class="actions">
+                <button type="submit" class="primary">开始生成</button>
+                <button type="button" id="refresh-run">刷新状态</button>
+              </div>
             </form>
-            <form id="complete-run">
+
+            <form id="complete-run" class="stack-form">
+              <h3 class="sub-heading">手动导入候选稿</h3>
               <label>候选正文<textarea name="body" rows="5" required></textarea></label>
               <label>实际令牌用量<input name="tokens" type="number" min="0" required></label>
               <button type="submit">导入候选稿</button>
             </form>
-            <button id="cancel">取消任务</button>
           </div>
-        </details>
+        </section>
       </div>
     </aside>
   </div>
+
+  <dialog id="workbench-dialog" class="modal-dialog" aria-modal="true"></dialog>
 </body>
 </html>

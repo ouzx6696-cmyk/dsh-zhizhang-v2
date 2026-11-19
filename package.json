@@ -9,9 +9,10 @@
     "npm": ">=11.0.0"
   },
   "scripts": {
-    "check": "tsc --project tsconfig.json --noEmit",
-    "build": "tsc --project tsconfig.build.json",
-    "test": "node --test \"test/*-d02.test.mjs\" \"test/*-w02.test.mjs\" test/smoke.test.mjs test/workspace-v2.test.mjs",
+    "check": "tsc --project tsconfig.json --noEmit && tsc --project tsconfig.client.json --noEmit",
+    "build": "tsc --project tsconfig.build.json && tsc --project tsconfig.client.json",
+    "dev": "node scripts/dev-server.mjs",
+    "test": "node --test \"test/*-d02.test.mjs\" \"test/*-w02.test.mjs\" test/smoke.test.mjs test/workspace-v2.test.mjs test/refactor-v2.test.mjs",
     "test:evidence": "node --test \"test/*-?01.test.mjs\"",
     "test:all": "node --test \"test/*.test.mjs\"",
     "test:browser": "node scripts/browser-check.mjs",
@@ -21,21 +22,17 @@
     "typescript": "5.8.3"
   },
   "exports": {
-    ".": "./src/host/plugin.mjs",
-    "./client": "./src/client/slot.js",
+    ".": "./dist/host/plugin.js",
+    "./client": "./dist/client/slot.js",
     "./locale/*.json": "./src/bundle/locale/*.json"
   },
   "files": [
     "dist",
-    "src/host/plugin.mjs",
-    "src/client/slot.js",
     "src/client/workbench.html",
     "src/client/workbench.css",
-    "src/client/workbench.js",
     "src/bundle/cordis.patch.yml",
     "src/bundle/locale",
-    "docs/V2.md",
-    "src/host/writing.mjs"
+    "docs/V2.md"
   ],
   "dsh": {
     "bundle": {

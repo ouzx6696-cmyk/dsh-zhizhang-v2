@@ -83,30 +83,31 @@ No commit, remote, Bundle installation, DSH profile change, real model call or f
 
 ## Toolchain
 
-- Node.js `>=24.15.0`; the smoke test uses Node's built-in TypeScript type stripping. Verified locally on Node 24.15.0.
-- npm `>=11.0.0`. Verified locally on npm 11.15.0.
-- TypeScript `5.8.3` is the pinned development compiler, locked in `package-lock.json`; it is build tooling, not the embedded DsH runtime version.
+- Node.js `>=24.15.0`; offline tests execute TypeScript modules directly via Node's built-in type stripping.
+- npm `>=11.0.0`.
+- TypeScript `5.8.3` is the pinned development compiler (`devDependencies` only — zero runtime dependencies). Both backend (`tsconfig.build.json`) and browser client (`tsconfig.client.json`) compile cleanly to native ESM under `dist/`.
 
 ## Commands
 
-- `npm ci --ignore-scripts` installs the pinned compiler without running package lifecycle scripts; a registry may be needed on first setup.
-- `npm run check` runs strict TypeScript checking without emitting files.
-- `npm test` runs the module-boundary and offline sample tests with Node's built-in test runner.
-- `npm run build` emits JavaScript to ignored `dist/`; it does not package or validate a DsH Bundle.
-- `npm run verify` combines check and test.
-
-Verification scripts make no model calls, network calls, DSH profile changes, or publishing actions. No Host or Client API is guessed. The smoke test only verifies that the empty module boundaries load; it does not demonstrate application functionality.
+- `npm ci --ignore-scripts` installs the pinned compiler without running package lifecycle scripts.
+- `npm run check` runs strict TypeScript checking for both backend and browser client without emitting files.
+- `npm test` runs the module-boundary, storage, workflow, domain, workspace, and V2 refactor tests with Node's built-in test runner.
+- `npm run test:evidence` runs the historical v1.x adjudication evidence fixtures.
+- `npm run test:all` runs both core and evidence test suites.
+- `npm run build` compiles backend (`dist/`) and modular browser client (`dist/client/`).
+- `npm run dev` starts the zero-dependency local preview server on `http://localhost:3000/workbench` (run `npm run build` first).
+- `npm run verify` combines `check` and `test`.
 
 ## Module layout
 
-- `src/contracts/`: future shared contracts.
-- `src/host/`: future verified host adapter and composition root.
-- `src/storage/`: future persistence boundary.
-- `src/workflow/`: future orchestration boundary.
-- `src/domain/shared/`: future shared business primitives.
-- `src/domain/fanqie/`: future long-form writing domain.
-- `src/domain/toutiao/`: future article domain.
-- `src/client/`: future author workbench client.
-- `src/bundle/`: future package assembly boundary.
+- `src/contracts/`: frozen shared error envelopes, approval records, and command table.
+- `src/storage/`: SQLite schema (`author-schema.ts`), generation ledger, command journal, event log, durable projection checkpoints, backups, and delivery export.
+- `src/workflow/`: run state machine, `StageRegistry` (`writing-stages.ts`), `BudgetGuard` (`writing-budget.ts`), and durable read models (`author-reads.ts`).
+- `src/domain/shared/`: narrative anchors and chapter ordering primitives.
+- `src/domain/fanqie/`: chapter outline, editorial reviews, continuity, and chapter reorder impact (strictly isolated from `domain/toutiao/`).
+- `src/domain/toutiao/`: scenario matrix, 34-char title cap, QA 84-point gate, dual-round auto-refinement, and delivery builder (strictly isolated from `domain/fanqie/`).
+- `src/application/`: vertical domain services (`context.ts`, `fanqie-service.ts`, `toutiao-service.ts`, `run-service.ts`, `snapshot-service.ts`) composed by `author-workspace.ts`.
+- `src/host/`: strict TypeScript DsH Cordis plugin (`plugin.ts`), one-shot LLM transport (`writing.ts`), and workspace facade (`workspace.ts`).
+- `src/client/`: strict TypeScript DsH client slot (`slot.ts`) and modular browser workbench (`workbench/` with pure paragraph LCS diff, custom `<dialog>` modals, structured run inspector, and editorial paper/ink styling).
+- `src/bundle/`: DsH plugin packaging metadata and locales (`en.json`, `zh.json`).
 
-These modules currently export nothing. Their boundaries follow the local P1-A plan, not frozen APIs. Detailed plans remain in the original v1.x workspace under its local ignored `plans/v2.0/` directory; they are not copied into this repository or treated as a public dependency.

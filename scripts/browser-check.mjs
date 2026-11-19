@@ -26,22 +26,37 @@ app.mutation("chapter.outline", {
   剧情梗概: "林收到信", 核心冲突与看点: "是否拆开", 情节推进节点: "第三段读信", 章末落点: "留下疑问",
 });
 app.mutation("draft.save", { ...article, baseRevisionId: null, body: "稿".repeat(1100) });
-const browserContext = await browser.newContext({ colorScheme: "dark", viewport: { width: 768, height: 1024 } });
+const browserContext = await browser.newContext({ colorScheme: "dark", viewport: { width: 1024, height: 900 } });
 const page = await browserContext.newPage();
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
-page.on("dialog", (dialog) => dialog.accept());
 const ready = Promise.withResolvers();
 const delivery = Promise.withResolvers();
 let delay = true;
 let refresh;
 
+const STATIC_ASSETS = new Map([
+  ["/workbench", { file: "../src/client/workbench.html", type: "text/html" }],
+  ["/workbench.css", { file: "../src/client/workbench.css", type: "text/css" }],
+  ["/workbench/main.js", { file: "../dist/client/workbench/main.js", type: "text/javascript" }],
+  ["/workbench/types.js", { file: "../dist/client/workbench/types.js", type: "text/javascript" }],
+  ["/workbench/diff.js", { file: "../dist/client/workbench/diff.js", type: "text/javascript" }],
+  ["/workbench/api.js", { file: "../dist/client/workbench/api.js", type: "text/javascript" }],
+  ["/workbench/draft-vault.js", { file: "../dist/client/workbench/draft-vault.js", type: "text/javascript" }],
+  ["/workbench/modal.js", { file: "../dist/client/workbench/modal.js", type: "text/javascript" }],
+  ["/workbench/views/diff-view.js", { file: "../dist/client/workbench/views/diff-view.js", type: "text/javascript" }],
+  ["/workbench/views/run-inspector.js", { file: "../dist/client/workbench/views/run-inspector.js", type: "text/javascript" }],
+]);
+
 try {
   await browserContext.route("http://workbench.test/**", async (route) => {
     const url = new URL(route.request().url());
-    const name = url.pathname.split("/").at(-1);
-    if (name === "state") {
-      const result = app.snapshot(url.searchParams.get("projectId"), url.searchParams.get("documentId"));
+    if (url.pathname === "/state") {
+      const result = app.readState(
+        url.searchParams.get("projectId") ?? undefined,
+        url.searchParams.get("documentId") ?? undefined,
+        url.searchParams.get("ifSequence") ?? undefined,
+      );
       if (refresh) {
         const { ready, release } = refresh;
         refresh = null;
@@ -50,7 +65,7 @@ try {
       }
       return route.fulfill({ json: { ok: true, result } });
     }
-    if (name === "mutate") {
+    if (url.pathname === "/mutate") {
       const { action, ...input } = route.request().postDataJSON();
       try {
         const result = app.mutation(action, input);
@@ -64,18 +79,22 @@ try {
         return route.fulfill({ status: 409, json: { ok: false, code: error.code, details: error.details } });
       }
     }
-    const file = name === "workbench" ? "workbench.html" : name;
-    const types = { "workbench.html": "text/html", "workbench.js": "text/javascript", "workbench.css": "text/css" };
-    const body = await readFile(new URL(`../src/client/${file}`, import.meta.url));
-    return route.fulfill({ body, contentType: types[file] });
+    const asset = STATIC_ASSETS.get(url.pathname);
+    if (!asset) return route.fulfill({ status: 404, body: "Not found" });
+    const body = await readFile(new URL(asset.file, import.meta.url));
+    return route.fulfill({ body, contentType: asset.type });
   });
+
   const open = async ({ projectId }, title, tab = page) => {
     await tab.locator("#projects").selectOption(projectId);
     await tab.locator("#documents button").filter({ hasText: title }).click();
     await tab.locator("#body").waitFor();
   };
   const click = (id) => page.locator(`#${id}`).click();
+  const selectTab = (name) => page.locator(`[data-pipeline-tab="${name}"]`).click();
+  const confirmModal = () => page.locator("#workbench-dialog button.primary").click();
   const expectText = (id, text) => page.locator(`#${id}`).getByText(text, { exact: true }).waitFor();
+
   await page.goto("http://workbench.test/workbench");
   await open(novel, "第一章");
   const body = page.locator("#body");
@@ -84,19 +103,20 @@ try {
   await ready.promise;
   await body.fill("甲乙丙");
   delivery.resolve();
-  await expectText("notice", "已保存");
+  await expectText("notice-text", "已保存");
   assert.equal(await body.inputValue(), "甲乙丙");
   assert.equal(app.snapshot(novel.projectId, novel.documentId).active.body, "甲乙");
   await page.reload();
   await open(novel, "第一章");
   assert.equal(await body.inputValue(), "甲乙丙");
+
   const refreshAfterSave = { ready: Promise.withResolvers(), release: Promise.withResolvers() };
   refresh = refreshAfterSave;
   await click("save");
   await refreshAfterSave.ready.promise;
   await body.fill("甲乙丙丁");
   refreshAfterSave.release.resolve();
-  await expectText("notice", "已保存");
+  await expectText("notice-text", "已保存");
   assert.equal(await body.inputValue(), "甲乙丙丁");
   assert.equal(app.snapshot(novel.projectId, novel.documentId).active.body, "甲乙丙");
   await page.reload();
@@ -112,7 +132,7 @@ try {
   await secondTab.locator("#body").blur();
   await body.fill("甲乙丙丁戊");
   await click("save");
-  await expectText("notice", "已保存");
+  await expectText("notice-text", "已保存");
   await secondTab.reload();
   await open(novel, "第一章", secondTab);
   assert.equal(await secondTab.locator("#body").inputValue(), "第二页保留的稿件");
@@ -120,7 +140,7 @@ try {
   await secondTab.close();
   await page.bringToFront();
 
-  await page.locator("#continuity summary").click();
+  await selectTab("continuity");
   await page.locator('#setting-proposal [name="factId"]').fill("f1");
   await page.locator('#setting-proposal [name="note"]').fill("设定");
   await page.locator('#setting-proposal [name="source"]').fill("作者笔记");
@@ -138,12 +158,17 @@ try {
   await page.locator('#settings-read [name="character"]').fill("乔");
   await page.locator("#settings-read button").click();
   await page.getByText("设定 · 来源 作者笔记", { exact: false }).waitFor();
+
+  await selectTab("workflow");
   await click("review-pass");
   await expectText("state", "已审稿");
   await click("finalize");
+  await confirmModal();
   await expectText("state", "已定稿");
+
   await page.locator("#documents button").filter({ hasText: "第二章" }).click();
   await expectText("heading", "第二章");
+  await selectTab("continuity");
   await page.locator('#settings-read [name="character"]').fill("林");
   await page.locator('#settings-read [name="point"]').fill("2");
   await page.locator("#settings-read button").click();
@@ -151,7 +176,8 @@ try {
   await page.locator('#settings-read [name="point"]').fill("3");
   await page.locator("#settings-read button").click();
   await page.getByText("设定 · 来源 作者笔记", { exact: false }).waitFor();
-  await page.locator("#run-details summary").click();
+
+  await selectTab("runs");
   await page.locator('#start-run [name="instruction"]').fill("接写");
   await page.locator('#start-run [name="point"]').fill("3");
   await click("estimate-budget");
@@ -161,6 +187,7 @@ try {
   const run = app.mutation("run.history", { documentId: secondChapter })[0];
   const { frozenInput } = app.mutation("run.detail", { documentId: secondChapter, runId: run.id });
   assert.equal(JSON.parse(frozenInput).knownFacts[0].id, "f1");
+  await selectTab("continuity");
   await page.locator('#settings-read [name="point"]').fill("4");
   await page.locator("#settings-read button").click();
   await expectText("known-settings", "此时该人物没有已确认的知情设定。");
@@ -169,6 +196,7 @@ try {
   await page.locator('#rename [name="title"]').fill("新标题");
   await page.locator("#rename button").click();
   await expectText("heading", "新标题");
+  await selectTab("workflow");
   await page.locator('#qa [name="score"]').fill("84");
   await page.locator('#qa [name="passed"]').check();
   await page.locator("#qa button").click();
@@ -176,6 +204,7 @@ try {
   await click("accept");
   await expectText("state", "已验收");
   await click("approve");
+  await confirmModal();
   await expectText("approve", "已批准交稿");
   await click("deliver");
   await expectText("export-status", "已写入交稿文件");

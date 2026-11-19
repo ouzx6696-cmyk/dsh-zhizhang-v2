@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { generateCandidate } from "../src/host/writing.mjs";
+import { generateCandidate } from "../src/host/writing.ts";
 
 const run = { provider: "fixture", model: "test", reserved: 24000, autoQa: true, frozenInput: JSON.stringify({
   title: "长文", mode: "long", scenario: {}, instruction: "修订", text: "稿".repeat(3000),

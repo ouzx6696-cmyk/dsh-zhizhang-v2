@@ -2,21 +2,78 @@
 //
 // The repository intentionally keeps a zero-dependency tree (only the
 // TypeScript compiler is installed), so instead of pulling in `@types/node`
-// the handful of built-in modules the code touches are declared here. Extend
-// this file when the code needs more of a built-in surface; do not add a
-// runtime dependency for types alone.
-//
-// Every declaration here mirrors the Node 24 shape the offline test fixtures
-// already exercise.
+// the handful of built-in modules and Web-standard globals Node 24 provides
+// are declared here.
 
-// `structuredClone` is a genuine Node global (Node 17+), so it is declared as
-// one. `randomUUID` is NOT a global: it lives in `node:crypto`, declared as a
-// module below, and must be imported. Do not add a global declaration for it —
-// that would type-check code that does not run.
 declare function structuredClone<T>(value: T): T;
 
+declare const console: {
+  log(...args: unknown[]): void;
+  warn(...args: unknown[]): void;
+  error(...args: unknown[]): void;
+};
+
+declare const process: {
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly argv: readonly string[];
+  exitCode?: number;
+};
+
+declare function setTimeout(callback: () => void, ms?: number): unknown;
+declare function clearTimeout(id: unknown): void;
+
+declare class TextEncoder {
+  encode(input?: string): Uint8Array;
+}
+
+declare class URL {
+  constructor(input: string, base?: string | URL);
+  readonly href: string;
+  readonly pathname: string;
+  readonly searchParams: URLSearchParams;
+}
+
+declare class URLSearchParams {
+  get(name: string): string | null;
+  set(name: string, value: string): void;
+}
+
+declare class Headers {
+  get(name: string): string | null;
+}
+
+declare class AbortSignal {
+  readonly aborted: boolean;
+  readonly reason: unknown;
+  throwIfAborted(): void;
+  static timeout(milliseconds: number): AbortSignal;
+  static any(signals: readonly AbortSignal[]): AbortSignal;
+}
+
+declare class AbortController {
+  readonly signal: AbortSignal;
+  abort(reason?: unknown): void;
+}
+
+declare class Request {
+  readonly url: string;
+  readonly method: string;
+  readonly headers: Headers;
+  readonly signal: AbortSignal;
+  readonly body: AsyncIterable<Uint8Array> | null;
+}
+
+declare class Response {
+  constructor(body?: string | Uint8Array | null, init?: { status?: number; headers?: Record<string, string> });
+  static json(data: unknown, init?: { status?: number; headers?: Record<string, string> }): Response;
+}
+
+declare const Buffer: {
+  concat(list: readonly Uint8Array[], totalLength?: number): Uint8Array & { toString(encoding?: "utf8"): string };
+  byteLength(value: string, encoding?: "utf8"): number;
+};
+
 declare module "node:crypto" {
-  /** A hash handle. */
   export interface Hash {
     update(data: string | Uint8Array): Hash;
     digest(encoding: "hex" | "base64" | "utf8"): string;
@@ -24,17 +81,32 @@ declare module "node:crypto" {
   export function randomUUID(): string;
   export function createHash(algorithm: string): Hash;
 }
+
 declare module "node:path" {
   export function join(...paths: readonly string[]): string;
   export function dirname(path: string): string;
   export function basename(path: string, suffix?: string): string;
 }
 
+declare module "node:fs" {
+  export function existsSync(path: string | URL): boolean;
+  export function mkdirSync(path: string | URL, options?: { recursive?: boolean; mode?: number }): string | undefined;
+  export function readFileSync(path: string | URL, encoding: "utf8"): string;
+  export function readFileSync(path: string | URL): Uint8Array;
+  export function writeFileSync(
+    path: string | URL,
+    data: string | Uint8Array,
+    options?: { mode?: number; flag?: string; flush?: boolean },
+  ): void;
+  export function linkSync(existingPath: string | URL, newPath: string | URL): void;
+  export function unlinkSync(path: string | URL): void;
+}
+
 declare module "node:fs/promises" {
-  export function readFile(path: string, encoding: "utf8"): Promise<string>;
-  export function readFile(path: string): Promise<Uint8Array>;
-  export function writeFile(path: string, data: string | Uint8Array): Promise<void>;
-  export function mkdir(path: string, options?: { recursive?: boolean; mode?: number }): Promise<string | undefined>;
+  export function readFile(path: string | URL, encoding: "utf8"): Promise<string>;
+  export function readFile(path: string | URL): Promise<Uint8Array>;
+  export function writeFile(path: string | URL, data: string | Uint8Array): Promise<void>;
+  export function mkdir(path: string | URL, options?: { recursive?: boolean; mode?: number }): Promise<string | undefined>;
   interface FileInfo {
     isFile(): boolean;
     isDirectory(): boolean;
@@ -46,26 +118,20 @@ declare module "node:fs/promises" {
   export function rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
 }
 
-// The synchronous SQLite driver (see src/storage/driver.ts for the seam that
-// keeps the concrete driver out of the rest of the storage layer).
 declare module "node:sqlite" {
-  /** A value the built-in driver accepts as a bound parameter. */
   export type SqliteValue = null | number | bigint | string | Uint8Array;
 
-  /** The result of a statement that writes. */
   export interface StatementRunResult {
     changes: number;
     lastInsertRowid: number | bigint;
   }
 
-  /** A prepared statement. Rows come back as untyped records. */
   export class StatementSync {
     run(...parameters: readonly SqliteValue[]): StatementRunResult;
     get(...parameters: readonly SqliteValue[]): unknown;
     all(...parameters: readonly SqliteValue[]): unknown[];
   }
 
-  /** A synchronous SQLite database handle. */
   export class DatabaseSync {
     constructor(path: string, options?: { open?: boolean; readOnly?: boolean });
     exec(sql: string): void;
