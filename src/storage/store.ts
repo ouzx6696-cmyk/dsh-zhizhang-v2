@@ -1,0 +1,79 @@
+// Opening and creating the authoritative store.
+//
+// The rules come from contracts.md B.10 (frozen 2026-11-19) and are pinned by
+// `storage-a01.test.mjs` and `sqlite-d01.test.mjs`:
+//
+//   - a store that cannot be read at all is refused, not half-served;
+//   - a store whose bytes are not a database is refused the same way;
+//   - a store with no schema row is refused;
+//   - a store whose schema id is outside the V2 window is refused, with the
+//     offending id and the supported window in the details.
+//
+// None of these ever migrate, repair or guess. The caller gets one refusal.
+
+import { join } from "node:path";
+import { openDatabase } from "./driver.ts";
+import type { SqliteDatabase } from "./driver.ts";
+import { StorageError } from "./errors.ts";
+import { assertSupportedSchema, SCHEMA_ID } from "./schema.ts";
+
+/** Creates a new store at `path`, recording the current schema id. */
+export function createStore(path: string, schemaId: string = SCHEMA_ID): void {
+  assertSupportedSchema(schemaId);
+  const db = openDatabase(path);
+  try {
+    db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);");
+    db.prepare("INSERT INTO meta (key, value) VALUES ('schema', ?);").run(schemaId);
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+  db.close();
+}
+
+/** Reads the schema id a store records, or refuses the store. */
+export function readSchemaId(db: SqliteDatabase): string {
+  let row: unknown;
+  try {
+    row = db.prepare("SELECT value FROM meta WHERE key = 'schema';").get();
+  } catch {
+    throw new StorageError("storage.format_unsupported", { reason: "schema-unreadable" });
+  }
+  if (row === null || row === undefined) {
+    throw new StorageError("storage.format_unsupported", { reason: "schema-missing" });
+  }
+  const value = (row as { value?: unknown }).value;
+  if (typeof value !== "string") {
+    throw new StorageError("storage.format_unsupported", { reason: "schema-missing" });
+  }
+  return value;
+}
+
+/**
+ * Opens an existing store, refusing anything unreadable, corrupt or outside
+ * the V2 schema window. The returned handle stays open; the caller closes it.
+ */
+export function openStore(path: string): SqliteDatabase {
+  let db: SqliteDatabase | undefined;
+  try {
+    db = openDatabase(path);
+    const schemaId = readSchemaId(db);
+    assertSupportedSchema(schemaId);
+    return db;
+  } catch (error) {
+    if (error instanceof StorageError) {
+      // A refused store must not be left open behind the refusal.
+      db?.close();
+      throw error;
+    }
+    db?.close();
+    throw new StorageError("storage.format_unsupported", { reason: "unreadable" });
+  }
+}
+
+/** Convenience for tests and tools: a fresh store inside a directory. */
+export function createStoreIn(dir: string, name = "work.db", schemaId: string = SCHEMA_ID): string {
+  const path = join(dir, name);
+  createStore(path, schemaId);
+  return path;
+}
