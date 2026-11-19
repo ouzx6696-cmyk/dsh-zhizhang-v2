@@ -27,6 +27,7 @@ page.on("dialog", (dialog) => dialog.accept());
 const ready = Promise.withResolvers();
 const delivery = Promise.withResolvers();
 let delay = true;
+let refresh;
 
 try {
   await page.route("http://workbench.test/**", async (route) => {
@@ -34,6 +35,12 @@ try {
     const name = url.pathname.split("/").at(-1);
     if (name === "state") {
       const result = app.snapshot(url.searchParams.get("projectId"), url.searchParams.get("documentId"));
+      if (refresh) {
+        const { ready, release } = refresh;
+        refresh = null;
+        ready.resolve();
+        await release.promise;
+      }
       return route.fulfill({ json: { ok: true, result } });
     }
     if (name === "mutate") {
@@ -76,6 +83,18 @@ try {
   await page.reload();
   await open(novel);
   assert.equal(await body.inputValue(), "甲乙丙");
+  const refreshAfterSave = { ready: Promise.withResolvers(), release: Promise.withResolvers() };
+  refresh = refreshAfterSave;
+  await click("save");
+  await refreshAfterSave.ready.promise;
+  await body.fill("甲乙丙丁");
+  refreshAfterSave.release.resolve();
+  await expectText("notice", "已保存");
+  assert.equal(await body.inputValue(), "甲乙丙丁");
+  assert.equal(app.snapshot(novel.projectId, novel.documentId).active.body, "甲乙丙");
+  await page.reload();
+  await open(novel);
+  assert.equal(await body.inputValue(), "甲乙丙丁");
   await click("save");
   await expectText("draft-status", "已保存");
 

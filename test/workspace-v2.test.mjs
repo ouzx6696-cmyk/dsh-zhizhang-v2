@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { openAuthorWorkspace } from "../src/host/index.ts";
 import { openDatabase } from "../src/storage/index.ts";
@@ -260,6 +263,27 @@ test("host generation survives restart without guessing unreturned usage", (t) =
   reopened.finishGeneration(retry.attemptId, { body: "候选" }, null);
   reopened.finishGeneration(retry.attemptId, { body: "重复" }, null);
   assert.equal(reopened.mutation("run.detail", { ...context, runId }).settled, 47);
+});
+
+test("claiming an old failed run cannot bypass a newer active run across SQLite connections", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "zhizhang-run-"));
+  const filename = join(directory, "workspace.sqlite");
+  const first = openDatabase(filename);
+  const second = openDatabase(filename);
+  t.after(() => { first.close(); second.close(); rmSync(directory, { recursive: true, force: true }); });
+  const app = openAuthorWorkspace(first, () => {});
+  const otherTab = openAuthorWorkspace(second, () => {});
+  const context = setup(app, "fanqie");
+  const runInput = { ...context, instruction: "补一段", tokenLimit: 8000 };
+  const claim = (workspace, runId) => workspace.generationInput({ runId, provider: "fixture", model: "test" }, true);
+  const a = app.mutation("run.start", runInput).id;
+  app.finishGeneration(claim(app, a).attemptId, null, "generation.failed");
+  const b = otherTab.mutation("run.start", runInput).id;
+  claim(otherTab, b);
+  assert.throws(() => claim(app, a), { code: "gate.denied", details: { action: "run.generate", reason: "generation-in-progress" } });
+  assert.deepEqual(app.mutation("run.history", context).map((run) => run.state), ["running", "failed"]);
+  otherTab.mutation("run.cancel", { runId: b });
+  assert.ok(claim(app, a).attemptId);
 });
 
 test("long candidate history stays out of the first response and supports detail and pagination", (t) => {

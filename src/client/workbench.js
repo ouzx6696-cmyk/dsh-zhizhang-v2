@@ -9,6 +9,10 @@ let loading = false;
 let deliveryUrl;
 let poll;
 let planDocument;
+let loadSequence = 0;
+let editSequence = 0;
+let editorBase;
+const draftOwner = Array.from(crypto.getRandomValues(new Uint32Array(2))).join("-");
 
 function notice(message, isError = false) {
   const output = byId("notice");
@@ -49,33 +53,53 @@ let toolDocument;
 function stashKey(id) { return `zhizhang:draft:${id}`; }
 function readStash(id) {
   if (localDrafts.has(id)) return localDrafts.get(id);
+  let draft = null;
   try {
-    return JSON.parse(localStorage.getItem(stashKey(id)) ?? "null");
-  } catch {
-    return null;
-  }
+    const tabDraft = sessionStorage.getItem(stashKey(id));
+    draft = JSON.parse(tabDraft ?? localStorage.getItem(stashKey(id)) ?? "null");
+  } catch {}
+  localDrafts.set(id, draft);
+  return draft;
 }
 function writeStash(id, draft) {
+  const previous = readStash(id);
+  if (draft?.body === previous?.body && draft?.revisionId === previous?.revisionId && !storageUnavailable) return;
   localDrafts.set(id, draft);
+  const key = stashKey(id);
+  let stored = false;
   try {
-    if (draft) localStorage.setItem(stashKey(id), JSON.stringify(draft));
-    else localStorage.removeItem(stashKey(id));
-    storageUnavailable = false;
-  } catch {
-    storageUnavailable = true;
+    sessionStorage.setItem(key, JSON.stringify(draft));
+    stored = true;
+  } catch {}
+  try {
+    if (draft) localStorage.setItem(key, JSON.stringify({ ...draft, owner: draftOwner }));
+    else {
+      const backup = JSON.parse(localStorage.getItem(key) ?? "null");
+      if (backup?.owner === draftOwner ||
+          backup && backup.body === previous?.body && backup.revisionId === previous.revisionId) {
+        localStorage.removeItem(key);
+      }
+    }
+    stored = true;
+  } catch {}
+  storageUnavailable = !stored;
+  if (!stored) {
     notice("浏览器暂时无法保留本地草稿。请保存正文后再离开。", true);
   }
 }
 function stash() {
   clearTimeout(stashTimer);
-  const active = snapshot.active;
-  if (!active) return;
-  const revisionId = readStash(active.id)?.revisionId;
-  const base = revisionId === undefined ? active.revisionId : revisionId;
-  const unchanged = base === active.revisionId && editor.value === (active.body ?? "");
-  writeStash(active.id, unchanged ? null : { body: editor.value, revisionId: base });
+  if (!editorBase) return;
+  const { id, revisionId, body } = editorBase;
+  const draft = readStash(id);
+  const base = draft ? draft.revisionId : revisionId;
+  writeStash(id, base === revisionId && editor.value === body ? null : { body: editor.value, revisionId: base });
 }
-function dirty() { return editor.value !== (snapshot.active?.body ?? ""); }
+function dirty() {
+  if (!editorBase) return false;
+  const draft = readStash(editorBase.id);
+  return editor.value !== editorBase.body || Boolean(draft && draft.revisionId !== editorBase.revisionId);
+}
 function element(tag, label) {
   const entry = document.createElement(tag);
   entry.textContent = label;
@@ -159,6 +183,7 @@ function render() {
   byId("manuscript").hidden = !active;
   byId("flow-empty").hidden = Boolean(active);
   byId("flow-content").hidden = !active;
+  editorBase = active ? { id: active.id, revisionId: active.revisionId, body: active.body ?? "" } : undefined;
   if (!active) return;
 
   byId("document-label").textContent = article ? "头条创作" : "番茄连载";
@@ -306,11 +331,13 @@ function render() {
 }
 
 async function load(ifSequence) {
+  const sequence = ++loadSequence;
+  const selection = [projectId, documentId];
   const next = await request(undefined, undefined, ifSequence);
+  if (sequence !== loadSequence || selection[0] !== projectId || selection[1] !== documentId) return;
   if (!next || !Array.isArray(next.projects) && next.unchanged !== true) throw new Error("工作台响应格式有误，请刷新后重试。");
-  if (snapshot.active && documentId === snapshot.active.id && editor.dataset.saved !== documentId) stash();
-  delete editor.dataset.saved;
   if (next.unchanged) return;
+  stash();
   if (poll && next.active?.id !== snapshot.active?.id) {
     clearInterval(poll);
     poll = undefined;
@@ -336,17 +363,19 @@ function click(id, handler) {
   byId(id).onclick = () => perform(handler);
 }
 function activeInput(extra) {
-  return { documentId, baseRevisionId: snapshot.active?.revisionId ?? null, ...extra };
+  return { documentId, baseRevisionId: editorBase?.revisionId ?? null, ...extra };
 }
 async function change(action, extra = {}, options = {}) {
   if (options.savedVersion && dirty()) throw new Error("请先保存正文，或复制本地稿后切回已保存版本。");
-  const id = documentId;
-  const submitted = editor.value;
+  const submittedSequence = editSequence;
+  const committedBody = action === "candidate.adopt" ? candidate()?.candidateBody : extra.body ?? editor.value;
   stash();
   const result = await request(action, activeInput(extra));
   if (options.clearDraft) {
-    const remaining = editor.value === submitted ? null : { body: editor.value, revisionId: result.revisionId };
-    editor.dataset.saved = id;
+    const id = editorBase.id;
+    editorBase = { id, revisionId: result.revisionId, body: committedBody };
+    if (editSequence === submittedSequence && !composing && editor.value !== committedBody) editor.value = committedBody;
+    const remaining = editor.value === committedBody ? null : { body: editor.value, revisionId: result.revisionId };
     writeStash(id, remaining);
   }
   await load();
@@ -368,6 +397,7 @@ for (const region of ["navigation", "pipeline"]) {
   };
 }
 editor.addEventListener("input", () => {
+  editSequence++;
   clearTimeout(stashTimer);
   stashTimer = setTimeout(stash, 250);
 });

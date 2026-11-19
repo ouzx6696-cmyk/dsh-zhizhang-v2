@@ -132,6 +132,11 @@ export function openAuthorWorkspace(
 
   const generation = createGenerationLedger(db);
   const readAuthorModel = createAuthorModelReader(db);
+  const competingRun = db.prepare(`
+    SELECT 1 FROM author_runs
+    WHERE document_id = ? AND id IS NOT ? AND state IN ('running', 'paused', 'awaiting-author')
+    LIMIT 1;
+  `);
   const documentQuery = `
     SELECT a.id, a.project_id AS projectId, a.title, p.product, a.state, a.mode, a.line,
       d.current_revision_id AS revisionId, a.final_revision_id AS finalRevisionId, r.body,
@@ -151,6 +156,11 @@ export function openAuthorWorkspace(
         frozen_input AS frozenInput, reserved, settled, candidate_id AS candidateId
       FROM author_runs WHERE id = ?;
     `).get(id), "run", id);
+  }
+
+  function assertRunAvailable(action: string, documentId: string, runId: string | null = null): void {
+    if (competingRun.get(documentId, runId)) refuse(action, "generation-in-progress");
+    if (generation.uncertainForDocument(documentId)) refuse(action, "generation-needs-reconciliation");
   }
 
   function atomic<T>(apply: () => T): T {
@@ -592,13 +602,7 @@ export function openAuthorWorkspace(
           const current = document(row.id);
           currentBody(current, input);
           if (locked(current)) refuse(action, "revision-locked");
-          const existing = db.prepare(`
-            SELECT id FROM author_runs WHERE document_id = ? AND state IN ('running','paused','awaiting-author') LIMIT 1;
-          `).get(current.id) as { id: string } | undefined;
-          if (existing) refuse(action, "generation-in-progress");
-          if (generation.uncertainForDocument(current.id)) {
-            refuse(action, "generation-needs-reconciliation");
-          }
+          assertRunAvailable(action, current.id);
           const reserved = count(input, "tokenLimit");
           if (reserved === 0) invalid("tokenLimit", "positive-budget-required");
           const id = randomUUID();
@@ -784,10 +788,12 @@ export function openAuthorWorkspace(
       const row = document(current.documentId);
       if (locked(row) || current.baseRevisionId !== row.revisionId) refuse("run.generate", "revision-changed");
       if (generation.pending(current.id)) refuse("run.generate", "generation-needs-reconciliation");
+      if (current.state !== "failed" && current.state !== "running") refuse("run.generate", "run-no-longer-running");
+      assertRunAvailable("run.generate", row.id, current.id);
       if (current.state === "failed") stage(current, "running");
-      else if (current.state !== "running") refuse("run.generate", "run-no-longer-running");
-      const attemptId = claim ? randomUUID() : null;
-      if (attemptId) {
+      let attemptId = null;
+      if (claim) {
+        attemptId = randomUUID();
         generation.create(attemptId, current.id, provider, model);
         event(row.projectId, "run", "generation.started", { runId: current.id, attemptId });
       }
