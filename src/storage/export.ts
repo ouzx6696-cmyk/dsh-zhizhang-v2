@@ -157,6 +157,7 @@ export function attemptExport(
   db: SqliteDatabase,
   articleId: string,
   write: (payload: string) => void,
+  render: (row: DeliveryRow) => string = exportPayload,
 ): ExportAttempt {
   const row = readDeliveryRow(db, articleId);
   if (!isExportState(row.export_state)) {
@@ -173,7 +174,7 @@ export function attemptExport(
       retryable: null,
     };
   }
-  const payload = exportPayload(row);
+  const payload = render(row);
   try {
     write(payload);
   } catch (error) {

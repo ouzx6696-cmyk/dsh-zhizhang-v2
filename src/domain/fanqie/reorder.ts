@@ -58,9 +58,23 @@ export function reorderImpact(
   before: readonly string[],
   after: readonly string[],
 ): ReorderImpact[] {
+  function positions(order: readonly string[]) {
+    const result = new Map<string, number>();
+    order.forEach((id, index) => {
+      if (!result.has(id)) result.set(id, index);
+    });
+    return (id: string) => result.get(id) ?? order.length;
+  }
+  const beforePosition = positions(before);
+  const afterPosition = positions(after);
   const impacts: ReorderImpact[] = [];
   for (const entry of entries) {
-    const flipped = entry.relations.filter((relation) => relationFlipped(relation, before, after));
+    const flipped = entry.relations.filter(({ from, to }) => {
+      const beforeDelta = beforePosition(from.chapterId) - beforePosition(to.chapterId);
+      const afterDelta = afterPosition(from.chapterId) - afterPosition(to.chapterId);
+      const pointDelta = from.point - to.point;
+      return ((beforeDelta || pointDelta) < 0) !== ((afterDelta || pointDelta) < 0);
+    });
     if (flipped.length > 0) impacts.push({ id: entry.id, relations: flipped });
   }
   return impacts;

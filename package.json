@@ -1,8 +1,8 @@
 {
-  "name": "zhizhang-v2-workspace",
-  "version": "0.0.0",
+  "name": "@zhizhang/dsh-workbench",
+  "version": "2.0.0",
   "private": true,
-  "description": "Independent V2 workspace skeleton; no product behavior yet.",
+  "description": "Author-controlled Fanqie and Toutiao workbench for DeepSeek Harness",
   "type": "module",
   "engines": {
     "node": ">=24.15.0",
@@ -11,10 +11,42 @@
   "scripts": {
     "check": "tsc --project tsconfig.json --noEmit",
     "build": "tsc --project tsconfig.build.json",
-    "test": "node --experimental-strip-types --test",
+    "test": "node --test \"test/*-d02.test.mjs\" \"test/*-w02.test.mjs\" test/smoke.test.mjs test/workspace-v2.test.mjs",
+    "test:evidence": "node --test \"test/*-?01.test.mjs\"",
+    "test:all": "node --test \"test/*.test.mjs\"",
     "verify": "npm run check && npm test"
   },
   "devDependencies": {
     "typescript": "5.8.3"
+  },
+  "exports": {
+    ".": "./src/host/plugin.mjs",
+    "./client": "./src/client/slot.js",
+    "./locale/*.json": "./src/bundle/locale/*.json"
+  },
+  "files": [
+    "dist",
+    "src/host/plugin.mjs",
+    "src/client/slot.js",
+    "src/client/workbench.html",
+    "src/client/workbench.css",
+    "src/client/workbench.js",
+    "src/bundle/cordis.patch.yml",
+    "src/bundle/locale",
+    "docs/V2.md",
+    "src/host/writing.mjs"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./src/bundle/cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
   }
 }

@@ -468,10 +468,16 @@ export function executeCommand<T>(
     }
   }
 
-  const idempotencyKey =
-    entry.idempotent && request.idempotencyKey !== undefined
-      ? request.idempotencyKey
-      : randomUUID();
+  let idempotencyKey = request.idempotencyKey;
+  if (!entry.idempotent) {
+    idempotencyKey = randomUUID();
+  } else if (typeof idempotencyKey !== "string" || idempotencyKey.length === 0) {
+    return {
+      ok: false,
+      code: "input.invalid",
+      details: { field: "idempotencyKey", reason: "required" },
+    };
+  }
   try {
     const outcome = runAuthorWrite(
       db,

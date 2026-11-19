@@ -319,6 +319,30 @@ test("W-02 the dispatcher's checks run in the order commandPlan derives", async 
     );
     // The gate refuses before the stale base is reached.
     assert.equal(asAuthor.code, "gate.denied");
+
+    const approval = createApproval({
+      actor: AUTHOR,
+      action: "article.deliver",
+      target: "doc-1",
+      targetVersion: "rev-1",
+      decision: "approved",
+      at: "2026-11-18T00:00:00Z",
+    });
+    assert.ok(approval.ok);
+    for (const idempotencyKey of [undefined, ""]) {
+      const missingKey = executeCommand(
+        db,
+        {
+          commandId: "article.deliver", actor: AUTHOR, documentId: "doc-1",
+          payload: {}, baseRevisionId: "rev-stale", targetVersion: "rev-1",
+          approval: approval.record, idempotencyKey,
+        },
+        () => assert.fail("a keyed command without its key must never run"),
+      );
+      assert.equal(missingKey.code, "input.invalid");
+      assert.equal(missingKey.details.field, "idempotencyKey");
+    }
+    assert.equal(rowCount(db, "command_journal"), 0);
   });
 });
 

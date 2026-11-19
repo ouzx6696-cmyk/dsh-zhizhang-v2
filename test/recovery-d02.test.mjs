@@ -120,7 +120,11 @@ test("D-02 recovery row 2: the log growing while the projection is down replays 
     try {
       createEventLogSchema(writer);
       createProjectionSchema(writer);
-      seeded(writer, "p1", [stageEvent("revise"), noiseEvent(2)]);
+      const live = seeded(writer, "p1", [stageEvent("revise"), noiseEvent(2)]);
+      assert.deepEqual(live.snapshot(), {
+        asOfSeq: 5,
+        values: { stage: { stage: "revise", submitted: 3 }, noise: { seen: 2 } },
+      });
     } finally {
       writer.close();
     }

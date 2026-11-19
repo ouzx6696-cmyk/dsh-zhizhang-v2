@@ -125,6 +125,7 @@ export function checkApprovalGate(request: ApprovalGateRequest): ContractError |
   const matches =
     record !== undefined &&
     record !== null &&
+    record.decision === "approved" &&
     record.actor === actor &&
     approvalMatches(record, action, target, targetVersion);
   if (!matches) {

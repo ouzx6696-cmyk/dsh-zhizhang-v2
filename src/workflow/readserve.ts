@@ -31,7 +31,7 @@
 
 import type { SqliteDatabase } from "../storage/driver.ts";
 import { StorageError } from "../storage/errors.ts";
-import { readEvents, type LoggedEvent } from "../storage/eventlog.ts";
+import { currentSeq, readEvents, type LoggedEvent } from "../storage/eventlog.ts";
 import type { ProjectionStore, ProjectionUnit } from "../storage/projection.ts";
 import {
   isConcern,
@@ -88,11 +88,11 @@ function materialise(event: LoggedEvent): MaterialisedEvent {
     throw new StorageError("input.invalid", { field: "concern", reason: "unknown-concern" });
   }
   return {
+    ...fields,
     seq: event.seq,
     eventId: event.eventId,
     kind: event.kind,
     concern,
-    ...fields,
   };
 }
 
@@ -113,25 +113,42 @@ export function serveReadFromLog(
   options: ServeReadOptions = {},
 ): ServedRead {
   const { definition } = entry;
-  // The projection store is already scoped to one project, so a unit's key is
-  // the read's registry key and the project scope is the store's own.
+  if (store.projectId !== projectId) {
+    throw new StorageError("input.invalid", { field: "projectId", reason: "projection-project-mismatch" });
+  }
+  const afterSeq = options.afterSeq ?? 0;
+  const startSeq = store.seqOf();
+  if (!Number.isSafeInteger(afterSeq) || afterSeq < 0 || afterSeq > startSeq) {
+    throw new StorageError("input.invalid", { field: "afterSeq", reason: "projection-baseline-missing" });
+  }
+  if (options.limit !== undefined && (!Number.isSafeInteger(options.limit) || options.limit < 0)) {
+    throw new StorageError("input.invalid", { field: "limit", reason: "invalid-page-limit" });
+  }
+  if (startSeq > currentSeq(db, projectId)) {
+    throw new StorageError("storage.format_unsupported", { reason: "projection-ahead-of-log" });
+  }
   const unitKey = readKey(definition.id, definition.version);
+  store.stateRef(unitKey);
   const logged = readEvents(db, projectId, {
-    afterSeq: options.afterSeq ?? 0,
+    afterSeq,
     limit: options.limit,
   });
 
   // Every event is checked, including the ones below the watermark: a malformed
   // row is a problem with the log, not with this serve.
-  const materialised = logged.map(materialise);
+  const materialised = logged.map((event, index) => {
+    if (event.seq !== afterSeq + index + 1) {
+      throw new StorageError("storage.format_unsupported", { reason: "event-log-gap" });
+    }
+    return materialise(event);
+  });
 
   // Only the events the store has not folded yet are driven. `commit` would
   // no-op them anyway; skipping keeps `folded` honest about what this serve did.
-  const startSeq = store.seqOf();
   let folded = 0;
   for (const event of materialised) {
     if (event.seq <= startSeq) continue;
-    store.commit({ id: event.eventId, type: event.kind, ...event }, event.seq);
+    store.commit({ ...event, id: event.eventId, type: event.kind }, event.seq);
     folded += 1;
   }
 

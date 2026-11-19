@@ -83,6 +83,7 @@ export function createProjectionSchema(db: SqliteDatabase): void {
 
 /** A projection store over one project's log. */
 export interface ProjectionStore {
+  readonly projectId: string;
   register<S>(key: string, unit: ProjectionUnit<S>): void;
   commit(event: { readonly id: string; readonly type: string; readonly [field: string]: unknown }, deliverSeq?: number): { seq: number; changes: ProjectionChange[] };
   snapshot(keys?: readonly string[]): ProjectionCut;
@@ -104,29 +105,30 @@ export function createProjectionStore(db: SqliteDatabase, projectId: string): Pr
   const eventChangedListeners = new Set<(changes: readonly ProjectionChange[]) => void>();
   let seq = 0;
 
-  function drive(event: unknown): ProjectionChange[] {
+  function drive(event: unknown, eventSeq: number): ProjectionChange[] {
     const changes: ProjectionChange[] = [];
     let failure: { error: unknown } | null = null;
     for (const unit of units.values()) {
-      if (failure) break;
+      if (unit.seq >= eventSeq) continue;
       const before = unit.state;
       let after: unknown;
+      let view: unknown;
       try {
         after = unit.apply(before, event);
+        view = Object.is(before, after) ? unit.lastView : unit.view(after);
       } catch (error) {
         failure = { error };
         break;
       }
       unit.state = after;
-      if (!Object.is(before, after)) {
-        const view = unit.view(after);
-        if (!Object.is(view, unit.lastView)) {
-          unit.lastView = view;
-          changes.push({ key: unit.key, val: view });
-          for (const listener of changedListeners) listener(unit.key, view, unit.seq);
-        }
+      unit.seq = eventSeq;
+      if (!Object.is(view, unit.lastView)) {
+        unit.lastView = view;
+        changes.push({ key: unit.key, val: view });
+        for (const listener of changedListeners) listener(unit.key, view, eventSeq);
       }
     }
+    if (!failure) seq = eventSeq;
     if (changes.length > 0) {
       for (const listener of eventChangedListeners) listener(changes.slice());
     }
@@ -135,7 +137,14 @@ export function createProjectionStore(db: SqliteDatabase, projectId: string): Pr
   }
 
   return {
+    get projectId() {
+      return projectId;
+    },
+
     register(key, unit) {
+      if (seq !== 0 || units.has(key) || [...units.values()].some((entry) => entry.seq > seq)) {
+        throw new StorageError("input.invalid", { field: "key", reason: "projection-registration-closed" });
+      }
       const initial = unit.init();
       units.set(key, {
         key,
@@ -152,29 +161,38 @@ export function createProjectionStore(db: SqliteDatabase, projectId: string): Pr
     commit(event, deliverSeq) {
       if (deliverSeq !== undefined) {
         if (deliverSeq <= seq) return { seq: deliverSeq, changes: [] };
-        seq = deliverSeq;
-      } else {
-        const appended = appendEvent(db, {
-          projectId,
-          eventId: event.id,
-          kind: event.type,
-          payload: event,
-        });
-        if (!appended.appended) {
-          // Already in the log: a redelivery folds nothing, so a retried
-          // commit cannot double-apply. Catching up a projection that is
-          // behind the log is `restore`'s job, not `commit`'s.
-          return { seq: appended.seq, changes: [] };
+        if (deliverSeq !== seq + 1) {
+          throw new StorageError("input.invalid", { field: "deliverSeq", reason: "projection-event-gap" });
         }
-        seq = appended.seq;
+        return { seq: deliverSeq, changes: drive(event, deliverSeq) };
       }
-      for (const unit of units.values()) unit.seq = seq;
-      return { seq, changes: drive(event) };
+
+      const appended = appendEvent(db, {
+        projectId,
+        eventId: event.id,
+        kind: event.type,
+        payload: event,
+      });
+      if (!appended.appended) return { seq: appended.seq, changes: [] };
+
+      // Another connection may have appended events since the last fold.
+      const missing = appended.seq - seq - 1;
+      if (missing > 0) {
+        const tail = readEvents(db, projectId, { afterSeq: seq, limit: missing });
+        if (tail.length !== missing || tail.some((row, index) => row.seq !== seq + index + 1)) {
+          throw new StorageError("storage.format_unsupported", { reason: "event-log-gap" });
+        }
+        for (const row of tail) drive(row.payload, row.seq);
+      }
+      return { seq: appended.seq, changes: drive(event, appended.seq) };
     },
 
     snapshot(keys) {
       const values: Record<string, unknown> = {};
       for (const unit of units.values()) {
+        if (unit.seq !== seq) {
+          throw new StorageError("stage.output_invalid", { stage: unit.key, missing: "complete-projection" });
+        }
         if (keys && !keys.includes(unit.key)) continue;
         values[unit.key] = unit.view(unit.state);
       }
@@ -246,67 +264,65 @@ export function createProjectionStore(db: SqliteDatabase, projectId: string): Pr
     },
 
     restoreFloor(checkpoint) {
+      const rows = new Map(checkpoint.map((row) => [row.key, row]));
       let floor: number | null = null;
-      for (const row of checkpoint) {
-        const unit = units.get(row.key);
-        if (!unit || row.ver !== unit.version) continue;
+      for (const unit of units.values()) {
+        const row = rows.get(unit.key);
+        if (!row || row.ver !== unit.version) return undefined;
         if (floor === null || row.seq < floor) floor = row.seq;
       }
       return floor === null ? undefined : floor - 1;
     },
 
     restore(checkpoint, events, baseSeq) {
+      if (!Number.isSafeInteger(baseSeq)) {
+        throw new StorageError("input.invalid", { field: "baseSeq", reason: "invalid-replay-baseline" });
+      }
+      const baseline = Math.max(0, baseSeq - 1);
+      const logEnd = baseline + events.length;
+      if (events.some((event, index) => event.seq !== baseline + index + 1)) {
+        throw new StorageError("storage.format_unsupported", { reason: "event-log-gap" });
+      }
+      const rows = new Map<string, CheckpointRow>();
       for (const row of checkpoint) {
         const unit = units.get(row.key);
-        const usable =
-          unit !== undefined &&
-          row.ver === unit.version &&
-          row.seq >= baseSeq - 1 &&
-          row.seq <= baseSeq + events.length - 1;
-        if (unit === undefined) {
-          // A row for a unit this store does not register cannot be trusted,
-          // so it forces the same full re-read a stale row does.
-          if (baseSeq > 0) {
-            throw new StorageError("storage.format_unsupported", {
-              reason: "stale-projection-row",
-              key: row.key,
-              watermark: row.seq,
-              logEnd: baseSeq + events.length - 1,
-            });
-          }
-          continue;
-        }
-        if (!usable) {
-          if (baseSeq > 0) {
-            // The log shrank below a stored watermark, or the row was written
-            // by a different version: serving it would present state the log
-            // no longer supports.
-            throw new StorageError("storage.format_unsupported", {
-              reason: "stale-projection-row",
-              key: row.key,
-              watermark: row.seq,
-              logEnd: baseSeq + events.length - 1,
-            });
-          }
-          unit.state = unit.init();
-          unit.seq = 0;
-        } else {
-          unit.state = structuredClone(row.val);
-          unit.seq = row.seq;
+        if (unit && row.ver === unit.version && Number.isSafeInteger(row.seq) && row.seq >= baseline && row.seq <= logEnd) {
+          rows.set(row.key, row);
+        } else if (baseSeq > 0) {
+          throw new StorageError("storage.format_unsupported", {
+            reason: "stale-projection-row", key: row.key, watermark: row.seq, logEnd,
+          });
         }
       }
-      let cursor = baseSeq - 1;
+
+      // Stage the rebuild separately so a bad row or a failed fold leaves the
+      // live store at its previous consistent cut.
+      const restored = new Map<string, UnitEntry>();
+      for (const unit of units.values()) {
+        const row = rows.get(unit.key);
+        if (!row && baseline > 0) {
+          throw new StorageError("storage.format_unsupported", { reason: "missing-projection-row", key: unit.key });
+        }
+        restored.set(unit.key, {
+          ...unit,
+          state: row ? structuredClone(row.val) : unit.init(),
+          seq: row?.seq ?? 0,
+        });
+      }
       for (const event of events) {
-        cursor += 1;
-        for (const unit of units.values()) {
-          // Events at or below a seeded row's watermark are already folded.
-          if (cursor <= unit.seq) continue;
+        for (const unit of restored.values()) {
+          if (event.seq <= unit.seq) continue;
           unit.state = unit.apply(unit.state, event.payload);
-          unit.seq = cursor;
+          unit.seq = event.seq;
         }
       }
-      seq = cursor;
-      return this.snapshot();
+      const values = Object.fromEntries([...restored.values()].map((unit) => {
+        unit.lastView = unit.view(unit.state);
+        return [unit.key, unit.lastView];
+      }));
+      for (const unit of restored.values()) units.set(unit.key, unit);
+      seq = logEnd;
+      return { asOfSeq: seq, values };
     },
 
     onChanged(listener) {
@@ -339,18 +355,13 @@ export function readTail(
   projectId: string,
   floor: number | undefined,
 ): { events: { seq: number; payload: unknown }[]; baseSeq: number } {
-  if (floor === undefined) {
-    return {
-      events: readEvents(db, projectId).map((event) => ({ seq: event.seq, payload: event.payload })),
-      baseSeq: 1,
-    };
-  }
+  const baseSeq = Math.max(1, floor ?? 1);
   return {
-    events: readEvents(db, projectId, { afterSeq: floor - 1 }).map((event) => ({
+    events: readEvents(db, projectId, { afterSeq: baseSeq - 1 }).map((event) => ({
       seq: event.seq,
       payload: event.payload,
     })),
-    baseSeq: floor,
+    baseSeq,
   };
 }
 

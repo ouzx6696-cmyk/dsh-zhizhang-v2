@@ -1,0 +1,53 @@
+import { ContractError } from "../../contracts/errors.ts";
+import { isEffective, precedes, type Anchor, type ValidityInterval } from "../shared/anchors.ts";
+
+export const CHAPTER_STATES = ["planned", "drafting", "drafted", "reviewed", "final"] as const;
+export type ChapterState = (typeof CHAPTER_STATES)[number];
+export const EDITORIAL_REJECTION_LIMIT = 2;
+export const DEFAULT_CHAPTER_LENGTH = [2000, 2500] as const;
+export const CHAPTER_LENGTH_WARNING_BAND = [1500, 6000] as const;
+
+export const PACING = {
+  快爽: { opening: "约前 300 字见到具体处境", payoff: "小回报约 1–2 章，阶段回报约 4–6 章", genres: ["逆袭", "打脸", "系统", "鉴宝", "高武", "战神", "重生"] },
+  稳推: { opening: "首章立住处境与所求", payoff: "单元内有可见进展", genres: ["权谋", "经营", "种田", "年代", "都市", "都市日常", "言情"] },
+  慢燃: { opening: "立住氛围与可理解的问题", payoff: "以信息揭示和关系移动为主", genres: ["悬疑", "灵异", "刑侦", "温情", "群像"] },
+} as const;
+
+export function assertChapterFinalizable(state: ChapterState, editorialRejections: number): void {
+  if (state !== "reviewed" || editorialRejections > EDITORIAL_REJECTION_LIMIT) {
+    throw new ContractError("gate.denied", {
+      action: "draft.finalize",
+      reason: state !== "reviewed" ? "editorial-review-required" : "editorial-rejection-limit",
+    });
+  }
+}
+
+export interface SettingFact extends ValidityInterval {
+  readonly id: string;
+  readonly note: string;
+  readonly knownFrom: Readonly<Record<string, Anchor>>;
+  readonly kind: "fact" | "agreement";
+  readonly locked: boolean;
+  readonly source: string;
+}
+
+export function settingsAt(
+  entries: readonly SettingFact[],
+  order: readonly string[],
+  at: Anchor,
+  characterId: string,
+): SettingFact[] {
+  return entries.filter((entry) => {
+    if (!isEffective(entry, at, order)) return false;
+    if (entry.kind === "agreement") return false;
+    const known = Object.hasOwn(entry.knownFrom, characterId) ? entry.knownFrom[characterId] : undefined;
+    return known !== undefined && !precedes(at, known, order);
+  });
+}
+
+export const OUTLINE_SECTIONS = ["剧情梗概", "核心冲突与看点", "情节推进节点", "章末落点"] as const;
+
+export function chapterLengthWarnings(target: number): string[] {
+  const [min, max] = CHAPTER_LENGTH_WARNING_BAND;
+  return target < min || target > max ? [`目标篇幅可参考 ${min}–${max} 个非空白字符`] : [];
+}

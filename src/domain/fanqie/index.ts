@@ -17,3 +17,8 @@ export {
   type ReorderPlan,
   type TemporalRelation,
 } from "./reorder.ts";
+
+export {
+  CHAPTER_STATES, EDITORIAL_REJECTION_LIMIT, DEFAULT_CHAPTER_LENGTH, CHAPTER_LENGTH_WARNING_BAND,
+  PACING, OUTLINE_SECTIONS, chapterLengthWarnings, assertChapterFinalizable, settingsAt, type ChapterState, type SettingFact,
+} from "./editorial.ts";

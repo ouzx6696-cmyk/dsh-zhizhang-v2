@@ -14,6 +14,7 @@ import {
   createStore,
   currentSeq,
   openStore,
+  readTail,
 } from "../src/storage/index.ts";
 
 // W-02 conformance for `serveReadFromLog`: the join between the event log, the
@@ -135,7 +136,7 @@ test("W-02 one serve drives every event once, and each unit consumes only its ow
   await withRead((db, projectId) => {
     log(db, projectId, "e1", "run");
     log(db, projectId, "e2", "chapter");
-    log(db, projectId, "e3", "run");
+    log(db, projectId, "e3", "run", { seq: 300, eventId: "payload-label", kind: "payload-label" });
     log(db, projectId, "e4", "revision");
 
     const unit = runUnit();
@@ -194,6 +195,13 @@ test("W-02 paging with afterSeq continues from the watermark the caller holds", 
     const first = serveReadFromLog(db, projectId, store, { definition: RUN_DEFINITION, unit });
     assert.equal(first.folded, 2);
 
+    const cold = storeFor(db, projectId, RUN_DEFINITION, unit);
+    assert.throws(
+      () => serveReadFromLog(db, projectId, cold, { definition: RUN_DEFINITION, unit }, { afterSeq: first.asOfSeq }),
+      (error) => error instanceof StorageError && error.details.field === "afterSeq",
+    );
+    assert.equal(cold.seqOf(), 0);
+
     log(db, projectId, "e3", "run");
     const second = serveReadFromLog(db, projectId, store, { definition: RUN_DEFINITION, unit }, { afterSeq: first.asOfSeq });
 
@@ -217,6 +225,14 @@ test("W-02 a bounded read serves what it read and reports where it stopped", asy
     const rest = serveReadFromLog(db, projectId, store, { definition: RUN_DEFINITION, unit }, { afterSeq: first.asOfSeq });
     assert.equal(rest.folded, 2);
     assert.equal(rest.value.attempts.length, 4);
+
+    const cold = storeFor(db, projectId, RUN_DEFINITION, unit);
+    db.prepare("DELETE FROM event_log WHERE project_id = ? AND seq = 2;").run(projectId);
+    assert.throws(
+      () => serveReadFromLog(db, projectId, cold, { definition: RUN_DEFINITION, unit }),
+      (error) => error instanceof StorageError && error.details.reason === "event-log-gap",
+    );
+    assert.equal(cold.seqOf(), 0, "a page with a gap must be refused before folding");
     assert.equal(rest.asOfSeq, 4);
   });
 });
@@ -326,6 +342,11 @@ test("W-02 two reads over one log share a single drive pass and one watermark", 
     // Both are stamped with the same watermark, so they are comparable.
     assert.equal(run.asOfSeq, nav.asOfSeq);
     assert.equal(run.value.asOfSeq, nav.value.asOfSeq);
+
+    assert.throws(
+      () => serveReadFromLog(db, "project-2", store, { definition: NAV_DEFINITION, unit: navUnitInstance }),
+      (error) => error instanceof StorageError && error.details.reason === "projection-project-mismatch",
+    );
   });
 });
 
@@ -344,17 +365,21 @@ test("W-02 a checkpoint restored mid-serve keeps folding from where it stopped",
     assert.equal(checkpoint[0].key, unitKeyFor(RUN_DEFINITION));
     assert.equal(checkpoint[0].seq, first.asOfSeq);
 
-    // A second store over the same log restores the row, so its unit already
-    // holds the first event, and a serve reads the log from the beginning.
-    log(db, projectId, "e2", "run");
+    // Restore the persisted cut, then serve new events from its watermark.
     const restored = createProjectionStore(db, projectId);
     const restoredUnit = runUnit();
     restored.register(unitKeyFor(RUN_DEFINITION), restoredUnit);
     const floor = restored.restoreFloor(checkpoint);
     assert.equal(floor, 0, "the row sits at the log's start, so there is no gap");
 
-    const served = serveReadFromLog(db, projectId, restored, { definition: RUN_DEFINITION, unit: restoredUnit });
-    assert.equal(served.folded, 2);
+    const { events, baseSeq } = readTail(db, projectId, floor);
+    const cut = restored.restore(checkpoint, events, baseSeq);
+    assert.equal(cut.asOfSeq, first.asOfSeq);
+    assert.deepEqual(cut.values[unitKeyFor(RUN_DEFINITION)].attempts, first.value.attempts);
+    log(db, projectId, "e2", "run");
+    const served = serveReadFromLog(db, projectId, restored, { definition: RUN_DEFINITION, unit: restoredUnit }, { afterSeq: cut.asOfSeq });
+    assert.equal(served.folded, 1);
     assert.equal(served.asOfSeq, 2);
+    assert.deepEqual(served.value.attempts.map(({ stage }) => stage), ["run.changed", "run.changed"]);
   });
 });

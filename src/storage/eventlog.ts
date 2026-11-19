@@ -106,21 +106,24 @@ export function appendEvent(
     readonly payload: unknown;
   },
 ): { seq: number; appended: boolean } {
+  // Allocate the sequence and insert in the same SQLite statement, so two
+  // connections cannot read the same watermark and then race to insert it.
+  const inserted = db.prepare(`
+    INSERT INTO event_log (project_id, seq, event_id, kind, payload)
+    SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ? FROM event_log WHERE project_id = ?
+    ON CONFLICT (project_id, event_id) DO NOTHING
+    RETURNING seq;
+  `).get(event.projectId, event.eventId, event.kind, canonicalJson(event.payload), event.projectId) as
+    { seq: number } | undefined;
+  if (inserted !== undefined) return { seq: inserted.seq, appended: true };
+
   const existing = db
     .prepare("SELECT seq FROM event_log WHERE project_id = ? AND event_id = ?;")
-    .get(event.projectId, event.eventId);
-  if (existing !== null && existing !== undefined) {
-    const seq = (existing as { seq?: unknown }).seq;
-    if (typeof seq !== "number") {
-      throw new StorageError("storage.format_unsupported", { reason: "event-log-row-malformed" });
-    }
-    return { seq, appended: false };
+    .get(event.projectId, event.eventId) as { seq?: unknown } | undefined;
+  if (typeof existing?.seq !== "number") {
+    throw new StorageError("storage.format_unsupported", { reason: "event-log-row-malformed" });
   }
-  const next = currentSeq(db, event.projectId) + 1;
-  db.prepare(
-    "INSERT INTO event_log (project_id, seq, event_id, kind, payload) VALUES (?, ?, ?, ?, ?);",
-  ).run(event.projectId, next, event.eventId, event.kind, canonicalJson(event.payload));
-  return { seq: next, appended: true };
+  return { seq: existing.seq, appended: false };
 }
 
 /** Reads events after a sequence number, oldest first. */

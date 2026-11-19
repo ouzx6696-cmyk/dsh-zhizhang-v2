@@ -148,6 +148,16 @@ test("D-02 a checkpoint plus a forward tail replay reconstructs the same state a
     assert.deepEqual(events.map((event) => event.seq), [3, 4]);
     const restored = store.restore(checkpoint, events, baseSeq);
     assert.deepEqual(restored, full);
+
+    const brokenTail = events.map((event, index) => index === 1 ? { ...event, seq: event.seq + 1 } : event);
+    assert.throws(
+      () => store.restore(checkpoint, brokenTail, baseSeq),
+      (error) => error instanceof StorageError && error.details.reason === "event-log-gap",
+    );
+    assert.deepEqual(store.snapshot(), full);
+
+    const wholeLog = readTail(db, "proj-1", undefined);
+    assert.deepEqual(store.restore([], wholeLog.events, wholeLog.baseSeq), full);
   });
 });
 
@@ -267,11 +277,13 @@ test("D-02 a re-stamped row is usable only once the suffix replay matches the fu
 
 test("D-02 when a unit throws mid-drive the event-level feed still receives the earlier changes", async () => {
   await withProjection(({ store }) => {
+    let fail = true;
     store.register("boom", {
       version: 1,
       init: () => ({ hits: 0 }),
-      apply() {
-        throw new Error("unit failed");
+      apply(state) {
+        if (fail) throw new Error("unit failed");
+        return { hits: state.hits + 1 };
       },
       view: (state) => state,
     });
@@ -279,6 +291,16 @@ test("D-02 when a unit throws mid-drive the event-level feed still receives the 
     store.onEventChanged((changes) => seen.push(changes));
     assert.throws(() => store.commit(noiseEvent(1)), /unit failed/);
     assert.deepEqual(seen, [[{ key: "noise", val: { seen: 1 } }]]);
+    assert.equal(store.seqOf(), 0);
+    assert.throws(() => store.snapshot(), (error) => error instanceof StorageError);
+
+    fail = false;
+    store.commit(noiseEvent(1), 1);
+    assert.deepEqual(seen[1], [{ key: "boom", val: { hits: 1 } }]);
+    assert.deepEqual(store.snapshot(), {
+      asOfSeq: 1,
+      values: { stage: { stage: "prepare", submitted: 0 }, noise: { seen: 1 }, boom: { hits: 1 } },
+    });
   });
 });
 
