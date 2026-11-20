@@ -5,6 +5,7 @@ import {
   assertForeshadowStatus,
   detectLoreConflicts,
   LORE_CATEGORIES,
+  mergeFactVersion,
   normalizeLoreCategory,
   planReorder,
   settingsAt,
@@ -240,14 +241,26 @@ export function handleContinuity(action: string, ctx: WorkspaceContext, input: I
     }
     const decision = input.accept ? "approved" : "rejected";
     const parsedFact = JSON.parse(proposal.value) as SettingFact;
+    // FQ-01: keep each character's earliest "already knew it" anchor across
+    // versions, while the author's explicit `from` marks when this version
+    // becomes true. The stored decision keeps the merged fact so later reads
+    // do not fall back to the raw proposal's later knowledge anchor.
+    const decidedFact = decision === "approved"
+      ? mergeFactVersion(
+          approvedFacts(ctx, projectId).find((fact) => fact.id === proposal.fact_id),
+          parsedFact,
+          ctx.chapterOrder(projectId),
+          { overrideEffectiveFrom: true },
+        )
+      : parsedFact;
     const decidedSeq = ctx.event(projectId, "setting", "setting.decided", {
       id,
       factId: proposal.fact_id,
       decision,
-      fact: parsedFact,
+      fact: decidedFact,
     });
-    stmt(db, "UPDATE author_settings SET decision = ?, decided_seq = ? WHERE id = ?;")
-      .run(decision, decidedSeq, id);
+    stmt(db, "UPDATE author_settings SET decision = ?, decided_seq = ?, value = ? WHERE id = ?;")
+      .run(decision, decidedSeq, JSON.stringify(decidedFact), id);
     if (decision === "approved") {
       materializeApprovedLore(ctx, {
         projectId,
@@ -255,7 +268,7 @@ export function handleContinuity(action: string, ctx: WorkspaceContext, input: I
         factId: proposal.fact_id,
         category: proposal.category,
         entityName: proposal.entity_name,
-        fact: parsedFact,
+        fact: decidedFact,
         decidedSeq,
       });
     }

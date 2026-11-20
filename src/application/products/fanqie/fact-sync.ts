@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { normalizeLoreCategory, type SettingFact } from "../../../domain/fanqie/index.ts";
+import { normalizeLoreCategory, mergeFactVersion, type SettingFact } from "../../../domain/fanqie/index.ts";
 import { anchor, pointAtOffset } from "../../../domain/shared/index.ts";
 import { stmt, syncChapterFts } from "../../../storage/index.ts";
 import {
@@ -113,6 +113,7 @@ export function commitFactBatch(
 ) {
   const approvedSettings: string[] = [];
   const evidenceIds: string[] = [];
+  const order = ctx.chapterOrder(params.projectId);
   for (const item of params.items) {
     const factId = text(item, "factId").trim();
     if (params.selectedFactIds && !params.selectedFactIds.has(factId)) continue;
@@ -131,9 +132,12 @@ export function commitFactBatch(
       effectiveFrom: anchor(params.chapterId, point),
       knownFrom: buildKnownFromMap(item, params.chapterId, point, category, entityName),
     };
-    approvedSettings.push(commitApprovedFact(ctx, params.projectId, factId, category, entityName, fact));
-    params.factById.set(factId, fact);
-    if (fact.locked) params.lockedSet.add(factId);
+    // FQ-01: a later sync must never postpone an earlier "already knew it" point,
+    // and it inherits the original effectiveFrom instead of moving the fact.
+    const merged = mergeFactVersion(params.factById.get(factId), fact, order);
+    approvedSettings.push(commitApprovedFact(ctx, params.projectId, factId, category, entityName, merged));
+    params.factById.set(factId, merged);
+    if (merged.locked) params.lockedSet.add(factId);
     if (params.evidenceDoc) {
       const snapId = bindExactEvidence(
         ctx,
@@ -246,6 +250,7 @@ export function commitFactSyncProposal(
   });
 
   const knownUpdates = Array.isArray(edited.knownFromUpdates) ? (edited.knownFromUpdates as Input[]) : [];
+  const knownOrder = ctx.chapterOrder(projectId);
   knownUpdates.forEach((upd, idx) => {
     if (selectedKnown && !selectedKnown.has(idx)) return;
     const factId = text(upd, "factId").trim();
@@ -259,10 +264,12 @@ export function commitFactSyncProposal(
     const point = typeof upd.point === "number" && Number.isSafeInteger(upd.point) && upd.point >= 1
       ? upd.point
       : 1;
-    const merged: SettingFact = {
-      ...existing,
-      knownFrom: { ...existing.knownFrom, [character]: anchor(doc.id, point) },
-    };
+    // FQ-01: keep the earlier per-character anchor when a later chapter mentions it again.
+    const merged = mergeFactVersion(
+      existing,
+      { ...existing, knownFrom: { [character]: anchor(doc.id, point) } },
+      knownOrder,
+    );
     approvedSettings.push(
       commitApprovedFact(ctx, projectId, factId, meta?.category ?? "world_rule", meta?.entityName ?? "", merged),
     );
