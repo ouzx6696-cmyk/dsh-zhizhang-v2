@@ -11,25 +11,62 @@
 //
 // None of these ever migrate, repair or guess. The caller gets one refusal.
 
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, renameSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { openDatabase } from "./driver.ts";
 import type { SqliteDatabase } from "./driver.ts";
 import { StorageError } from "./errors.ts";
-import { assertSupportedSchema, SCHEMA_ID } from "./schema.ts";
+import { assertSupportedSchema, SCHEMA_ID, SCHEMA_USER_VERSION } from "./schema.ts";
 import { configureStorePragmas } from "./stmt-pool.ts";
 
-/** Creates a new store at `path`, recording the current schema id. */
+function isMemoryPath(path: string): boolean {
+  return path === ":memory:" || path.startsWith("file::memory:");
+}
+
+/**
+ * Creates a new store at `path`, recording the current schema id, a unique
+ * `db_uuid`, and `PRAGMA user_version`. File-backed stores are initialized via
+ * a temp file and atomic rename to prevent partially-initialized databases on
+ * concurrent startup (DSH-23).
+ */
 export function createStore(path: string, schemaId: string = SCHEMA_ID): void {
   assertSupportedSchema(schemaId);
-  const db = openDatabase(path);
+  const atomicTemp = !isMemoryPath(path) && !path.startsWith("file:");
+  const targetPath = atomicTemp ? `${path}.tmp-${randomUUID()}` : path;
+  if (atomicTemp) {
+    mkdirSync(dirname(path), { recursive: true });
+  }
+  const db = openDatabase(targetPath);
   try {
     db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);");
     db.prepare("INSERT INTO meta (key, value) VALUES ('schema', ?);").run(schemaId);
+    db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('db_uuid', ?);").run(randomUUID());
+    db.exec(`PRAGMA user_version = ${SCHEMA_USER_VERSION};`);
   } catch (error) {
     db.close();
+    if (atomicTemp) {
+      try {
+        rmSync(targetPath, { force: true });
+      } catch {
+        // Best-effort cleanup of temp store.
+      }
+    }
     throw error;
   }
   db.close();
+  if (atomicTemp) {
+    try {
+      renameSync(targetPath, path);
+    } catch (error) {
+      try {
+        rmSync(targetPath, { force: true });
+      } catch {
+        // Best-effort cleanup.
+      }
+      throw error;
+    }
+  }
 }
 
 /** Reads the schema id a store records, or refuses the store. */
@@ -50,6 +87,18 @@ export function readSchemaId(db: SqliteDatabase): string {
   return value;
 }
 
+/** Reads the store's persistent `db_uuid` from `meta`, or `""` if absent. */
+export function readDatabaseUuid(db: SqliteDatabase): string {
+  try {
+    const row = db.prepare("SELECT value FROM meta WHERE key = 'db_uuid';").get() as
+      | { value?: unknown }
+      | undefined;
+    return typeof row?.value === "string" ? row.value : "";
+  } catch {
+    return "";
+  }
+}
+
 /**
  * Opens an existing store, refusing anything unreadable, corrupt or outside
  * the V2 schema window. The returned handle stays open; the caller closes it.
@@ -64,8 +113,7 @@ export function openStore(path: string, options?: { readonly readOnly?: boolean 
       db.exec("PRAGMA foreign_keys = ON;");
       db.exec("PRAGMA busy_timeout = 5000;");
     } else {
-      const isMemory = path === ":memory:" || path.startsWith("file::memory:");
-      configureStorePragmas(db, isMemory);
+      configureStorePragmas(db, isMemoryPath(path));
     }
     return db;
   } catch (error) {

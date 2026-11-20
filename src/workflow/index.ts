@@ -2,9 +2,7 @@
 //
 // Frozen contracts only: the run state machine (B.3), the stage registry
 // (B.5), the read-model surface (B.7.3) and the serve that joins a read to the
-// log (B.7). The runner that executes stages against the Host is not here yet —
-// it needs the isolated-profile experiments (P0-02) — and the money unit the
-// budget guard carries is the author's decision (C.1 item 11).
+// log (B.7).
 
 export {
   RUN_STATES,
@@ -38,12 +36,17 @@ export {
   TOKEN_CATEGORIES,
   createBudgetGuard,
   fromRecordedUsage,
+  normalizeActualUsage,
+  normalizeUsage,
+  normalizeUsageToTuple,
   totalTokens,
   type ActualUsage,
   type BudgetConfig,
   type BudgetGuard,
   type BudgetSnapshot,
   type MoneyCap,
+  type NormalizeUsageOptions,
+  type RawLlmUsage,
   type Reservation,
   type TokenCategory,
   type TokenUsage,
@@ -68,7 +71,10 @@ export {
 } from "./readmodels.ts";
 
 export {
+  inferConcernFromKind,
+  materialiseLoggedEvent,
   serveReadFromLog,
+  type MaterialisedEvent,
   type ReadServeEntry,
   type ServeReadOptions,
   type ServedRead,

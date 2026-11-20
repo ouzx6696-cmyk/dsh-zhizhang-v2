@@ -73,6 +73,7 @@ const EVENT_LOG_SCHEMA = `
     event_id TEXT NOT NULL,
     kind TEXT NOT NULL,
     payload TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (project_id, seq)
   );
   CREATE UNIQUE INDEX IF NOT EXISTS event_log_identity
@@ -82,12 +83,27 @@ const EVENT_LOG_SCHEMA = `
 /** Creates the event-log table. Safe to run on every open. */
 export function createEventLogSchema(db: SqliteDatabase): void {
   db.exec(EVENT_LOG_SCHEMA);
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info(event_log);").all() as readonly { name?: unknown }[])
+      .map((row) => row.name)
+      .filter((name): name is string => typeof name === "string"),
+  );
+  if (!cols.has("created_at")) {
+    db.exec("ALTER TABLE event_log ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;");
+  }
 }
 
 /** The project's current watermark: 0 when nothing has been committed. */
 export function currentSeq(db: SqliteDatabase, projectId: string): number {
   const row = stmt(db, "SELECT MAX(seq) AS seq FROM event_log WHERE project_id = ?;").get(projectId);
   const value = (row as { seq?: unknown } | null)?.seq;
+  return typeof value === "number" ? value : 0;
+}
+
+/** The global max sequence sum / change watermark across all projects. */
+export function globalEventSeq(db: SqliteDatabase): number {
+  const row = stmt(db, "SELECT COALESCE(SUM(max_seq), 0) AS total FROM (SELECT MAX(seq) AS max_seq FROM event_log GROUP BY project_id);").get();
+  const value = (row as { total?: unknown } | null)?.total;
   return typeof value === "number" ? value : 0;
 }
 
@@ -105,16 +121,18 @@ export function appendEvent(
     readonly eventId: string;
     readonly kind: string;
     readonly payload: unknown;
+    readonly createdAt?: number;
   },
 ): { seq: number; appended: boolean } {
   // Allocate the sequence and insert in the same SQLite statement, so two
   // connections cannot read the same watermark and then race to insert it.
+  const now = event.createdAt ?? Date.now();
   const inserted = stmt(db, `
-    INSERT INTO event_log (project_id, seq, event_id, kind, payload)
-    SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ? FROM event_log WHERE project_id = ?
+    INSERT INTO event_log (project_id, seq, event_id, kind, payload, created_at)
+    SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ? FROM event_log WHERE project_id = ?
     ON CONFLICT (project_id, event_id) DO NOTHING
     RETURNING seq;
-  `).get(event.projectId, event.eventId, event.kind, canonicalJson(event.payload), event.projectId) as
+  `).get(event.projectId, event.eventId, event.kind, canonicalJson(event.payload), now, event.projectId) as
     { seq: number } | undefined;
   if (inserted !== undefined) return { seq: inserted.seq, appended: true };
 

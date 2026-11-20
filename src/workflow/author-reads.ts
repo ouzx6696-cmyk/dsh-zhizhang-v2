@@ -2,15 +2,15 @@ import { ContractError } from "../contracts/errors.ts";
 import {
   createProjectionStore,
   currentSeq,
+  readDatabaseUuid,
   readEvents,
   stmt,
-  type CheckpointRow,
   type ProjectionStore,
   type ProjectionUnit,
   type SqliteDatabase,
 } from "../storage/index.ts";
-import { READ_MODELS, readKey, type ReadDefinition } from "./readmodels.ts";
-import { serveReadFromLog } from "./readserve.ts";
+import { READ_MODELS, readKey, serveRead, validateReadValue, type ReadDefinition } from "./readmodels.ts";
+import { materialiseLoggedEvent, type ServedRead } from "./readserve.ts";
 
 export type Fields = Record<string, unknown>;
 type View = Record<string, unknown>;
@@ -48,125 +48,205 @@ export function projectReadUnit<S>(
   };
 }
 
+/**
+ * O(1)-indexed internal state for the `navigation` read model (DB-03).
+ * Uses plain JSON-serializable records + ordered ID arrays so durable
+ * checkpoints roundtrip cleanly via JSON without O(N^2) array copying.
+ */
+interface IndexedNavState {
+  title: string;
+  volumesById: Record<string, Volume>;
+  volumeOrder: string[];
+  chaptersById: Record<string, Chapter>;
+  chapterOrder: string[];
+  rev: number;
+}
+
+interface LegacyNavState {
+  title: string;
+  volumes: Volume[];
+  chapters: Chapter[];
+}
+
+function normalizeNavState(raw: IndexedNavState | LegacyNavState): IndexedNavState {
+  if ("chaptersById" in raw && raw.chaptersById && Array.isArray(raw.chapterOrder)) {
+    return raw;
+  }
+  const legacy = raw as LegacyNavState;
+  const volumesById: Record<string, Volume> = {};
+  const volumeOrder: string[] = [];
+  for (const vol of legacy.volumes ?? []) {
+    if (!Object.hasOwn(volumesById, vol.volumeId)) {
+      volumesById[vol.volumeId] = { volumeId: vol.volumeId, title: vol.title };
+      volumeOrder.push(vol.volumeId);
+    }
+  }
+  const chaptersById: Record<string, Chapter> = {};
+  const chapterOrder: string[] = [];
+  for (const ch of legacy.chapters ?? []) {
+    if (!Object.hasOwn(chaptersById, ch.chapterId)) {
+      chaptersById[ch.chapterId] = { ...ch };
+      chapterOrder.push(ch.chapterId);
+    }
+  }
+  return {
+    title: legacy.title ?? "",
+    volumesById,
+    volumeOrder,
+    chaptersById,
+    chapterOrder,
+    rev: 0,
+  };
+}
+
 function navigation(definition: ReadDefinition, projectId: string) {
-  return projectReadUnit(
+  return projectReadUnit<IndexedNavState>(
     definition,
-    () => ({ title: "", volumes: [] as Volume[], chapters: [] as Chapter[] }),
-    (state, event) => {
-      if (event.kind === "project.created") return { ...state, title: event.name as string };
+    () => ({
+      title: "",
+      volumesById: {},
+      volumeOrder: [],
+      chaptersById: {},
+      chapterOrder: [],
+      rev: 0,
+    }),
+    (rawState, event) => {
+      if (event.concern !== undefined && event.concern !== "chapter") return rawState;
+      const state = normalizeNavState(rawState);
+      if (event.kind === "project.created") {
+        const nextTitle = event.name as string;
+        if (state.title === nextTitle) return state;
+        state.title = nextTitle;
+        return { ...state, rev: state.rev + 1 };
+      }
       if (event.kind === "volume.created") {
         const volumeId = event.volumeId as string;
-        if (state.volumes.some((v) => v.volumeId === volumeId)) return state;
-        return {
-          ...state,
-          volumes: [...state.volumes, { volumeId, title: event.title as string }],
-        };
+        if (Object.hasOwn(state.volumesById, volumeId)) return state;
+        state.volumesById[volumeId] = { volumeId, title: event.title as string };
+        state.volumeOrder.push(volumeId);
+        return { ...state, rev: state.rev + 1 };
       }
       if (event.kind === "volume.renamed") {
-        return {
-          ...state,
-          volumes: state.volumes.map((vol) =>
-            vol.volumeId === event.volumeId ? { ...vol, title: event.title as string } : vol,
-          ),
-        };
+        const volumeId = event.volumeId as string;
+        const existing = Object.hasOwn(state.volumesById, volumeId) ? state.volumesById[volumeId] : undefined;
+        if (!existing) return state;
+        state.volumesById[volumeId] = { volumeId, title: event.title as string };
+        return { ...state, rev: state.rev + 1 };
       }
       if (event.kind === "document.created") {
-        return {
-          ...state,
-          chapters: [
-            ...state.chapters,
-            {
-              chapterId: event.documentId as string,
-              title: event.title as string,
-              businessState: typeof event.state === "string" ? event.state : "planned",
-              volumeId: typeof event.volumeId === "string" ? event.volumeId : null,
-            },
-          ],
+        const chapterId = event.documentId as string;
+        if (Object.hasOwn(state.chaptersById, chapterId)) return state;
+        state.chaptersById[chapterId] = {
+          chapterId,
+          title: event.title as string,
+          businessState: typeof event.state === "string" ? event.state : "planned",
+          volumeId: typeof event.volumeId === "string" ? event.volumeId : null,
         };
+        state.chapterOrder.push(chapterId);
+        return { ...state, rev: state.rev + 1 };
       }
       if (event.kind === "document.state" || event.kind === "chapter.reviewed" || event.kind === "document.renamed") {
-        return {
-          ...state,
-          chapters: state.chapters.map((chapter) =>
-            chapter.chapterId === event.documentId
-              ? {
-                ...chapter,
-                title: (event.title as string | undefined) ?? chapter.title,
-                businessState: (event.state as string | undefined) ?? chapter.businessState,
-              }
-              : chapter,
-          ),
+        const chapterId = event.documentId as string;
+        const existing = Object.hasOwn(state.chaptersById, chapterId) ? state.chaptersById[chapterId] : undefined;
+        if (!existing) return state;
+        state.chaptersById[chapterId] = {
+          ...existing,
+          title: (event.title as string | undefined) ?? existing.title,
+          businessState: (event.state as string | undefined) ?? existing.businessState,
         };
+        return { ...state, rev: state.rev + 1 };
       }
       if (event.kind === "chapter.moved") {
-        return {
-          ...state,
-          chapters: state.chapters.map((chapter) =>
-            chapter.chapterId === event.documentId
-              ? { ...chapter, volumeId: typeof event.volumeId === "string" ? event.volumeId : null }
-              : chapter,
-          ),
+        const chapterId = event.documentId as string;
+        const existing = Object.hasOwn(state.chaptersById, chapterId) ? state.chaptersById[chapterId] : undefined;
+        if (!existing) return state;
+        state.chaptersById[chapterId] = {
+          ...existing,
+          volumeId: typeof event.volumeId === "string" ? event.volumeId : null,
         };
+        return { ...state, rev: state.rev + 1 };
       }
       if (event.kind === "chapter.reordered") {
         const ids = event.chapterIds as string[];
-        const positions = new Map(ids.map((id, index) => [id, index]));
-        return {
-          ...state,
-          chapters: [...state.chapters].sort((a, b) => (positions.get(a.chapterId) ?? 0) - (positions.get(b.chapterId) ?? 0)),
-        };
+        const seen = new Set<string>();
+        const nextOrder: string[] = [];
+        for (const id of ids) {
+          if (Object.hasOwn(state.chaptersById, id) && !seen.has(id)) {
+            seen.add(id);
+            nextOrder.push(id);
+          }
+        }
+        for (const id of state.chapterOrder) {
+          if (!seen.has(id)) {
+            seen.add(id);
+            nextOrder.push(id);
+          }
+        }
+        state.chapterOrder = nextOrder;
+        return { ...state, rev: state.rev + 1 };
       }
       return state;
     },
-    ({ title, volumes, chapters }) => {
-      const ordered = chapters.map(({ chapterId, title: chTitle, businessState, volumeId }, index) => ({
-        chapterId,
-        title: chTitle,
-        businessState,
-        order: index + 1,
-        volumeId: volumeId ?? null,
-      }));
-      if (volumes.length === 0) {
+    (rawState) => {
+      const state = normalizeNavState(rawState);
+      const { title, volumesById, volumeOrder, chaptersById, chapterOrder } = state;
+
+      if (volumeOrder.length === 0) {
+        const chapters: Array<{ chapterId: string; title: string; order: number; businessState: string }> = [];
+        for (let i = 0; i < chapterOrder.length; i += 1) {
+          const ch = chaptersById[chapterOrder[i]];
+          if (!ch) continue;
+          chapters.push({
+            chapterId: ch.chapterId,
+            title: ch.title,
+            order: i + 1,
+            businessState: ch.businessState,
+          });
+        }
         return {
           projectId,
           title,
-          volumes: [
-            {
-              volumeId: projectId,
-              title,
-              chapters: ordered.map(({ chapterId, title: chTitle, order, businessState }) => ({
-                chapterId,
-                title: chTitle,
-                order,
-                businessState,
-              })),
-            },
-          ],
+          volumes: [{ volumeId: projectId, title, chapters }],
         };
       }
-      const mapped = volumes.map((vol) => ({
-        volumeId: vol.volumeId,
-        title: vol.title,
-        chapters: ordered
-          .filter((ch) => ch.volumeId === vol.volumeId)
-          .map(({ chapterId, title: chTitle, order, businessState }) => ({
-            chapterId,
-            title: chTitle,
-            order,
-            businessState,
-          })),
-      }));
-      const ungrouped = ordered.filter((ch) => !ch.volumeId || !volumes.some((v) => v.volumeId === ch.volumeId));
+
+      const buckets = new Map<string, Array<{ chapterId: string; title: string; order: number; businessState: string }>>();
+      for (const volId of volumeOrder) {
+        buckets.set(volId, []);
+      }
+      const ungrouped: Array<{ chapterId: string; title: string; order: number; businessState: string }> = [];
+
+      for (let i = 0; i < chapterOrder.length; i += 1) {
+        const ch = chaptersById[chapterOrder[i]];
+        if (!ch) continue;
+        const entry = {
+          chapterId: ch.chapterId,
+          title: ch.title,
+          order: i + 1,
+          businessState: ch.businessState,
+        };
+        const bucket = ch.volumeId ? buckets.get(ch.volumeId) : undefined;
+        if (bucket) {
+          bucket.push(entry);
+        } else {
+          ungrouped.push(entry);
+        }
+      }
+
+      const mapped = volumeOrder.map((volId) => {
+        const vol = volumesById[volId];
+        return {
+          volumeId: vol.volumeId,
+          title: vol.title,
+          chapters: buckets.get(volId) ?? [],
+        };
+      });
+
       if (ungrouped.length > 0) {
         mapped.push({
           volumeId: `${projectId}:ungrouped`,
           title: "未分卷",
-          chapters: ungrouped.map(({ chapterId, title: chTitle, order, businessState }) => ({
-            chapterId,
-            title: chTitle,
-            order,
-            businessState,
-          })),
+          chapters: ungrouped,
         });
       }
       return { projectId, title, volumes: mapped };
@@ -292,8 +372,7 @@ function loadDurableCheckpoint(
   db: SqliteDatabase,
   projectId: string,
   cacheKey: string,
-  unitKey: string,
-): CheckpointRow[] {
+): { readonly version: number; readonly seq: number; readonly val: unknown } | null {
   const row = stmt(
     db,
     `
@@ -301,26 +380,79 @@ function loadDurableCheckpoint(
       WHERE project_id = ? AND cache_key = ?;
     `,
   ).get(projectId, cacheKey) as { version: number; seq: number; state: string } | undefined;
-  if (!row) return [];
-  return [{ key: unitKey, ver: row.version, seq: row.seq, val: JSON.parse(row.state) as unknown }];
+  if (!row) return null;
+  try {
+    return { version: row.version, seq: row.seq, val: JSON.parse(row.state) as unknown };
+  } catch {
+    return null;
+  }
 }
 
-function saveDurableCheckpointRow(
+function hasCheckpointLastUsedColumn(db: SqliteDatabase): boolean {
+  const rows = db.prepare("PRAGMA table_info(author_read_checkpoints);").all() as readonly { name?: unknown }[];
+  return rows.some((row) => row.name === "last_used_at");
+}
+
+function saveDurableCheckpointsBatch(
   db: SqliteDatabase,
   projectId: string,
-  cacheKey: string,
-  row: CheckpointRow,
+  items: readonly { readonly cacheKey: string; readonly version: number; readonly seq: number; readonly stateJson: string }[],
+  maxDurableCheckpoints: number,
 ): void {
-  stmt(
-    db,
-    `
-    INSERT INTO author_read_checkpoints (project_id, cache_key, version, seq, state)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT (project_id, cache_key)
-    DO UPDATE SET version = excluded.version, seq = excluded.seq, state = excluded.state
-    WHERE excluded.seq >= author_read_checkpoints.seq OR excluded.version != author_read_checkpoints.version;
-  `,
-  ).run(projectId, cacheKey, row.ver, row.seq, JSON.stringify(row.val));
+  const now = Date.now();
+  const hasLastUsed = hasCheckpointLastUsedColumn(db);
+  if (hasLastUsed) {
+    const upsert = stmt(
+      db,
+      `
+        INSERT INTO author_read_checkpoints (project_id, cache_key, version, seq, state, last_used_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (project_id, cache_key)
+        DO UPDATE SET
+          version = excluded.version,
+          seq = excluded.seq,
+          state = excluded.state,
+          last_used_at = excluded.last_used_at
+        WHERE excluded.seq >= author_read_checkpoints.seq OR excluded.version != author_read_checkpoints.version;
+      `,
+    );
+    for (const item of items) {
+      upsert.run(projectId, item.cacheKey, item.version, item.seq, item.stateJson, now);
+    }
+    if (maxDurableCheckpoints > 0) {
+      const total = (
+        stmt(db, "SELECT COUNT(*) AS count FROM author_read_checkpoints;").get() as { count?: number } | undefined
+      )?.count ?? 0;
+      if (total > maxDurableCheckpoints) {
+        const overflow = total - maxDurableCheckpoints;
+        stmt(
+          db,
+          `
+            DELETE FROM author_read_checkpoints
+            WHERE rowid IN (
+              SELECT rowid FROM author_read_checkpoints
+              ORDER BY last_used_at ASC, rowid ASC
+              LIMIT ?
+            );
+          `,
+        ).run(overflow);
+      }
+    }
+  } else {
+    const upsertLegacy = stmt(
+      db,
+      `
+        INSERT INTO author_read_checkpoints (project_id, cache_key, version, seq, state)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (project_id, cache_key)
+        DO UPDATE SET version = excluded.version, seq = excluded.seq, state = excluded.state
+        WHERE excluded.seq >= author_read_checkpoints.seq OR excluded.version != author_read_checkpoints.version;
+      `,
+    );
+    for (const item of items) {
+      upsertLegacy.run(projectId, item.cacheKey, item.version, item.seq, item.stateJson);
+    }
+  }
 }
 
 export interface ReadTransactionRunner {
@@ -328,22 +460,150 @@ export interface ReadTransactionRunner {
   readonly atomic: <T>(apply: () => T) => T;
 }
 
+export interface AuthorModelReaderOptions {
+  /** Minimum newly folded events since last save before persisting a checkpoint (default 1; 0 new events NEVER writes). */
+  readonly checkpointMinEvents?: number;
+  /** Optional minimum interval in ms before flushing checkpoints with fewer than `checkpointMinEvents` (default 0). */
+  readonly checkpointMinIntervalMs?: number;
+  /** Maximum rows retained in `author_read_checkpoints` via LRU eviction (default 2000). */
+  readonly maxDurableCheckpoints?: number;
+  /** Maximum in-memory units retained across all projects (default 256). */
+  readonly maxMemoryUnits?: number;
+}
+
+interface AttachedUnitMeta {
+  readonly cacheKey: string;
+  readonly modelName: string;
+  readonly definition: ReadDefinition;
+  readonly unit: ProjectionUnit<unknown>;
+  lastSavedSeq: number;
+  lastSavedAt: number;
+  hasDurableRow: boolean;
+  lastAccessTick: number;
+}
+
+interface ProjectProjectionHub {
+  readonly projectId: string;
+  readonly dbUuid: string;
+  readonly store: ProjectionStore;
+  readonly units: Map<string, AttachedUnitMeta>;
+}
+
 const REPLAY_PAGE_LIMIT = 1000;
 
 /**
- * Author read-model reader backed by durable SQLite projection checkpoints
- * (`author_read_checkpoints`) and an in-memory LRU cache. Cold opens restore
- * from the checkpoint and replay only the event-log tail via `ProjectionStore`
- * in bounded 1000-event pages.
+ * Author read-model reader backed by a per-project shared `ProjectionStore`
+ * (DB-03), O(1) incremental `navigation` reducer, throttled & LRU-bounded
+ * durable SQLite checkpoints (`author_read_checkpoints`), `db_uuid`-keyed
+ * memory cache (DB-25), and concern self-check tolerance (DB-19).
+ *
+ * Guarantees zero write transactions on read requests when no new events exist.
  */
 export function createAuthorModelReader(
   db: SqliteDatabase,
   tx: ReadTransactionRunner = { read: (fn) => fn(), atomic: (fn) => fn() },
   extraFactories: Readonly<Record<string, AuthorReadUnitFactory>> = {},
+  options: AuthorModelReaderOptions = {},
 ) {
-  const cache = new Map<string, { store: ProjectionStore; unit: ProjectionUnit<unknown> }>();
+  const checkpointMinEvents = Math.max(1, Math.floor(options.checkpointMinEvents ?? 1));
+  const checkpointMinIntervalMs = Math.max(0, Math.floor(options.checkpointMinIntervalMs ?? 0));
+  const maxDurableCheckpoints = Math.max(1, Math.floor(options.maxDurableCheckpoints ?? 2000));
+  const maxMemoryUnits = Math.max(8, Math.floor(options.maxMemoryUnits ?? 256));
 
-  return function readAuthorModel(projectId: string, input: Fields) {
+  const projectHubs = new Map<string, ProjectProjectionHub>();
+  let accessClock = 0;
+
+  function totalCachedUnits(): number {
+    let count = 0;
+    for (const hub of projectHubs.values()) count += hub.units.size;
+    return count;
+  }
+
+  function evictMemoryUnitsIfNeeded(protectedHubKey: string, protectedCacheKey: string): void {
+    while (totalCachedUnits() > maxMemoryUnits) {
+      let oldestTick = Number.POSITIVE_INFINITY;
+      let victimHubKey: string | null = null;
+      let victimCacheKey: string | null = null;
+      for (const [hubKey, hub] of projectHubs) {
+        for (const [ck, meta] of hub.units) {
+          if (hubKey === protectedHubKey && ck === protectedCacheKey) continue;
+          if (meta.lastAccessTick < oldestTick) {
+            oldestTick = meta.lastAccessTick;
+            victimHubKey = hubKey;
+            victimCacheKey = ck;
+          }
+        }
+      }
+      if (!victimHubKey || !victimCacheKey) break;
+      const victimHub = projectHubs.get(victimHubKey);
+      if (!victimHub) break;
+      victimHub.store.detachUnit(victimCacheKey);
+      victimHub.units.delete(victimCacheKey);
+      if (victimHub.units.size === 0) {
+        projectHubs.delete(victimHubKey);
+      }
+    }
+  }
+
+  function foldStoreToTarget(
+    projectId: string,
+    store: ProjectionStore,
+    targetSeq: number,
+  ): number {
+    let totalFolded = 0;
+    while (store.seqOf() < targetSeq) {
+      const cursor = store.seqOf();
+      const remaining = targetSeq - cursor;
+      const logged = readEvents(db, projectId, {
+        afterSeq: cursor,
+        limit: Math.min(REPLAY_PAGE_LIMIT, remaining),
+      });
+      if (logged.length === 0) break;
+      const batch = new Array<{ readonly seq: number; readonly payload: unknown }>(logged.length);
+      for (let i = 0; i < logged.length; i += 1) {
+        const event = logged[i];
+        if (event.seq !== cursor + i + 1) {
+          throw new ContractError("storage.format_unsupported", { reason: "event-log-gap" });
+        }
+        const mat = materialiseLoggedEvent(event, true);
+        batch[i] = { seq: mat.seq, payload: mat };
+      }
+      totalFolded += store.fold(batch);
+    }
+    return totalFolded;
+  }
+
+  function catchUpSingleUnitToTarget(
+    projectId: string,
+    store: ProjectionStore,
+    cacheKey: string,
+    targetSeq: number,
+  ): number {
+    let unitFolded = 0;
+    let cursor = store.unitSeq(cacheKey) ?? 0;
+    while (cursor < targetSeq) {
+      const remaining = targetSeq - cursor;
+      const logged = readEvents(db, projectId, {
+        afterSeq: cursor,
+        limit: Math.min(REPLAY_PAGE_LIMIT, remaining),
+      });
+      if (logged.length === 0) break;
+      const batch = new Array<{ readonly seq: number; readonly payload: unknown }>(logged.length);
+      for (let i = 0; i < logged.length; i += 1) {
+        const event = logged[i];
+        if (event.seq !== cursor + i + 1) {
+          throw new ContractError("storage.format_unsupported", { reason: "event-log-gap" });
+        }
+        const mat = materialiseLoggedEvent(event, true);
+        batch[i] = { seq: mat.seq, payload: mat };
+      }
+      unitFolded += store.catchUpUnit(cacheKey, batch);
+      cursor = store.unitSeq(cacheKey) ?? cursor;
+    }
+    return unitFolded;
+  }
+
+  function readAuthorModel(projectId: string, input: Fields): ServedRead {
     const name = required(input, "model");
     const definition = READ_MODELS.find(({ id }) => id === name);
     if (!definition) {
@@ -355,76 +615,193 @@ export function createAuthorModelReader(
       throw new ContractError("input.invalid", { field: "point", reason: "positive-integer-required" });
     }
     const cacheKey = JSON.stringify([projectId, name, ...identity, point]);
-    const unitKey = readKey(definition.id, definition.version);
+    const canonicalKey = readKey(definition.id, definition.version);
 
     const computed = tx.read(() => {
       const logHead = currentSeq(db, projectId);
-      let entry = cache.get(cacheKey);
-      let hydratedFromCheckpoint = false;
+      const dbUuid = readDatabaseUuid(db);
+      const hubKey = `${dbUuid}\0${projectId}`;
 
-      if (!entry || entry.store.seqOf() > logHead) {
+      let hub = projectHubs.get(hubKey);
+      if (!hub || hub.store.seqOf() > logHead) {
+        hub = {
+          projectId,
+          dbUuid,
+          store: createProjectionStore(db, projectId),
+          units: new Map(),
+        };
+        projectHubs.set(hubKey, hub);
+      }
+
+      const { store } = hub;
+      let meta = hub.units.get(cacheKey);
+      let unitCatchUpFolded = 0;
+
+      if (!meta) {
         const unit = buildUnit(name, definition, projectId, identity, point, extraFactories);
-        const store = createProjectionStore(db, projectId);
-        store.register(unitKey, unit);
+        let initialState: unknown = undefined;
+        let initialSeq = 0;
+        let hasDurableRow = false;
 
-        const saved = loadDurableCheckpoint(db, projectId, cacheKey, unitKey);
-        if (saved.length > 0 && saved[0].seq <= logHead) {
-          const floor = store.restoreFloor(saved);
-          if (floor !== undefined && floor >= 0) {
-            if (saved[0].seq === 0) {
-              store.restore(saved, [], 0);
-              hydratedFromCheckpoint = true;
-            } else {
-              const anchorEvents = readEvents(db, projectId, { afterSeq: floor, limit: 1 });
-              if (anchorEvents.length === 1 && anchorEvents[0].seq === saved[0].seq) {
-                store.restore(
-                  saved,
-                  [{ seq: anchorEvents[0].seq, payload: anchorEvents[0].payload }],
-                  saved[0].seq,
-                );
-                hydratedFromCheckpoint = true;
-              }
+        const saved = loadDurableCheckpoint(db, projectId, cacheKey);
+        if (saved && saved.version === definition.version && saved.seq >= 0 && saved.seq <= logHead) {
+          if (saved.seq === 0) {
+            initialState = saved.val;
+            initialSeq = 0;
+            hasDurableRow = true;
+          } else {
+            const anchorEvents = readEvents(db, projectId, { afterSeq: saved.seq - 1, limit: 1 });
+            if (anchorEvents.length === 1 && anchorEvents[0].seq === saved.seq) {
+              initialState = saved.val;
+              initialSeq = saved.seq;
+              hasDurableRow = true;
             }
           }
         }
-        entry = { store, unit };
+
+        // If the hub has existing units behind `initialSeq`, bring them up first so shared seq >= initialSeq.
+        if (hub.units.size > 0 && initialSeq > store.seqOf()) {
+          foldStoreToTarget(projectId, store, initialSeq);
+        }
+
+        store.attachUnit(cacheKey, unit, initialState, initialSeq);
+        meta = {
+          cacheKey,
+          modelName: name,
+          definition,
+          unit,
+          lastSavedSeq: hasDurableRow ? initialSeq : 0,
+          lastSavedAt: hasDurableRow ? Date.now() : 0,
+          hasDurableRow,
+          lastAccessTick: ++accessClock,
+        };
+        hub.units.set(cacheKey, meta);
+
+        // If the shared store is already ahead of this newly attached unit, catch up ONLY this unit.
+        if (initialSeq < store.seqOf()) {
+          unitCatchUpFolded = catchUpSingleUnitToTarget(projectId, store, cacheKey, store.seqOf());
+        }
+      } else {
+        meta.lastAccessTick = ++accessClock;
       }
 
-      const { store, unit } = entry;
-      let totalFolded = 0;
-      let result = serveReadFromLog(db, projectId, store, { definition, unit }, {
-        afterSeq: store.seqOf(),
-        limit: REPLAY_PAGE_LIMIT,
-      });
-      totalFolded += result.folded;
-      while (store.seqOf() < logHead) {
-        result = serveReadFromLog(db, projectId, store, { definition, unit }, {
-          afterSeq: store.seqOf(),
-          limit: REPLAY_PAGE_LIMIT,
-        });
-        totalFolded += result.folded;
+      // Advance the entire shared project ProjectionStore in bounded pages, then
+      // materialize & schema-validate the requested read ONCE at the final watermark!
+      const sharedFolded = store.seqOf() < logHead ? foldStoreToTarget(projectId, store, logHead) : 0;
+      const totalFolded = sharedFolded + unitCatchUpFolded;
+      const cut = store.snapshot([cacheKey]);
+      const stamped = serveRead(cut.values[cacheKey] as Record<string, unknown>, cut.asOfSeq);
+      const problem = validateReadValue(definition, stamped);
+      if (problem) {
+        throw new ContractError("stage.output_invalid", { stage: canonicalKey, missing: problem });
+      }
+      const served: ServedRead = {
+        key: canonicalKey,
+        asOfSeq: cut.asOfSeq,
+        value: stamped,
+        folded: totalFolded,
+      };
+
+      const now = Date.now();
+      const checkpointsToPersist: Array<{
+        readonly cacheKey: string;
+        readonly version: number;
+        readonly seq: number;
+        readonly stateJson: string;
+        readonly meta: AttachedUnitMeta;
+      }> = [];
+
+      // Hard invariant (DB-03): NEVER schedule a checkpoint write when 0 events were folded!
+      if (totalFolded > 0) {
+        const currentStoreSeq = store.seqOf();
+        for (const unitMeta of hub.units.values()) {
+          const delta = currentStoreSeq - unitMeta.lastSavedSeq;
+          if (delta <= 0) continue;
+          const shouldSave =
+            !unitMeta.hasDurableRow ||
+            delta >= checkpointMinEvents ||
+            (checkpointMinIntervalMs > 0 && now - unitMeta.lastSavedAt >= checkpointMinIntervalMs);
+          if (shouldSave) {
+            checkpointsToPersist.push({
+              cacheKey: unitMeta.cacheKey,
+              version: unitMeta.definition.version,
+              seq: currentStoreSeq,
+              stateJson: JSON.stringify(store.stateRef(unitMeta.cacheKey)),
+              meta: unitMeta,
+            });
+          }
+        }
       }
 
-      const finalResult = totalFolded === result.folded ? result : { ...result, folded: totalFolded };
-      const checkpointToPersist = totalFolded > 0 || (hydratedFromCheckpoint && logHead === 0)
-        ? store.checkpoint()[0]
-        : undefined;
+      evictMemoryUnitsIfNeeded(hubKey, cacheKey);
 
-      cache.delete(cacheKey);
-      cache.set(cacheKey, entry);
-      if (cache.size > 256) cache.delete(cache.keys().next().value!);
+      // `navigation.view()` already allocates a fresh unaliased object graph; avoid double cloning it.
+      const safeResult = name === "navigation" ? served : structuredClone(served);
 
       return {
-        result: structuredClone(finalResult),
-        checkpointToPersist,
+        result: safeResult,
+        checkpointsToPersist,
+        persistNow: now,
       };
     });
 
-    if (computed.checkpointToPersist) {
-      const row = computed.checkpointToPersist;
-      tx.atomic(() => saveDurableCheckpointRow(db, projectId, cacheKey, row));
+    if (computed.checkpointsToPersist.length > 0) {
+      tx.atomic(() => {
+        saveDurableCheckpointsBatch(
+          db,
+          projectId,
+          computed.checkpointsToPersist,
+          maxDurableCheckpoints,
+        );
+      });
+      for (const item of computed.checkpointsToPersist) {
+        item.meta.lastSavedSeq = item.seq;
+        item.meta.lastSavedAt = computed.persistNow;
+        item.meta.hasDurableRow = true;
+      }
     }
 
     return computed.result;
+  }
+
+  /** Flushes any throttled in-memory checkpoints to disk cleanly (e.g. before shutdown). */
+  readAuthorModel.flushCheckpoints = (): number => {
+    let flushed = 0;
+    const now = Date.now();
+    for (const hub of projectHubs.values()) {
+      const currentStoreSeq = hub.store.seqOf();
+      const due: Array<{
+        readonly cacheKey: string;
+        readonly version: number;
+        readonly seq: number;
+        readonly stateJson: string;
+        readonly meta: AttachedUnitMeta;
+      }> = [];
+      for (const unitMeta of hub.units.values()) {
+        if (currentStoreSeq > unitMeta.lastSavedSeq) {
+          due.push({
+            cacheKey: unitMeta.cacheKey,
+            version: unitMeta.definition.version,
+            seq: currentStoreSeq,
+            stateJson: JSON.stringify(hub.store.stateRef(unitMeta.cacheKey)),
+            meta: unitMeta,
+          });
+        }
+      }
+      if (due.length > 0) {
+        tx.atomic(() => {
+          saveDurableCheckpointsBatch(db, hub.projectId, due, maxDurableCheckpoints);
+        });
+        for (const item of due) {
+          item.meta.lastSavedSeq = item.seq;
+          item.meta.lastSavedAt = now;
+          item.meta.hasDurableRow = true;
+          flushed += 1;
+        }
+      }
+    }
+    return flushed;
   };
+
+  return readAuthorModel;
 }

@@ -9,7 +9,10 @@
 import { StorageError } from "./errors.ts";
 
 /** The schema id a newly created store records. */
-export const SCHEMA_ID = "zhizhang/2.0";
+export const SCHEMA_ID = "zhizhang/2.3";
+
+/** SQLite `PRAGMA user_version` corresponding to `SCHEMA_ID`. */
+export const SCHEMA_USER_VERSION = 23;
 
 /** The window: any `zhizhang/2.<minor>` id opens, and nothing else does. */
 export const SCHEMA_WINDOW = /^zhizhang\/2\.\d+$/;

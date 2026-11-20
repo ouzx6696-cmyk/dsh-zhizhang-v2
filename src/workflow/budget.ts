@@ -6,25 +6,16 @@
 // same categories. Everything else here is the v1.x guard's mechanics, replayed
 // against the frozen error vocabulary.
 //
+// V2.3 DB-01: `normalizeUsage(raw, { inputIncludesCache = true })` normalizes
+// provider usage payloads into mutually exclusive `[input, output, cache_read,
+// cache_write]` buckets (`input` = uncached input only) so `totalTokens()`
+// continues summing all four frozen categories without double-counting
+// `cache_read`.
+//
 // Two things are deliberately **not frozen** and are configurable rather than
 // assumed: the money cap (whether it is a stop gate is C.1 item 11) and the
 // money unit itself (Q-06, which C.1 item 11 gates on written authorisation).
 // Both are marked where they are declared.
-//
-// C.1 numbering follows the complete table in `contracts.md`; the one-page
-// signature sheet numbers the same items differently.
-//
-// The refusal rules, in order:
-//
-//   1. an estimate above the single-stage input budget refuses before anything
-//      is reserved — a stage cannot start with a request the model will reject;
-//   2. used plus inflight plus the estimate above the run budget refuses;
-//   3. with a money cap configured, an unknown total price refuses as
-//      `usage.uncertain` rather than guessing a remaining amount;
-//   4. with a money cap configured, a total at or above the cap refuses.
-//
-// A refusal never leaves a reservation behind, and a settled reservation is
-// settled once: a retried settle must not double-count usage.
 
 import { ContractError } from "../contracts/errors.ts";
 
@@ -33,12 +24,43 @@ export const TOKEN_CATEGORIES = ["input", "output", "cache_read", "cache_write"]
 
 export type TokenCategory = (typeof TOKEN_CATEGORIES)[number];
 
-/** A usage record in the frozen categories. */
+/**
+ * A usage record in the frozen categories.
+ * When produced by `normalizeUsage()`, all four categories are mutually
+ * exclusive: `input` is uncached input tokens only, `cache_read` is cache hit
+ * tokens, `cache_write` is cache creation tokens, and `output` is output tokens.
+ */
 export interface TokenUsage {
   readonly input: number;
   readonly output: number;
   readonly cache_read: number;
   readonly cache_write: number;
+}
+
+/** Raw provider/host usage shape accepted by `normalizeUsage`. */
+export interface RawLlmUsage {
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly cacheReadTokens?: number;
+  readonly cacheWriteTokens?: number;
+  readonly input?: number;
+  readonly output?: number;
+  readonly cache_read?: number;
+  readonly cache_write?: number;
+  readonly cachedInput?: number;
+  readonly cacheWrite?: number;
+  readonly cost?: number | null;
+}
+
+export interface NormalizeUsageOptions {
+  /**
+   * Whether the provider's `inputTokens` / `input` figure already includes
+   * `cacheReadTokens` / `cache_read` (default `true`, per AI SDK / OpenAI / DsH
+   * convention; see V2.3 Plan §6.0 un-decided #3). When `true`, `input` is
+   * normalized to `max(0, rawInput - cacheRead)` so `totalTokens()` sums the
+   * four mutually exclusive categories without double-counting cache hits.
+   */
+  readonly inputIncludesCache?: boolean;
 }
 
 /** A settle's actual usage, with the price the model charged for it. */
@@ -90,6 +112,58 @@ export interface BudgetGuard {
 
 function isCount(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function toSafeNonNegativeInt(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(value);
+}
+
+/**
+ * Normalizes raw LLM/host usage into strictly mutually exclusive frozen token
+ * categories (`input` = uncached input, `output`, `cache_read`, `cache_write`)
+ * so summing all four categories via `totalTokens()` never double-counts
+ * `cache_read` (DB-01).
+ */
+export function normalizeUsage(
+  raw: RawLlmUsage,
+  options: NormalizeUsageOptions = {},
+): TokenUsage {
+  const inputIncludesCache = options.inputIncludesCache ?? true;
+  const rawInput = toSafeNonNegativeInt(raw.inputTokens ?? raw.input ?? 0);
+  const output = toSafeNonNegativeInt(raw.outputTokens ?? raw.output ?? 0);
+  const cacheRead = toSafeNonNegativeInt(
+    raw.cacheReadTokens ?? raw.cache_read ?? raw.cachedInput ?? 0,
+  );
+  const cacheWrite = toSafeNonNegativeInt(
+    raw.cacheWriteTokens ?? raw.cache_write ?? raw.cacheWrite ?? 0,
+  );
+  const uncachedInput = inputIncludesCache ? Math.max(0, rawInput - cacheRead) : rawInput;
+  return {
+    input: uncachedInput,
+    output,
+    cache_read: cacheRead,
+    cache_write: cacheWrite,
+  };
+}
+
+/** Normalizes raw LLM usage directly into the persisted 4-tuple `[input, output, cache_read, cache_write]`. */
+export function normalizeUsageToTuple(
+  raw: RawLlmUsage,
+  options: NormalizeUsageOptions = {},
+): readonly [number, number, number, number] {
+  const normalized = normalizeUsage(raw, options);
+  return [normalized.input, normalized.output, normalized.cache_read, normalized.cache_write];
+}
+
+/** Normalizes raw LLM usage into an `ActualUsage` record ready for `BudgetGuard.settle()`. */
+export function normalizeActualUsage(
+  raw: RawLlmUsage,
+  options: NormalizeUsageOptions = {},
+): ActualUsage {
+  const normalized = normalizeUsage(raw, options);
+  const cost = typeof raw.cost === "number" && Number.isFinite(raw.cost) ? raw.cost : null;
+  return { ...normalized, cost };
 }
 
 /** Sums the four frozen categories. An absent category counts as zero. */

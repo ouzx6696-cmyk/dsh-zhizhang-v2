@@ -42,6 +42,98 @@ export interface AnchorPoint {
 }
 export type NarrativeAnchorDto = AnchorPoint;
 
+export type ProposalOrigin = "author-ui" | "ai-generate" | "agent-tool";
+
+export type ActorDto =
+  | { readonly kind: "author"; readonly peerId?: string }
+  | { readonly kind: "agent"; readonly toolCallId: string; readonly agentId?: string };
+
+export interface PendingJobDto {
+  readonly id: string;
+  readonly kind: string;
+  readonly projectId?: string | null;
+  readonly documentId: string | null;
+  readonly startedAt: number;
+}
+
+export interface ChapterReadDto {
+  readonly id: string;
+  readonly projectId: string;
+  readonly title: string;
+  readonly state: string;
+  readonly revisionId: string | null;
+  readonly body: string | null;
+  readonly charCount: number;
+  readonly summary: string;
+  readonly locked: boolean;
+  readonly volumeId: string | null;
+  readonly actId: string | null;
+  readonly updatedAt: number;
+}
+
+export interface CreationProcessReportDto {
+  readonly documentId: string;
+  readonly title: string;
+  readonly totalChars: number;
+  readonly revisionCount: number;
+  readonly manualSaveCount: number;
+  readonly adoptedCandidateCount: number;
+  readonly candidateOriginRatio: number;
+  readonly postAdoptionEditedChars: number;
+  readonly outlineAuthorConfirmed: boolean;
+  readonly approvedSettingsCount: number;
+  readonly generatedAt: string;
+}
+
+export interface DailyOutputDayDto {
+  readonly date: string;
+  readonly charsAdded: number;
+  readonly saves: number;
+}
+
+export interface DailyOutputStatsDto {
+  readonly projectId: string;
+  readonly todayChars: number;
+  readonly last7DaysChars: number;
+  readonly dailyTarget: number;
+  readonly days: readonly DailyOutputDayDto[];
+}
+
+export interface ProjectBootstrapInputDto {
+  readonly product: Product;
+  readonly name: string;
+  readonly authorIntent?: string;
+  readonly currentFocus?: string;
+  readonly pacingTier?: string;
+  readonly genreTags?: readonly string[];
+  readonly dailyTarget?: number;
+  readonly volumeTitle?: string;
+  readonly actTitle?: string;
+  readonly chapterTitle?: string;
+  readonly chapterBody?: string;
+  readonly techniques?: readonly Readonly<Record<string, unknown>>[];
+  readonly settings?: readonly Readonly<Record<string, unknown>>[];
+}
+
+export interface ChunkedImportInputDto {
+  readonly importId: string;
+  readonly part: number;
+  readonly totalParts: number;
+  readonly projectId?: string;
+  readonly projectName?: string;
+  readonly files: readonly LocalBundleFileDto[];
+  readonly commit?: boolean;
+}
+
+export interface BackupInfoDto {
+  readonly id: string;
+  readonly valid: boolean;
+  readonly schema?: string;
+  readonly createdAt?: string;
+  readonly sizeBytes?: number;
+  readonly entryCount?: number;
+}
+
 export interface SettingFactDto {
   readonly id: string;
   readonly note: string;
@@ -51,12 +143,15 @@ export interface SettingFactDto {
   readonly effectiveFrom: AnchorPoint;
   readonly effectiveTo?: AnchorPoint;
   readonly knownFrom: Readonly<Record<string, AnchorPoint>>;
+  readonly aliases?: readonly string[];
 }
 
 export interface SettingEntryDto {
   readonly id: string;
   readonly decision: SettingDecision;
   readonly fact: SettingFactDto;
+  readonly origin?: ProposalOrigin;
+  readonly originRef?: string;
 }
 export type SettingProposalEntry = SettingEntryDto;
 
@@ -121,6 +216,7 @@ export interface RunSummary {
   readonly candidateId: string | null;
   readonly candidateBody: string | null;
   readonly candidateQa: string | null;
+  readonly candidateQaReport?: CandidateQaReport | null;
   readonly refinementRounds: number | null;
   readonly generationState: string | null;
   readonly generationError: string | null;
@@ -143,6 +239,7 @@ export interface GenerationAttemptDto {
   readonly state: string;
   readonly stage: string | null;
   readonly usage: string;
+  readonly lateUsage?: string;
   readonly error: string | null;
 }
 export type GenerationAttemptRecord = GenerationAttemptDto;
@@ -279,6 +376,7 @@ export interface ActDto {
   readonly arcGoal?: string;
   readonly arcSummary?: string;
   readonly pacingTemplate?: string;
+  readonly chapterCount?: number;
   readonly sortOrder: number;
   readonly createdAt: number;
 }
@@ -287,6 +385,12 @@ export interface ProjectControlsDto {
   readonly projectId: string;
   readonly authorIntent: string;
   readonly currentFocus: string;
+  readonly pacingTier?: string;
+  readonly genreTags?: readonly string[];
+  readonly agentToolsEnabled?: boolean;
+  readonly dailyTarget?: number;
+  readonly staleForeshadowGap?: number;
+  readonly tokenCalibration?: Readonly<Record<string, number>>;
   readonly updatedAt: number;
 }
 
@@ -301,6 +405,7 @@ export interface ChapterTreeItemDto {
   readonly targetLength: number | null;
   readonly viewpoint: string | null;
   readonly syncStatus?: MemorySyncStatus;
+  readonly sortKey?: number;
   readonly order: number;
   readonly updatedAt: number;
 }
@@ -312,6 +417,8 @@ export interface NovelTreeDto {
   readonly chapters: readonly ChapterTreeItemDto[];
   readonly totalChars: number;
   readonly asOfSeq: number;
+  readonly treeSeq?: number;
+  readonly unchanged?: boolean;
 }
 
 export interface ActiveContextCrumbDto {
@@ -343,6 +450,7 @@ export interface ForeshadowDto {
   readonly plantedPoint: number;
   readonly targetChapterId: string | null;
   readonly resolvedChapterId: string | null;
+  readonly hintedChapterIds?: readonly string[];
   readonly status: ForeshadowStatus;
   readonly note: string;
   readonly updatedAt: number;
@@ -456,6 +564,9 @@ export interface AiSlopReportDto {
   readonly severity: "clean" | "warn" | "high";
   readonly topPhrases: readonly { readonly phrase: string; readonly category: string; readonly count: number }[];
   readonly hits: readonly SlopHitDto[];
+  readonly weightedScore?: number;
+  readonly sentenceLengthCV?: number;
+  readonly monotoneRuns?: number;
 }
 
 export interface ChapterDiagnosticsReportDto {
@@ -483,6 +594,8 @@ export interface ChapterObservationDto {
   readonly quote: string;
   readonly suggestion: string;
   readonly status: ObservationStatus;
+  readonly verified?: boolean;
+  readonly stale?: boolean;
   readonly source: string;
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -531,6 +644,8 @@ export interface ContextAssemblyReportDto {
   readonly totalEstimatedTokens: number;
   readonly prefixTokens: number;
   readonly dynamicTokens: number;
+  readonly prefixBudget?: number;
+  readonly dynamicBudget?: number;
   readonly framingTokens?: number;
   readonly overBudget?: boolean;
   readonly slots: readonly ContextSlotReportDto[];
@@ -549,7 +664,7 @@ export interface AiProposalDto {
   readonly projectId: string | null;
   readonly documentId: string | null;
   readonly kind: AiProposalKind;
-  readonly status: "pending" | "approved" | "rejected" | "failed";
+  readonly status: "pending" | "approved" | "rejected" | "failed" | "inflight";
   readonly sourceRef: string;
   readonly payload: Readonly<Record<string, unknown>>;
   readonly provider: string | null;
@@ -557,6 +672,11 @@ export interface AiProposalDto {
   readonly reserved: number;
   readonly settled: number;
   readonly error: string | null;
+  readonly baseRevisionId?: string | null;
+  readonly sourceSha256?: string;
+  readonly origin?: ProposalOrigin;
+  readonly originRef?: string;
+  readonly errorDetail?: string | null;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -610,6 +730,18 @@ export interface ProjectImportSummaryDto {
   readonly mountsRestored?: number;
 }
 
+export interface ProtectedRulesSnapshotDto {
+  readonly titleMax: number;
+  readonly qaPassScore: number;
+  readonly qaRefinementLimit: number;
+  readonly editorialRejectionLimit: number;
+}
+
+export interface LlmDefaultsDto {
+  readonly provider: string;
+  readonly model: string;
+}
+
 export interface WorkspaceSnapshot {
   readonly unchanged?: false;
   readonly projects?: readonly ProjectSummary[];
@@ -625,6 +757,11 @@ export interface WorkspaceSnapshot {
   readonly report?: ArticleReportDto | null;
   readonly planning?: PlanningDto | null;
   readonly scenario?: ArticleScenarioDto | null;
+  readonly pendingJobs?: readonly PendingJobDto[];
+  readonly treeSeq?: number;
+  readonly globalSeq?: number;
+  readonly llmDefaults?: LlmDefaultsDto;
+  readonly rules?: ProtectedRulesSnapshotDto;
   readonly asOfSeq?: number;
 }
 
@@ -745,4 +882,165 @@ export type WorkspaceAction =
   | "observation.update"
   | "selection.rewrite"
   | "controls.get"
-  | "controls.save";
+  | "controls.save"
+  | "chapter.read"
+  | "project.bootstrap"
+  | "foreshadow.create"
+  | "foreshadow.patch"
+  | "backup.create"
+  | "backup.list"
+  | "setting.revoke_known"
+  | "chapter.creation_report"
+  | "project.daily_stats"
+  | "revisions.compact";
+
+export interface ActionEntry<I = Readonly<Record<string, unknown>>, O = unknown> {
+  readonly input: I;
+  readonly output: O;
+}
+
+export interface RevisionCompactResultDto {
+  readonly examined: number;
+  readonly deleted: number;
+  readonly kept: number;
+  readonly dryRun?: boolean;
+}
+
+export interface ProjectBootstrapResultDto {
+  readonly projectId: string;
+  readonly volumeId?: string | null;
+  readonly actId?: string | null;
+  readonly documentId?: string | null;
+  readonly revisionId?: string | null;
+  readonly techniquesCreated: number;
+  readonly settingsProposed: number;
+}
+
+export type ActionMap = {
+  readonly [K in WorkspaceAction]: ActionEntry;
+} & {
+  readonly "project.create": ActionEntry<{ readonly product: Product; readonly name: string }, ProjectSummary>;
+  readonly "project.bootstrap": ActionEntry<ProjectBootstrapInputDto, ProjectBootstrapResultDto>;
+  readonly "document.create": ActionEntry<
+    {
+      readonly projectId: string;
+      readonly title: string;
+      readonly mode?: ArticleModeId;
+      readonly line?: ContentLineId;
+      readonly volumeId?: string;
+      readonly actId?: string;
+    },
+    { readonly id: string }
+  >;
+  readonly "draft.save": ActionEntry<
+    { readonly documentId: string; readonly baseRevisionId: string | null; readonly body: string; readonly key?: string },
+    { readonly revisionId: string }
+  >;
+  readonly "chapter.read": ActionEntry<{ readonly projectId?: string; readonly documentId: string }, ChapterReadDto>;
+  readonly "chapter.creation_report": ActionEntry<{ readonly documentId: string }, CreationProcessReportDto>;
+  readonly "project.daily_stats": ActionEntry<{ readonly projectId: string; readonly days?: number }, DailyOutputStatsDto>;
+  readonly "tree.get": ActionEntry<
+    { readonly projectId: string; readonly ifSequence?: number; readonly ifTreeSeq?: number },
+    NovelTreeDto | { readonly unchanged: true; readonly treeSeq?: number; readonly asOfSeq?: number }
+  >;
+  readonly "controls.get": ActionEntry<{ readonly projectId: string }, ProjectControlsDto>;
+  readonly "controls.save": ActionEntry<
+    {
+      readonly projectId: string;
+      readonly authorIntent?: string;
+      readonly currentFocus?: string;
+      readonly pacingTier?: string;
+      readonly genreTags?: readonly string[];
+      readonly agentToolsEnabled?: boolean;
+      readonly dailyTarget?: number;
+      readonly staleForeshadowGap?: number;
+    },
+    ProjectControlsDto
+  >;
+  readonly "foreshadow.create": ActionEntry<
+    {
+      readonly projectId: string;
+      readonly title: string;
+      readonly factId?: string | null;
+      readonly plantedChapterId?: string | null;
+      readonly plantedPoint?: number;
+      readonly targetChapterId?: string | null;
+      readonly status?: ForeshadowStatus;
+      readonly note?: string;
+    },
+    ForeshadowDto
+  >;
+  readonly "foreshadow.patch": ActionEntry<
+    {
+      readonly id: string;
+      readonly projectId?: string;
+      readonly title?: string;
+      readonly factId?: string | null;
+      readonly plantedChapterId?: string | null;
+      readonly plantedPoint?: number;
+      readonly targetChapterId?: string | null;
+      readonly resolvedChapterId?: string | null;
+      readonly hintedChapterId?: string | null;
+      readonly status?: ForeshadowStatus;
+      readonly reopen?: boolean;
+      readonly note?: string;
+    },
+    ForeshadowDto
+  >;
+  readonly "setting.revoke_known": ActionEntry<
+    { readonly projectId: string; readonly factId: string; readonly character: string; readonly reason?: string },
+    { readonly id: string; readonly factId: string; readonly revokedCharacter: string }
+  >;
+  readonly "backup.create": ActionEntry<
+    { readonly includeExports?: boolean; readonly label?: string },
+    BackupInfoDto
+  >;
+  readonly "backup.list": ActionEntry<Readonly<Record<string, never>> | Readonly<Record<string, unknown>>, readonly BackupInfoDto[]>;
+  readonly "revisions.compact": ActionEntry<
+    { readonly projectId?: string; readonly documentId?: string; readonly retainRawDays?: number; readonly dryRun?: boolean },
+    RevisionCompactResultDto
+  >;
+  readonly "context.preview": ActionEntry<
+    { readonly documentId: string; readonly instruction?: string; readonly tokenLimit?: number; readonly point?: number },
+    ContextBundleDto
+  >;
+  readonly "run.preview": ActionEntry<
+    { readonly documentId: string; readonly baseRevisionId: string; readonly instruction: string },
+    BudgetPreviewResult & { readonly contextReport?: ContextAssemblyReportDto | null }
+  >;
+  readonly "run.detail": ActionEntry<{ readonly documentId: string; readonly runId: string }, RunDetailDto>;
+  readonly "run.history": ActionEntry<{ readonly documentId: string; readonly before?: number }, readonly RunHistoryItem[]>;
+  readonly "workspace.search": ActionEntry<
+    { readonly projectId: string; readonly query: string; readonly scopes?: readonly ("chapter" | "lore" | "deconstruction" | "technique")[]; readonly limit?: number },
+    readonly SearchHitDto[]
+  >;
+  readonly "chapter.diagnose": ActionEntry<{ readonly documentId: string }, ChapterDiagnosticsReportDto>;
+  readonly "project.export_bundle": ActionEntry<
+    { readonly projectId: string; readonly writeToDisk?: boolean; readonly formatVersion?: 1 | 2 },
+    ProjectExportBundleDto
+  >;
+  readonly "project.import_bundle": ActionEntry<
+    | { readonly projectId?: string; readonly projectName?: string; readonly files: readonly LocalBundleFileDto[] }
+    | ChunkedImportInputDto,
+    ProjectImportSummaryDto | { readonly importId: string; readonly part: number; readonly totalParts: number; readonly accepted: true }
+  >;
+  readonly "proposal.list": ActionEntry<
+    { readonly projectId?: string; readonly documentId?: string; readonly kind?: AiProposalKind; readonly status?: string },
+    readonly AiProposalDto[]
+  >;
+  readonly "selection.rewrite": ActionEntry<
+    {
+      readonly documentId: string;
+      readonly selectedText: string;
+      readonly beforeContext?: string;
+      readonly afterContext?: string;
+      readonly mode?: SelectionRewriteMode;
+      readonly instruction?: string;
+      readonly selectionStart?: number;
+      readonly provider: string;
+      readonly model: string;
+      readonly tokenLimit?: number;
+    },
+    SelectionRewriteResultDto
+  >;
+};

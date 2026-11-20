@@ -21,6 +21,12 @@ export function inTransaction(db: SqliteDatabase): "read" | "write" | null {
 export function withWriteTx<T>(db: SqliteDatabase, fn: () => T): T {
   const existing = txStates.get(db);
   if (!existing) {
+    if (db.isTransaction === true) {
+      throw new StorageError("gate.denied", {
+        action: "storage.tx",
+        reason: "foreign-transaction",
+      });
+    }
     db.exec("BEGIN IMMEDIATE;");
     txStates.set(db, { depth: 1, mode: "write", savepointSeq: 0 });
     try {
@@ -79,6 +85,13 @@ export function withReadTx<T>(db: SqliteDatabase, fn: () => T): T {
     } finally {
       existing.depth -= 1;
     }
+  }
+
+  if (db.isTransaction === true) {
+    throw new StorageError("gate.denied", {
+      action: "storage.tx",
+      reason: "foreign-transaction",
+    });
   }
 
   db.exec("BEGIN;");

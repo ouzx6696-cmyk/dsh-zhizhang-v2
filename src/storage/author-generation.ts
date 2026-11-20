@@ -6,6 +6,7 @@ export interface OpenGenerationAttempt {
   readonly runId: string;
   readonly state: string;
   readonly usage: string;
+  readonly lateUsage?: string;
 }
 
 export interface GenerationAttemptRecord {
@@ -15,6 +16,7 @@ export interface GenerationAttemptRecord {
   readonly state: string;
   readonly stage: string | null;
   readonly usage: string;
+  readonly lateUsage: string;
   readonly error: string | null;
 }
 
@@ -27,8 +29,23 @@ export interface GenerationCallRecord {
   readonly usage: string | null;
 }
 
+export interface UsageConsistencyIssue {
+  readonly attemptId: string;
+  readonly callsTotal: number;
+  readonly attemptTotal: number;
+}
+
 const OPEN_STATES = "('prepared','inflight','received')";
 const UNRESOLVED_STATES = "('prepared','inflight','received','uncertain')";
+
+function sumTuple(values: unknown): number {
+  if (!Array.isArray(values)) return 0;
+  let total = 0;
+  for (const item of values) {
+    if (typeof item === "number" && Number.isFinite(item) && item > 0) total += item;
+  }
+  return total;
+}
 
 export function createGenerationLedger(db: SqliteDatabase) {
   db.exec(`
@@ -40,9 +57,13 @@ export function createGenerationLedger(db: SqliteDatabase) {
       state TEXT NOT NULL,
       stage TEXT,
       usage TEXT NOT NULL,
+      late_usage TEXT NOT NULL DEFAULT '[]',
       error TEXT
     );
     CREATE INDEX IF NOT EXISTS author_generation_by_run ON author_generation_attempts(run_id);
+    CREATE INDEX IF NOT EXISTS author_generation_attempts_open
+      ON author_generation_attempts(state)
+      WHERE state IN ('prepared', 'inflight', 'received');
     CREATE TABLE IF NOT EXISTS author_generation_calls (
       id TEXT PRIMARY KEY,
       attempt_id TEXT NOT NULL REFERENCES author_generation_attempts(id),
@@ -53,6 +74,15 @@ export function createGenerationLedger(db: SqliteDatabase) {
     );
     CREATE INDEX IF NOT EXISTS author_calls_by_attempt ON author_generation_calls(attempt_id);
   `);
+
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info(author_generation_attempts);").all() as readonly { name?: unknown }[])
+      .map((row) => row.name)
+      .filter((name): name is string => typeof name === "string"),
+  );
+  if (!cols.has("late_usage")) {
+    db.exec("ALTER TABLE author_generation_attempts ADD COLUMN late_usage TEXT NOT NULL DEFAULT '[]';");
+  }
 
   return {
     pending(runId: string): boolean {
@@ -73,8 +103,8 @@ export function createGenerationLedger(db: SqliteDatabase) {
 
     create(id: string, runId: string, provider: string, model: string): void {
       stmt(db, `
-        INSERT INTO author_generation_attempts (id, run_id, provider, model, state, usage)
-        VALUES (?, ?, ?, ?, 'prepared', '[]');
+        INSERT INTO author_generation_attempts (id, run_id, provider, model, state, usage, late_usage)
+        VALUES (?, ?, ?, ?, 'prepared', '[]', '[]');
       `).run(id, runId, provider, model);
     },
 
@@ -93,6 +123,12 @@ export function createGenerationLedger(db: SqliteDatabase) {
       });
     },
 
+    /**
+     * Records a usage receipt for a generation call. When the attempt is no
+     * longer `inflight` (e.g., cancelled or interrupted before the usage chunk
+     * arrived), the receipt is preserved in `author_generation_attempts.late_usage`
+     * instead of being silently discarded (DB-14), while returning `false`.
+     */
     receiveCall(attemptId: string, callId: string, usage: readonly number[]): boolean {
       return withWriteTx(db, () => {
         const call = stmt(db, `
@@ -101,7 +137,30 @@ export function createGenerationLedger(db: SqliteDatabase) {
             AND EXISTS (SELECT 1 FROM author_generation_attempts WHERE id = ? AND state = 'inflight')
           RETURNING phase;
         `).get(JSON.stringify(usage), callId, attemptId, attemptId) as { phase: string } | undefined;
-        if (!call) return false;
+        if (!call) {
+          // DB-14: Preserve late receipts for reconciliation instead of silent drop,
+          // strictly once per unreceived call so retries, duplicates, and unknown
+          // callIds never double-count usage or break verifyUsageConsistency().
+          const lateCall = stmt(db, `
+            UPDATE author_generation_calls SET usage = ?
+            WHERE id = ? AND attempt_id = ? AND usage IS NULL
+            RETURNING phase;
+          `).get(JSON.stringify(usage), callId, attemptId) as { phase: string } | undefined;
+          if (lateCall) {
+            const lateEntry = JSON.stringify({
+              callId,
+              phase: lateCall.phase,
+              usage,
+              recordedAt: Date.now(),
+            });
+            stmt(db, `
+              UPDATE author_generation_attempts
+              SET late_usage = json_insert(COALESCE(NULLIF(late_usage, ''), '[]'), '$[#]', json(?))
+              WHERE id = ?;
+            `).run(lateEntry, attemptId);
+          }
+          return false;
+        }
         stmt(db, `
           UPDATE author_generation_attempts
           SET state = 'received', usage = json_insert(usage, '$[#]', json(?))
@@ -113,7 +172,8 @@ export function createGenerationLedger(db: SqliteDatabase) {
 
     openAttempt(id: string): OpenGenerationAttempt | undefined {
       return stmt(db, `
-        SELECT run_id AS runId, state, usage FROM author_generation_attempts
+        SELECT run_id AS runId, state, usage, late_usage AS lateUsage
+        FROM author_generation_attempts
         WHERE id = ? AND state IN ${OPEN_STATES};
       `).get(id) as OpenGenerationAttempt | undefined;
     },
@@ -138,7 +198,7 @@ export function createGenerationLedger(db: SqliteDatabase) {
 
     history(runId: string): readonly GenerationAttemptRecord[] {
       return stmt(db, `
-        SELECT id, provider, model, state, stage, usage, error
+        SELECT id, provider, model, state, stage, usage, late_usage AS lateUsage, error
         FROM author_generation_attempts
         WHERE run_id = ? ORDER BY rowid DESC;
       `).all(runId) as readonly GenerationAttemptRecord[];
@@ -152,6 +212,48 @@ export function createGenerationLedger(db: SqliteDatabase) {
         JOIN author_generation_attempts a ON a.id = c.attempt_id
         WHERE a.run_id = ? ORDER BY a.rowid DESC, c.rowid;
       `).all(runId) as readonly GenerationCallRecord[];
+    },
+
+    /** Computes authoritative call-level usage sum for an attempt (DB-14). */
+    attemptUsageFromCalls(attemptId: string): number {
+      const rows = stmt(db, `
+        SELECT usage FROM author_generation_calls WHERE attempt_id = ? AND usage IS NOT NULL;
+      `).all(attemptId) as readonly { usage: string }[];
+      let sum = 0;
+      for (const row of rows) {
+        try {
+          sum += sumTuple(JSON.parse(row.usage));
+        } catch {
+          // Ignore malformed row.
+        }
+      }
+      return sum;
+    },
+
+    /** Compares `author_generation_calls` sums against `author_generation_attempts.usage` for `/diag` (DB-14). */
+    verifyUsageConsistency(): readonly UsageConsistencyIssue[] {
+      const attempts = stmt(db, `
+        SELECT id, usage, late_usage AS lateUsage FROM author_generation_attempts;
+      `).all() as readonly { id: string; usage: string; lateUsage: string }[];
+      const issues: UsageConsistencyIssue[] = [];
+      for (const attempt of attempts) {
+        const callsTotal = this.attemptUsageFromCalls(attempt.id);
+        let attemptTotal = 0;
+        for (const raw of [attempt.usage, attempt.lateUsage]) {
+          try {
+            const parsed = JSON.parse(raw) as readonly { usage?: unknown }[];
+            if (Array.isArray(parsed)) {
+              for (const entry of parsed) attemptTotal += sumTuple(entry?.usage);
+            }
+          } catch {
+            // Ignore malformed json.
+          }
+        }
+        if (callsTotal !== attemptTotal) {
+          issues.push({ attemptId: attempt.id, callsTotal, attemptTotal });
+        }
+      }
+      return issues;
     },
   };
 }

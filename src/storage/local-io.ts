@@ -19,17 +19,83 @@ export interface ChapterMarkdownFrontmatter {
   readonly summary?: string;
 }
 
+const WINDOWS_RESERVED_NAME = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/i;
+const RETRYABLE_RENAME_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
+
+function sleepSyncMs(ms: number): void {
+  if (ms <= 0) return;
+  try {
+    const view = new Int32Array(new SharedArrayBuffer(4));
+    Atomics.wait(view, 0, 0, ms);
+  } catch {
+    // Fallback if SharedArrayBuffer is unavailable in restricted environments.
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      // brief wait
+    }
+  }
+}
+
+/**
+ * Performs `renameSync` with bounded exponential backoff retries on Windows
+ * `EPERM`/`EBUSY` directory-lock errors (DB-20).
+ */
+export function renameWithRetry(
+  oldPath: string,
+  newPath: string,
+  options?: {
+    readonly maxAttempts?: number;
+    readonly baseDelayMs?: number;
+    readonly renameFn?: (from: string, to: string) => void;
+  },
+): void {
+  const maxAttempts = Math.max(1, options?.maxAttempts ?? 3);
+  const baseDelayMs = Math.max(0, options?.baseDelayMs ?? 25);
+  const doRename = options?.renameFn ?? renameSync;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      doRename(oldPath, newPath);
+      return;
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      const isRetryable = typeof code === "string" && RETRYABLE_RENAME_CODES.has(code);
+      if (!isRetryable) throw error;
+      if (attempt < maxAttempts) {
+        sleepSyncMs(baseDelayMs * attempt);
+        continue;
+      }
+      throw new StorageError("dependency.unavailable", {
+        reason: "export-directory-locked",
+        code,
+        attempts: attempt,
+      });
+    }
+  }
+}
+
 /**
  * Sanitizes a single directory or file segment for cross-platform OS safety,
- * preserving CJK characters while stripping reserved characters and dot segments.
+ * preserving CJK characters while stripping reserved characters, trailing dots
+ * and spaces, dot segments, and Windows reserved device names (`CON`, `NUL`,
+ * `COM1`-`COM9`, `LPT1`-`LPT9`, etc.) with a collision-avoiding hash suffix.
  */
 export function sanitizePathSegment(raw: string, fallback = "untitled"): string {
   const cleaned = raw
     .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
-    .replace(/^\.+|\.+$/g, "")
     .trim()
-    .slice(0, 80);
+    .replace(/^\.+|[.\s]+$/g, "")
+    .slice(0, 80)
+    .replace(/[.\s]+$/g, "");
   if (!cleaned || cleaned === "." || cleaned === "..") return fallback;
+  if (WINDOWS_RESERVED_NAME.test(cleaned)) {
+    const hash = createHash("sha256").update(raw).digest("hex").slice(0, 6);
+    const dotIdx = cleaned.indexOf(".");
+    if (dotIdx > 0) {
+      return `${cleaned.slice(0, dotIdx)}_${hash}${cleaned.slice(dotIdx)}`;
+    }
+    return `${cleaned}_${hash}`;
+  }
   return cleaned;
 }
 
@@ -130,11 +196,16 @@ export function parseChapterMarkdown(content: string): {
 
 /**
  * Writes an entire local project export bundle atomically under `targetDir`,
- * ensuring all relative paths stay strictly confined inside `targetDir`.
+ * ensuring all relative paths stay strictly confined inside `targetDir` and
+ * retrying transient Windows EPERM/EBUSY directory swaps cleanly.
  */
 export function writeLocalBundleToDir(
   targetDir: string,
   files: readonly BundleFileInput[],
+  options?: {
+    readonly renameFn?: (from: string, to: string) => void;
+    readonly baseDelayMs?: number;
+  },
 ): { readonly writtenDir: string; readonly count: number } {
   const resolvedRoot = resolve(targetDir);
   mkdirSync(dirname(resolvedRoot), { recursive: true, mode: 0o700 });
@@ -167,12 +238,24 @@ export function writeLocalBundleToDir(
     );
 
     try {
-      renameSync(resolvedRoot, backupOldDir);
+      renameWithRetry(resolvedRoot, backupOldDir, {
+        maxAttempts: 3,
+        baseDelayMs: options?.baseDelayMs,
+        renameFn: options?.renameFn,
+      });
       movedOld = true;
-    } catch {
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      if (code !== "ENOENT") {
+        throw error;
+      }
       // Target did not exist yet.
     }
-    renameSync(stagingDir, resolvedRoot);
+    renameWithRetry(stagingDir, resolvedRoot, {
+      maxAttempts: 3,
+      baseDelayMs: options?.baseDelayMs,
+      renameFn: options?.renameFn,
+    });
     promoted = true;
     if (movedOld) {
       rmSync(backupOldDir, { recursive: true, force: true });
@@ -181,7 +264,11 @@ export function writeLocalBundleToDir(
   } catch (error) {
     if (movedOld && !promoted) {
       try {
-        renameSync(backupOldDir, resolvedRoot);
+        renameWithRetry(backupOldDir, resolvedRoot, {
+          maxAttempts: 3,
+          baseDelayMs: options?.baseDelayMs,
+          renameFn: options?.renameFn,
+        });
       } catch {
         // Best-effort rollback of previous export directory.
       }
