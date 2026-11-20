@@ -23,7 +23,7 @@
 // list and a missing approval record are refused before the journal is touched,
 // and the entry's own flags decide whether the base check runs at all.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   ContractError,
   checkApprovalGate,
@@ -36,6 +36,7 @@ import type { ErrorCode, ErrorDetails } from "../contracts/index.ts";
 import type { SqliteDatabase } from "./driver.ts";
 import { StorageError } from "./errors.ts";
 import { stmt } from "./stmt-pool.ts";
+import { withWriteTx } from "./tx.ts";
 
 /** A write request as the journal sees it. */
 export interface AuthorWriteRequest {
@@ -93,7 +94,9 @@ const COMMAND_SCHEMA = `
     document_id TEXT NOT NULL,
     request_key TEXT NOT NULL,
     request_payload TEXT NOT NULL,
+    request_hash TEXT NOT NULL DEFAULT '',
     result_payload TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (actor_id, command_id, document_id, request_key)
   );
 `;
@@ -102,6 +105,18 @@ const COMMAND_SCHEMA = `
 export function createCommandSchema(db: SqliteDatabase): void {
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec(COMMAND_SCHEMA);
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info(command_journal);").all() as readonly { name?: unknown }[])
+      .map((row) => row.name)
+      .filter((name): name is string => typeof name === "string"),
+  );
+  if (!cols.has("request_hash")) {
+    db.exec("ALTER TABLE command_journal ADD COLUMN request_hash TEXT NOT NULL DEFAULT '';");
+  }
+  if (!cols.has("created_at")) {
+    db.exec("ALTER TABLE command_journal ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS command_journal_created_at ON command_journal(created_at);");
 }
 
 /**
@@ -133,7 +148,12 @@ function readCurrentRevisionId(db: SqliteDatabase, documentId: string): string |
 
 interface JournalRow {
   readonly request_payload: string;
+  readonly request_hash: string;
   readonly result_payload: string;
+}
+
+function hashCanonicalPayload(canonicalPayload: string): string {
+  return createHash("sha256").update(canonicalPayload).digest("hex");
 }
 
 function readJournalRow(
@@ -142,15 +162,23 @@ function readJournalRow(
 ): JournalRow | null {
   const row = stmt(
     db,
-    `SELECT request_payload, result_payload FROM command_journal
+    `SELECT request_payload, request_hash, result_payload FROM command_journal
      WHERE actor_id = ? AND command_id = ? AND document_id = ? AND request_key = ?;`,
   ).get(request.actorId, request.commandId, request.documentId, request.idempotencyKey);
   if (row === null || row === undefined) return null;
   const value = row as Partial<JournalRow>;
-  if (typeof value.request_payload !== "string" || typeof value.result_payload !== "string") {
+  if (
+    typeof value.request_payload !== "string" ||
+    typeof value.result_payload !== "string" ||
+    (value.request_hash !== undefined && typeof value.request_hash !== "string")
+  ) {
     throw new StorageError("storage.format_unsupported", { reason: "journal-row-malformed" });
   }
-  return { request_payload: value.request_payload, result_payload: value.result_payload };
+  return {
+    request_payload: value.request_payload,
+    request_hash: value.request_hash ?? "",
+    result_payload: value.result_payload,
+  };
 }
 
 /**
@@ -170,19 +198,24 @@ export function runAuthorWrite<T>(
   options?: { readonly baseCheck?: boolean },
 ): AuthorWriteOutcome<T> {
   const withBaseCheck = options?.baseCheck ?? true;
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  const payloadJson = canonicalJson(request.payload);
+  const requestHash = hashCanonicalPayload(payloadJson);
+
+  return withWriteTx(db, () => {
     // 1. Idempotency first: a replay never reaches the base check.
     const prior = readJournalRow(db, request);
     if (prior) {
-      if (!payloadEquals(JSON.parse(prior.request_payload) as unknown, request.payload)) {
+      const hashMismatch = prior.request_hash.length > 0 && prior.request_hash !== requestHash;
+      const payloadMismatch = prior.request_payload.length > 0
+        ? !payloadEquals(JSON.parse(prior.request_payload) as unknown, request.payload)
+        : prior.request_hash !== requestHash;
+      if (hashMismatch || payloadMismatch) {
         throw new StorageError("idempotency.mismatch", {
           command: request.commandId,
           target: request.documentId,
         });
       }
       const result = JSON.parse(prior.result_payload) as T;
-      db.exec("COMMIT");
       return { replayed: true, result };
     }
 
@@ -205,27 +238,71 @@ export function runAuthorWrite<T>(
     stmt(
       db,
       `INSERT INTO command_journal
-         (actor_id, command_id, document_id, request_key, request_payload, result_payload)
-       VALUES (?, ?, ?, ?, ?, ?);`,
+         (actor_id, command_id, document_id, request_key, request_payload, request_hash, result_payload, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?);`,
     ).run(
       request.actorId,
       request.commandId,
       request.documentId,
       request.idempotencyKey,
-      canonicalJson(request.payload),
+      payloadJson,
+      requestHash,
       canonicalJson(result),
+      Date.now(),
     );
-    db.exec("COMMIT");
     return { replayed: false, result };
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {
-      // A failed rollback is reported through the original failure: the
-      // caller must not assume the store is in any particular state.
-    }
-    throw error;
-  }
+  });
+}
+
+export interface JournalPruneOptions {
+  readonly nowMs?: number;
+  readonly compactAfterMs?: number;
+  readonly deleteAfterMs?: number;
+  readonly keepRecentPerDocument?: number;
+}
+
+/**
+ * Tiered pruning for `command_journal`: compacts old request payloads while
+ * preserving `request_hash` for replay validation, then deletes expired
+ * non-critical entries beyond the per-document retention floor.
+ */
+export function pruneCommandJournal(
+  db: SqliteDatabase,
+  options: JournalPruneOptions = {},
+): { readonly compacted: number; readonly deleted: number } {
+  const nowMs = options.nowMs ?? Date.now();
+  const compactAfterMs = options.compactAfterMs ?? 7 * 86_400_000;
+  const deleteAfterMs = options.deleteAfterMs ?? 30 * 86_400_000;
+  const keepRecent = Math.max(0, Math.floor(options.keepRecentPerDocument ?? 50));
+
+  return withWriteTx(db, () => {
+    const compactCutoff = nowMs - compactAfterMs;
+    const deleteCutoff = nowMs - deleteAfterMs;
+
+    const compacted = stmt(
+      db,
+      `UPDATE command_journal
+       SET request_payload = ''
+       WHERE created_at > 0 AND created_at < ? AND request_hash != '' AND length(request_payload) > 0;`,
+    ).run(compactCutoff).changes;
+
+    const deleted = stmt(
+      db,
+      `DELETE FROM command_journal
+       WHERE created_at > 0
+         AND created_at < ?
+         AND command_id NOT IN ('article.deliver', 'draft.finalize')
+         AND rowid NOT IN (
+           SELECT rowid FROM (
+             SELECT rowid, ROW_NUMBER() OVER (PARTITION BY document_id ORDER BY created_at DESC, rowid DESC) AS rn
+             FROM command_journal
+           )
+           WHERE rn <= ?
+         );`,
+    ).run(deleteCutoff, keepRecent).changes;
+
+    return { compacted, deleted };
+  });
 }
 
 /** Creates a document with no revision yet. */

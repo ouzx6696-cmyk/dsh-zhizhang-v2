@@ -16,6 +16,7 @@ declare const console: {
 declare const process: {
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly argv: readonly string[];
+  readonly version: string;
   exitCode?: number;
 };
 

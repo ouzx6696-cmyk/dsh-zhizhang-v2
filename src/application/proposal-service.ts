@@ -2,14 +2,18 @@ import { randomUUID } from "node:crypto";
 import type { AiProposalKind } from "../contracts/workspace-dto.ts";
 import { stmt } from "../storage/index.ts";
 import {
+  ARC_PLAN_SYSTEM,
+  CHAPTER_REVIEW_SYSTEM,
   DECONSTRUCT_EXTRACT_SYSTEM,
+  FACT_SYNC_SYSTEM,
   SETTING_EXTRACT_SYSTEM,
   SUMMARY_DRAFT_SYSTEM,
   sumUsageTuple,
   TECHNIQUE_EXTRACT_SYSTEM,
 } from "../workflow/writing-budget.ts";
 import type { WritingPhase } from "../workflow/writing-stages.ts";
-import { count, invalid, optionalText, text, type Input, type WorkspaceContext } from "./context.ts";
+import { count, invalid, optionalText, text, type Input, type Product, type WorkspaceContext } from "./context.ts";
+import type { ProductLineRegistry } from "./product-line.ts";
 
 interface ProposalSpec {
   readonly phase: WritingPhase;
@@ -21,6 +25,9 @@ const PROPOSAL_SPECS: Readonly<Record<AiProposalKind, ProposalSpec>> = {
   technique: { phase: "techniqueExtract", system: TECHNIQUE_EXTRACT_SYSTEM },
   setting: { phase: "settingExtract", system: SETTING_EXTRACT_SYSTEM },
   summary: { phase: "summaryDraft", system: SUMMARY_DRAFT_SYSTEM },
+  fact_sync: { phase: "factSync", system: FACT_SYNC_SYSTEM },
+  chapter_review: { phase: "chapterReview", system: CHAPTER_REVIEW_SYSTEM },
+  arc_plan: { phase: "arcPlan", system: ARC_PLAN_SYSTEM },
 };
 
 function parseKind(raw: unknown): AiProposalKind {
@@ -32,11 +39,12 @@ function parseKind(raw: unknown): AiProposalKind {
 
 /**
  * Orchestrates budget-guarded, strictly author-sovereign AI proposal tasks
- * (deconstruction analysis, technique cards, end-of-chapter lore diffs, and
- * rolling summaries). Results are persisted only as `pending` proposals and
- * never mutate authoritative tables until explicit author confirmation.
+ * (deconstruction analysis, technique cards, end-of-chapter lore diffs,
+ * continuity memory sync, and rolling summaries). Results are persisted only as
+ * `pending` proposals and never mutate authoritative tables until explicit
+ * author confirmation.
  */
-export function createProposalService(ctx: WorkspaceContext) {
+export function createProposalService(ctx: WorkspaceContext, registry: ProductLineRegistry) {
   const { db } = ctx;
 
   function beginProposalGeneration(input: Input) {
@@ -59,24 +67,33 @@ export function createProposalService(ctx: WorkspaceContext) {
         if (!sourceText) sourceText = doc.body ?? "";
         if (!sourceRef) sourceRef = doc.title;
       }
-      if (!sourceText.trim()) invalid("sourceText", "source-text-required");
 
-      let existingLoreHints: Array<{ factId: string; category: string; entityName: string }> = [];
-      if (resolvedProjectId && kind === "setting") {
-        existingLoreHints = stmt(db, `
-          SELECT fact_id AS factId, category, entity_name AS entityName
-          FROM author_lore_current
-          WHERE project_id = ?
-          ORDER BY decided_seq DESC LIMIT 40;
-        `).all(resolvedProjectId) as Array<{ factId: string; category: string; entityName: string }>;
+      let extraContext: Readonly<Record<string, unknown>> = {};
+      if (resolvedProjectId) {
+        const project = stmt(db, "SELECT product FROM author_projects WHERE id = ?;").get(resolvedProjectId) as
+          | { product: Product }
+          | undefined;
+        const mod = project ? registry.get(project.product) : undefined;
+        const built = mod?.buildProposalContext?.(ctx, {
+          kind,
+          projectId: resolvedProjectId,
+          documentId,
+          input,
+        });
+        if (built) {
+          if (built.sourceText !== undefined) sourceText = built.sourceText;
+          if (built.sourceRef !== undefined && !sourceRef) sourceRef = built.sourceRef;
+          if (built.extra) extraContext = built.extra;
+        }
       }
+      if (!sourceText.trim()) invalid("sourceText", "source-text-required");
 
       const spec = PROPOSAL_SPECS[kind];
       const prompt = JSON.stringify({
         kind,
         sourceRef,
         instruction: optionalText(input, "instruction") ?? "",
-        existingLoreHints,
+        ...extraContext,
         sourceText,
       });
 
@@ -98,6 +115,7 @@ export function createProposalService(ctx: WorkspaceContext) {
         provider,
         model,
         reserved,
+        disableThinking: true,
         projectId: resolvedProjectId,
         documentId,
       };
@@ -124,34 +142,52 @@ export function createProposalService(ctx: WorkspaceContext) {
   ): void {
     ctx.atomic(() => {
       const now = Date.now();
-      if (payload && !failure) {
-        stmt(db, `
-          UPDATE author_ai_proposals
-          SET status = 'pending', payload = ?, error = NULL, updated_at = ?
-          WHERE id = ? AND status = 'inflight';
-        `).run(JSON.stringify(payload), now, proposalId);
-        return;
+      const target = stmt(db, "SELECT project_id AS projectId FROM author_ai_proposals WHERE id = ?;")
+        .get(proposalId) as { projectId?: string | null } | undefined;
+      const nextStatus = payload && !failure ? "pending" : "failed";
+      const res = payload && !failure
+        ? stmt(db, `
+            UPDATE author_ai_proposals
+            SET status = 'pending', payload = ?, error = NULL, updated_at = ?
+            WHERE id = ? AND status = 'inflight';
+          `).run(JSON.stringify(payload), now, proposalId)
+        : stmt(db, `
+            UPDATE author_ai_proposals
+            SET status = 'failed', error = ?, updated_at = ?
+            WHERE id = ? AND status = 'inflight';
+          `).run(failure ?? "generation.failed", now, proposalId);
+      if (res.changes > 0 && target?.projectId) {
+        ctx.event(target.projectId, "setting", "proposal.ready", { id: proposalId, status: nextStatus });
       }
-      stmt(db, `
+    });
+  }
+
+  function cancelProposalGeneration(proposalId: string): boolean {
+    return ctx.atomic(() => {
+      const res = stmt(db, `
         UPDATE author_ai_proposals
-        SET status = 'failed', error = ?, updated_at = ?
+        SET status = 'failed', error = 'cancelled', updated_at = ?
         WHERE id = ? AND status = 'inflight';
-      `).run(failure ?? "generation.failed", now, proposalId);
+      `).run(Date.now(), proposalId);
+      return Boolean(res.changes);
     });
   }
 
   function recoverProposals(): void {
-    stmt(db, `
-      UPDATE author_ai_proposals
-      SET status = 'failed', error = 'interrupted', updated_at = ?
-      WHERE status = 'inflight';
-    `).run(Date.now());
+    ctx.atomic(() => {
+      stmt(db, `
+        UPDATE author_ai_proposals
+        SET status = 'failed', error = 'interrupted', updated_at = ?
+        WHERE status = 'inflight';
+      `).run(Date.now());
+    });
   }
 
   return {
     beginProposalGeneration,
     recordProposalReceipt,
     finishProposalGeneration,
+    cancelProposalGeneration,
     recoverProposals,
   };
 }

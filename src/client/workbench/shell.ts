@@ -1,6 +1,7 @@
 import type {
   CandidateQaReport,
   NovelTreeDto,
+  Product,
   RunDetailDto,
   RunHistoryItem,
   RunSummary,
@@ -8,7 +9,9 @@ import type {
   WorkspaceSnapshot,
 } from "../../contracts/workspace-dto.ts";
 import { apiRequest, fetchWorkspaceState } from "./api.ts";
+import { createAppearancePopover } from "./appearance.ts";
 import { countNonWhitespaceChars } from "./diff.ts";
+import { byId } from "./dom.ts";
 import { createDraftVault, type EditorBase } from "./draft-vault.ts";
 import { createModalController } from "./modal.ts";
 import type {
@@ -18,10 +21,14 @@ import type {
   WorkbenchShellHost,
   WorkspaceViewId,
 } from "./plugins/types.ts";
-import { createRenderGate, el, formatCharCount } from "./store.ts";
+import { DEMO_BOOK_PRESET } from "./seed-packs.ts";
+import { createActionCoordinator, createRenderGate, el, formatCharCount } from "./store.ts";
 import { createCommandPalette } from "./views/command-palette.ts";
 import { createDiffView } from "./views/diff-view.ts";
+import { createNewBookWizard } from "./views/new-book-wizard.ts";
 import { renderRunInspector } from "./views/run-inspector.ts";
+import { createSelectionMicrobar } from "./views/selection-microbar.ts";
+import { createStudyHome, writeLastActiveRef } from "./views/study-home.ts";
 import { createTreeSidebar } from "./views/tree-sidebar.ts";
 
 const RUN_STATE_LABELS: Readonly<Record<string, string>> = {
@@ -34,12 +41,6 @@ const RUN_STATE_LABELS: Readonly<Record<string, string>> = {
 };
 
 const PIPELINE_TABS: readonly PipelineTabId[] = ["workflow", "planning", "continuity", "runs"];
-
-function byId<T extends HTMLElement = HTMLElement>(id: string): T {
-  const node = document.getElementById(id);
-  if (!node) throw new Error(`Missing workbench element #${id}`);
-  return node as T;
-}
 
 function formFields(form: HTMLFormElement): Record<string, string> {
   const result: Record<string, string> = {};
@@ -57,55 +58,21 @@ function quickEstimateTokens(text: string): number {
   return Math.ceil(total);
 }
 
-function initTheme(): void {
-  const root = document.documentElement;
-  const button = byId<HTMLButtonElement>("theme-toggle");
-  const stored = (() => {
-    try {
-      return localStorage.getItem("zhizhang:theme");
-    } catch {
-      return null;
-    }
-  })();
-
-  const applyTheme = (mode: "light" | "dark") => {
-    root.dataset.theme = mode;
-    button.textContent = mode === "dark" ? "浅色" : "深色";
-    button.setAttribute("aria-label", mode === "dark" ? "切换浅色纸面主题" : "切换深色墨石主题");
-    try {
-      localStorage.setItem("zhizhang:theme", mode);
-    } catch {
-      // Ignore storage errors.
-    }
-  };
-
-  if (stored === "light" || stored === "dark") {
-    applyTheme(stored);
-  } else {
-    const prefersDark = window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
-    button.textContent = prefersDark ? "浅色" : "深色";
-  }
-
-  button.onclick = () => {
-    const current = root.dataset.theme
-      ?? (window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-    applyTheme(current === "dark" ? "light" : "dark");
-  };
-}
-
 export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
-  initTheme();
+  createAppearancePopover(byId<HTMLButtonElement>("theme-toggle"));
 
   const editor = byId<HTMLTextAreaElement>("body");
   const modal = createModalController(byId<HTMLDialogElement>("workbench-dialog"));
-  const diffView = createDiffView(byId("comparison"));
+  const diffView = createDiffView(byId("comparison"), {
+    onLocate: (text, leftIndex) => locateEditorParagraph(text, leftIndex),
+  });
   const modulesById = new Map(modules.map((mod) => [mod.id, mod]));
   const gate = createRenderGate();
+  const coordinator = createActionCoordinator();
 
   let snapshot: WorkspaceSnapshot = {};
   let projectId = "";
   let documentId = "";
-  let loading = false;
   let pollTimer: number | undefined;
   let loadSequence = 0;
   let editSequence = 0;
@@ -125,6 +92,60 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     container.hidden = !message;
     container.classList.toggle("notice-error", isError);
     container.setAttribute("role", isError ? "alert" : "status");
+  }
+
+  function locateEditorParagraph(paragraphText: string, leftIndex: number | null): void {
+    if (activeWorkspaceView !== "writing") {
+      switchWorkspaceView("writing");
+    }
+    const body = editor.value;
+    let start = -1;
+    let end = -1;
+    const lines = body.replace(/\r\n?/gu, "\n").split("\n");
+    if (leftIndex !== null && leftIndex >= 1 && leftIndex <= lines.length) {
+      let offset = 0;
+      let lineNo = 1;
+      while (lineNo < leftIndex && offset <= body.length) {
+        const nl = body.indexOf("\n", offset);
+        if (nl === -1) break;
+        offset = nl + 1;
+        lineNo++;
+      }
+      if (lineNo === leftIndex) {
+        const nextNl = body.indexOf("\n", offset);
+        let lineEnd = nextNl === -1 ? body.length : nextNl;
+        if (lineEnd > offset && body[lineEnd - 1] === "\r") lineEnd--;
+        const lineSlice = body.slice(offset, lineEnd);
+        if (!paragraphText || lineSlice === paragraphText || lineSlice.includes(paragraphText.slice(0, 16))) {
+          start = offset;
+          end = lineEnd;
+        }
+      }
+    }
+    if (start === -1 && paragraphText) {
+      const idx = body.indexOf(paragraphText);
+      if (idx !== -1) {
+        start = idx;
+        end = idx + paragraphText.length;
+      } else {
+        const probe = paragraphText.slice(0, 24).trim();
+        const fallbackIdx = probe ? body.indexOf(probe) : -1;
+        if (fallbackIdx !== -1) {
+          start = fallbackIdx;
+          end = fallbackIdx + probe.length;
+        }
+      }
+    }
+    if (start === -1) start = 0;
+    if (end < start) end = start;
+    editor.focus();
+    editor.setSelectionRange(start, end);
+    const totalLines = Math.max(1, lines.length);
+    const linePos = body.slice(0, start).split("\n").length - 1;
+    if (editor.scrollHeight > editor.clientHeight) {
+      editor.scrollTop = Math.max(0, Math.round((linePos / totalLines) * editor.scrollHeight - 80));
+    }
+    notice(leftIndex ? `已定位至原文第 ${leftIndex} 段` : "已在正文编辑器定位该段");
   }
 
   byId("notice-close").onclick = () => notice("");
@@ -159,7 +180,7 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     return snapshot.active ? modulesById.get(snapshot.active.product) : undefined;
   }
 
-  function currentProjectProduct(): string | undefined {
+  function currentProjectProduct(): Product | undefined {
     return snapshot.projects?.find((item) => item.id === projectId)?.product;
   }
 
@@ -260,15 +281,20 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
       `校准输入估算约 ${estimate.toLocaleString("zh-Hans")} token · 建议总额 ${recommended.toLocaleString("zh-Hans")}（含输出余量）`;
   }
 
-  async function load(ifSequence?: number): Promise<void> {
+  async function loadState(ifSequence?: number, background = false): Promise<void> {
     const sequence = ++loadSequence;
+    const startEpoch = coordinator.epoch();
     const selection = [projectId, documentId];
     const next = await fetchWorkspaceState({ projectId, documentId }, ifSequence);
     if (sequence !== loadSequence || selection[0] !== projectId || selection[1] !== documentId) return;
-    if (!next || (!Array.isArray(next.projects) && next.unchanged !== true)) {
+    if (background && (coordinator.isUserBusy() || startEpoch !== coordinator.epoch())) return;
+    if (!next || typeof next !== "object") {
       throw new Error("工作台响应格式有误，请刷新后重试。");
     }
-    if (next.unchanged) return;
+    if (next.unchanged === true) return;
+    if (!Array.isArray(next.projects)) {
+      throw new Error("工作台响应格式有误，请刷新后重试。");
+    }
     stash();
     if (pollTimer && next.active?.id !== snapshot.active?.id) {
       window.clearInterval(pollTimer);
@@ -278,17 +304,16 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     render();
   }
 
+  function load(ifSequence?: number): Promise<void> {
+    return loadState(ifSequence, false);
+  }
+
   async function perform(work: () => Promise<unknown> | void): Promise<void> {
-    if (loading) return;
-    loading = true;
-    notice("");
-    try {
-      await work();
-    } catch (error) {
-      notice(error instanceof Error ? error.message : String(error), true);
-    } finally {
-      loading = false;
-    }
+    await coordinator.runUserAction(
+      work,
+      (error) => notice(error instanceof Error ? error.message : String(error), true),
+      () => notice(""),
+    );
   }
 
   function activeInput(extra?: Record<string, unknown>): Record<string, unknown> {
@@ -305,7 +330,7 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     }
     const submittedSequence = editSequence;
     const committedBody = action === "candidate.adopt"
-      ? (pendingCandidate()?.candidateBody ?? "")
+      ? (typeof extra.mergedBody === "string" ? extra.mergedBody : (pendingCandidate()?.candidateBody ?? ""))
       : (typeof extra.body === "string" ? extra.body : editor.value);
     stash();
     const result = await request<T>(action, activeInput(extra));
@@ -348,6 +373,9 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     load,
     selectDocument,
     setDirectoryTree,
+    setTreeFilter(query: string) {
+      treeSidebar.setFilter(query);
+    },
     switchWorkspaceView,
     switchPipelineTab,
     change,
@@ -361,6 +389,96 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
   const sessions = new Map<string, ProductLineUiSession>(
     modules.map((mod) => [mod.id, mod.mount(host)]),
   );
+
+  const selectionMicrobar = createSelectionMicrobar(editor, host, {
+    getProviderModel: () => {
+      const form = byId<HTMLFormElement>("generate-run");
+      const providerInput = form.elements.namedItem("provider") as HTMLInputElement | HTMLSelectElement | null;
+      const modelInput = form.elements.namedItem("model") as HTMLInputElement | HTMLSelectElement | null;
+      return {
+        provider: providerInput?.value?.trim() || "default",
+        model: modelInput?.value?.trim() || "default",
+      };
+    },
+  });
+
+  async function openProjectAndDoc(targetProjectId: string, targetDocId = ""): Promise<void> {
+    stash();
+    projectId = targetProjectId;
+    documentId = targetDocId;
+    usingCustomTree = false;
+    gate.reset();
+    await load();
+  }
+
+  async function importDemoBook(): Promise<void> {
+    stash();
+    const proj = await request<{ id: string }>("project.create", {
+      product: DEMO_BOOK_PRESET.product,
+      name: DEMO_BOOK_PRESET.projectName,
+    });
+    const newProjectId = proj.id;
+    await request("controls.save", {
+      projectId: newProjectId,
+      authorIntent: DEMO_BOOK_PRESET.authorIntent,
+      currentFocus: DEMO_BOOK_PRESET.currentFocus,
+    });
+    const vol = await request<{ id: string }>("volume.create", {
+      projectId: newProjectId,
+      title: DEMO_BOOK_PRESET.volumeTitle,
+    });
+    const act = await request<{ id: string }>("act.create", {
+      projectId: newProjectId,
+      volumeId: vol.id,
+      title: DEMO_BOOK_PRESET.actTitle,
+    });
+    let firstChapterId = "";
+    for (const ch of DEMO_BOOK_PRESET.chapters) {
+      const doc = await request<{ id: string }>("document.create", {
+        projectId: newProjectId,
+        title: ch.title,
+        volumeId: vol.id,
+        actId: act.id,
+      });
+      if (!firstChapterId) firstChapterId = doc.id;
+      await request("draft.save", { documentId: doc.id, baseRevisionId: null, body: ch.body });
+      await request("chapter.summary.save", { documentId: doc.id, summary: ch.summary });
+    }
+    const tech = DEMO_BOOK_PRESET.technique;
+    const savedTech = await request<{ id: string }>("technique.save", {
+      scope: "project",
+      projectId: newProjectId,
+      title: tech.title,
+      category: tech.category,
+      pacing: tech.pacing,
+      sceneTags: tech.sceneTags,
+      triggerWhen: tech.triggerWhen,
+      executionSteps: tech.executionSteps,
+      constraints: tech.constraints,
+      antiPatterns: tech.antiPatterns,
+    });
+    await request("library.mount", {
+      projectId: newProjectId,
+      targetType: "project",
+      targetId: newProjectId,
+      itemKind: "technique",
+      itemId: savedTech.id,
+      mode: "include",
+    });
+    await openProjectAndDoc(newProjectId, firstChapterId);
+    notice(`已导入示例书「${DEMO_BOOK_PRESET.projectName}」`);
+  }
+
+  const wizard = createNewBookWizard(host, {
+    onCompleted: (newProjectId, firstDocId) => openProjectAndDoc(newProjectId, firstDocId),
+  });
+
+  const studyHome = createStudyHome(byId("empty"), {
+    onSelectProject: (pid) => void perform(() => openProjectAndDoc(pid)),
+    onResumeDocument: (pid, did) => void perform(() => openProjectAndDoc(pid, did)),
+    onOpenWizard: () => wizard.open(),
+    onImportDemoBook: () => void perform(importDemoBook),
+  });
 
   function render(): void {
     const projectsSelect = byId<HTMLSelectElement>("projects");
@@ -384,8 +502,9 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
 
     const docsList = snapshot.documents ?? [];
     const docSig = `${projectId}:${snapshot.asOfSeq ?? 0}:${docsList.length}:${docsList.map((d) => `${d.id}:${d.title}`).join(",")}`;
+    const projectMod = project ? modulesById.get(project.product) : undefined;
     if (gate.changed("directory", docSig)) {
-      if (!usingCustomTree || project?.product !== "fanqie") {
+      if (!usingCustomTree || !projectMod?.supportsCustomTree) {
         treeSidebar.renderFlat(docsList, documentId);
       }
       for (const [id, session] of sessions) {
@@ -414,10 +533,19 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
 
     editorBase = active ? { id: active.id, revisionId: active.revisionId, body: active.body ?? "" } : undefined;
     if (!active) {
+      studyHome.update(snapshot);
+      selectionMicrobar.hide();
       byId("active-tree-crumb").hidden = true;
       for (const session of sessions.values()) session.renderDocumentSlots(false, snapshot);
       return;
     }
+
+    writeLastActiveRef({
+      projectId,
+      documentId: active.id,
+      projectName: project?.name ?? "",
+      title: active.title || "微头条",
+    });
 
     byId("document-label").textContent = mod?.documentTypeLabel(snapshot) ?? active.product;
     byId("heading").textContent = active.title || "微头条";
@@ -442,6 +570,8 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     if (editor.value !== visibleBody && !composing) editor.value = visibleBody;
     editor.readOnly = locked || stale;
     byId<HTMLButtonElement>("save").disabled = locked || stale;
+    if (locked || stale) selectionMicrobar.hide();
+    else selectionMicrobar.refresh();
     updateEditorMetrics();
 
     const draftStatus = byId("draft-status");
@@ -472,6 +602,7 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     if (pending && !locked) {
       const candidateQa = pending.candidateQa ? (JSON.parse(pending.candidateQa) as CandidateQaReport) : undefined;
       diffView.update({
+        candidateId: pending.candidateId,
         originalBody: active.body ?? "",
         candidateBody: pending.candidateBody ?? "",
         candidateQa,
@@ -500,6 +631,7 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
       statusLabel,
       run ? `用量 ${run.settled} / ${run.reserved}` : "",
       run?.generationError ? `原因 ${run.generationError}` : "",
+      run?.recoveryHints?.[0]?.message ?? "",
       run?.generationState === "uncertain" ? "请先查 DsH 提供方用量再核对" : "",
     ].filter(Boolean);
     runStatusEl.textContent = statusParts.join(" · ");
@@ -513,7 +645,9 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
 
     if (!pollTimer && run?.state === "running" && ["prepared", "inflight", "received"].includes(run.generationState ?? "")) {
       pollTimer = window.setInterval(() => {
-        if (!document.hidden && !composing) void perform(() => load(snapshot.asOfSeq));
+        if (!document.hidden && !composing) {
+          void coordinator.runBackgroundPoll(() => loadState(snapshot.asOfSeq, true));
+        }
       }, 2000);
     }
     if (pollTimer && run?.state !== "running") {
@@ -551,7 +685,10 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     dialog: byId<HTMLDialogElement>("command-palette-dialog"),
     getDocuments: () => snapshot.documents ?? [],
     getProjectId: () => projectId,
-    isFanqieActive: () => currentProjectProduct() === "fanqie",
+    supportsStudioViews: () => {
+      const product = currentProjectProduct();
+      return Boolean(product && modulesById.get(product)?.supportsStudioViews);
+    },
     searchRemote: (query) => request<SearchHitDto[]>("workspace.search", { projectId, query }),
     onSelectDocument: (docId) => void perform(() => selectDocument(docId)),
     onSwitchView: (viewId) => switchWorkspaceView(viewId),
@@ -715,16 +852,29 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
   bindClick("adopt", async () => {
     const pending = pendingCandidate();
     if (!pending) return;
+    const plan = diffView.getAdoptionPayload();
+    if (plan?.adoptionMode === "partial" && plan.selectedCount === 0) {
+      notice("请至少勾选一处变更，或直接点击舍弃候选稿", true);
+      return;
+    }
+    const partial = plan?.adoptionMode === "partial";
     const confirmed = await modal.confirm({
-      title: "采纳候选稿",
-      message: "以这份候选稿生成新的工作稿修订？原工作稿修订仍保留在历史记录中，本次操作不会自动定稿。",
+      title: partial ? "按勾选段落部分采纳" : "采纳候选稿",
+      message: partial && plan
+        ? `仅采纳勾选的 ${plan.selectedCount} / ${plan.totalHunks} 处变更生成新工作稿修订？原工作稿与完整候选稿均保留在历史记录中。`
+        : "以这份候选稿生成新的工作稿修订？原工作稿修订仍保留在历史记录中，本次操作不会自动定稿。",
       confirmLabel: "采纳为新修订",
     });
     if (confirmed) {
       await change(
         "candidate.adopt",
-        { key: pending.candidateId, runId: pending.id },
-        { clearDraft: true, savedVersion: true, message: "已采纳候选稿" },
+        {
+          key: pending.candidateId,
+          runId: pending.id,
+          adoptionMode: plan?.adoptionMode ?? "full",
+          ...(partial && plan ? { mergedBody: plan.mergedBody } : {}),
+        },
+        { clearDraft: true, savedVersion: true, message: partial ? "已按勾选段落合稿采纳" : "已采纳候选稿" },
       );
     }
   });

@@ -21,6 +21,7 @@ export interface WorkbenchShellHost {
   load(ifSequence?: number): Promise<void>;
   selectDocument(documentId: string): Promise<void>;
   setDirectoryTree(tree: NovelTreeDto | null): void;
+  setTreeFilter(query: string): void;
   switchWorkspaceView(viewId: WorkspaceViewId): void;
   switchPipelineTab(tabId: PipelineTabId): void;
   change<T = Record<string, unknown>>(
@@ -60,6 +61,8 @@ export interface ProductLineUiModule {
   readonly lockedStates: readonly string[];
   readonly stateLabels: Readonly<Record<string, string>>;
   readonly visibleTabs: readonly PipelineTabId[];
+  readonly supportsCustomTree?: boolean;
+  readonly supportsStudioViews?: boolean;
   documentTypeLabel(snapshot: WorkspaceSnapshot): string;
   wordCountHint(snapshot: WorkspaceSnapshot): string;
   mount(host: WorkbenchShellHost): ProductLineUiSession;

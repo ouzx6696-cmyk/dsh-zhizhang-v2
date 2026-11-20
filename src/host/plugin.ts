@@ -1,4 +1,4 @@
-import { existsSync, linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ContractError } from "../contracts/index.ts";
@@ -11,11 +11,22 @@ import {
   writeLocalBundleToDir,
 } from "../storage/index.ts";
 import { assertStageOutput, WRITING_STAGE_IDS } from "../workflow/writing-stages.ts";
-import { createSingleShotCaller, executeGenerationWithRunner, type LlmTransport } from "./writing.ts";
+import { writeDeliveryFile } from "./delivery-io.ts";
+import { buildSanitizedDiagnostics, registerZhizhangSettings, type DsHConfigFormRegistrar } from "./settings.ts";
+import { registerZhizhangTools, type DsHToolRegistrar } from "./tools.ts";
+import {
+  buildRecoveryHints,
+  createSingleShotCaller,
+  executeGenerationWithRunner,
+  type LlmTransport,
+} from "./writing.ts";
 import { openAuthorWorkspace } from "./workspace.ts";
 
 export interface DsHPluginConfig {
   readonly dataDirectory: string;
+  readonly defaultProvider?: string;
+  readonly defaultModel?: string;
+  readonly enableAgentTools?: boolean;
 }
 
 interface DsHRouteRegistration {
@@ -32,6 +43,8 @@ export interface DsHPluginContext {
     };
   };
   readonly llm: LlmTransport;
+  readonly tools?: DsHToolRegistrar;
+  readonly configForms?: DsHConfigFormRegistrar;
   readonly logger: {
     error(message: string, details?: Record<string, unknown>): void;
   };
@@ -46,13 +59,21 @@ export const inject = ["connection", "llm"] as const;
 
 const BASE_PATH = "/api/zhizhang";
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
+const SHUTDOWN_DRAIN_MS = 5000;
 const CSP_HEADER = "default-src 'self'; frame-ancestors 'self'; base-uri 'none'; object-src 'none'";
 
 function defaultReadAsset(kind: "html" | "css" | "js", path: string): Uint8Array {
-  const url = kind === "js"
-    ? new URL(`../client/${path}`, import.meta.url)
-    : new URL(`../../src/client/${path}`, import.meta.url);
-  return readFileSync(url);
+  const candidates = kind === "js"
+    ? [
+        new URL(`../../client/${path}`, import.meta.url),
+        new URL(`../../dist/client/${path}`, import.meta.url),
+      ]
+    : [
+        new URL(`../client/${path}`, import.meta.url),
+        new URL(`../../../src/client/${path}`, import.meta.url),
+      ];
+  const resolved = candidates.find((url) => existsSync(url)) ?? candidates[0];
+  return readFileSync(resolved);
 }
 
 function json(value: unknown, status = 200): Response {
@@ -68,6 +89,17 @@ function staticResponse(content: Uint8Array, mimeType: string): Response {
       "Cache-Control": "no-store",
     },
   });
+}
+
+function handleRouteError(error: unknown, logger: DsHPluginContext["logger"]): Response {
+  if (error instanceof ContractError) {
+    const status = error.code === "input.not_found" ? 404 : error.code === "input.invalid" ? 400 : 409;
+    return json({ ok: false, ...error.toEnvelope() }, status);
+  }
+  const diagnosticId = randomUUID();
+  const name = error instanceof Error ? error.name : "UnknownError";
+  logger.error("zhizhang: request failed", { diagnosticId, name });
+  return json({ ok: false, code: "internal.error", diagnosticId }, 500);
 }
 
 async function requestObject(request: Request): Promise<Record<string, unknown>> {
@@ -95,28 +127,6 @@ async function requestObject(request: Request): Promise<Record<string, unknown>>
   return value as Record<string, unknown>;
 }
 
-function writeDelivery(directory: string, id: string, contents: string): void {
-  const path = join(directory, `${id}.md`);
-  if (existsSync(path) && readFileSync(path, "utf8") === contents) return;
-  const pending = join(directory, `.${id}.${randomUUID()}.tmp`);
-  writeFileSync(pending, contents, { mode: 0o600, flag: "wx", flush: true });
-  try {
-    // Publish atomically without replacing an author's existing file.
-    linkSync(pending, path);
-  } catch (error) {
-    const code = (error as { code?: string }).code;
-    if (code !== "EEXIST") throw error;
-    if (readFileSync(path, "utf8") !== contents) {
-      throw Object.assign(new Error("Delivery file already exists"), {
-        code: "export.conflict",
-        retryable: false,
-      });
-    }
-  } finally {
-    unlinkSync(pending);
-  }
-}
-
 export function applyWorkbench(
   ctx: DsHPluginContext,
   config: DsHPluginConfig,
@@ -136,6 +146,7 @@ export function applyWorkbench(
     const disposers: (() => void | Promise<void>)[] = [];
     const generations = new Map<string, { controller: AbortController; task: Promise<void> }>();
     const proposalJobs = new Map<string, { controller: AbortController; task: Promise<void> }>();
+    const proposalLocks = new Set<string>();
     let closing = false;
     let workspaceOnClose: () => void = () => {};
 
@@ -144,7 +155,7 @@ export function applyWorkbench(
       const bundleExportsRoot = join(config.dataDirectory, "exports");
       const workspace = openAuthorWorkspace(
         db,
-        (id, contents) => writeDelivery(exportsDir, id, contents),
+        (id, contents) => writeDeliveryFile(exportsDir, id, contents),
         (projectId, files) =>
           writeLocalBundleToDir(join(bundleExportsRoot, sanitizePathSegment(projectId)), files).writtenDir,
       );
@@ -152,8 +163,6 @@ export function applyWorkbench(
         workspace.recoverGenerations();
         workspace.recoverProposals();
       };
-      workspace.recoverGenerations();
-      workspace.recoverProposals();
       workspace.recoverStartup();
 
       const route = (
@@ -181,14 +190,37 @@ export function applyWorkbench(
         route(`/${modulePath}`, ["GET"], async () => staticResponse(bytes, "text/javascript"));
       }
 
+      const agentToolsEnabled = config.enableAgentTools ?? true;
+      disposers.push(...registerZhizhangTools(ctx.tools, workspace, agentToolsEnabled));
+      disposers.push(...registerZhizhangSettings(ctx.configForms, config));
+
+      route("/diag", ["GET"], async () => {
+        if (closing) return new Response(null, { status: 503 });
+        try {
+          const report = buildSanitizedDiagnostics(db, {
+            activeGenerations: generations.size,
+            activeProposals: proposalJobs.size,
+            agentToolsEnabled,
+          });
+          return json({ ok: true, result: report });
+        } catch (error) {
+          return handleRouteError(error, ctx.logger);
+        }
+      });
+
       route("/state", ["GET"], async (request) => {
-        const query = new URL(request.url).searchParams;
-        const result = workspace.readState(
-          query.get("projectId") ?? undefined,
-          query.get("documentId") ?? undefined,
-          query.get("ifSequence") ?? undefined,
-        );
-        return json({ ok: true, result });
+        if (closing || request.signal.aborted) return new Response(null, { status: 503 });
+        try {
+          const query = new URL(request.url).searchParams;
+          const result = workspace.readState(
+            query.get("projectId") ?? undefined,
+            query.get("documentId") ?? undefined,
+            query.get("ifSequence") ?? undefined,
+          );
+          return json({ ok: true, result });
+        } catch (error) {
+          return handleRouteError(error, ctx.logger);
+        }
       });
 
       route("/mutate", ["POST"], async (request) => {
@@ -235,7 +267,11 @@ export function applyWorkbench(
                     : controller.signal.aborted
                       ? "cancelled"
                       : "generation.failed";
-                  workspace.finishGeneration(attemptId, null, reason);
+                  const recoveryKind = error && typeof error === "object" && "recoveryKind" in error
+                    ? (error as { recoveryKind?: string }).recoveryKind
+                    : undefined;
+                  const recoveryHints = buildRecoveryHints(recoveryKind, reason);
+                  workspace.finishGeneration(attemptId, null, reason, recoveryHints);
                 }
               })
               .finally(() => {
@@ -246,7 +282,19 @@ export function applyWorkbench(
           }
 
           if (action === "proposal.generate") {
+            const kindKey = typeof input.kind === "string" ? input.kind : "";
+            const scopeKey = typeof input.documentId === "string"
+              ? input.documentId
+              : typeof input.projectId === "string"
+                ? input.projectId
+                : "global";
+            const lockKey = `${kindKey}:${scopeKey}`;
+            if (proposalLocks.has(lockKey)) {
+              throw new ContractError("gate.denied", { action, reason: "proposal-in-progress" });
+            }
+
             const job = workspace.beginProposalGeneration(input);
+            proposalLocks.add(lockKey);
             const controller = new AbortController();
             const caller = createSingleShotCaller(
               ctx.llm,
@@ -267,6 +315,7 @@ export function applyWorkbench(
                 system: job.system,
                 prompt: job.prompt,
                 maxOutputTokens: 2400,
+                disableThinking: job.disableThinking,
               })
               .then((raw) => {
                 let parsed: unknown;
@@ -295,9 +344,49 @@ export function applyWorkbench(
               })
               .finally(() => {
                 proposalJobs.delete(job.id);
+                proposalLocks.delete(lockKey);
               });
             proposalJobs.set(job.id, { controller, task });
             return json({ ok: true, result: { id: job.id, kind: job.kind, generating: true } }, 202);
+          }
+
+          if (action === "proposal.cancel") {
+            const proposalId = typeof input.proposalId === "string" ? input.proposalId.trim() : "";
+            if (!proposalId) {
+              throw new ContractError("input.invalid", { field: "proposalId", reason: "required" });
+            }
+            proposalJobs.get(proposalId)?.controller.abort();
+            const cancelled = workspace.cancelProposalGeneration(proposalId);
+            return json({ ok: true, result: { id: proposalId, cancelled } });
+          }
+
+          if (action === "selection.rewrite") {
+            const req = workspace.buildSelectionRewriteInput(input);
+            const caller = createSingleShotCaller(
+              ctx.llm,
+              { provider: req.provider, model: req.model, reserved: req.reserved },
+              request.signal,
+              { begin: () => "selection", receive: () => {} },
+            );
+            const rewrittenText = (
+              await caller.complete({
+                phase: "selectionRewrite",
+                system: req.system,
+                prompt: req.prompt,
+                maxOutputTokens: 2000,
+                cachePrefix: req.cachePrefix,
+                disableThinking: true,
+              })
+            ).trim();
+            assertStageOutput(WRITING_STAGE_IDS.selectionRewrite, rewrittenText, "body");
+            return json({
+              ok: true,
+              result: {
+                rewrittenText,
+                tokens: caller.usedTokens(),
+                mode: req.mode,
+              },
+            });
           }
 
           if (action === "run.complete" && typeof input.runId === "string" && generations.has(input.runId)) {
@@ -309,14 +398,7 @@ export function applyWorkbench(
           }
           return json({ ok: true, result });
         } catch (error) {
-          if (error instanceof ContractError) {
-            const status = error.code === "input.not_found" ? 404 : error.code === "input.invalid" ? 400 : 409;
-            return json({ ok: false, ...error.toEnvelope() }, status);
-          }
-          const diagnosticId = randomUUID();
-          const name = error instanceof Error ? error.name : "UnknownError";
-          ctx.logger.error("zhizhang: request failed", { diagnosticId, name });
-          return json({ ok: false, code: "internal.error", diagnosticId }, 500);
+          return handleRouteError(error, ctx.logger);
         }
       });
     } catch (error) {
@@ -330,6 +412,22 @@ export function applyWorkbench(
       for (const { controller } of generations.values()) controller.abort();
       for (const { controller } of proposalJobs.values()) controller.abort();
       await Promise.all(disposers.map((dispose) => dispose()));
+
+      const inFlight = [
+        ...Array.from(generations.values(), (entry) => entry.task),
+        ...Array.from(proposalJobs.values(), (entry) => entry.task),
+      ];
+      if (inFlight.length > 0) {
+        let timer: unknown;
+        await Promise.race([
+          Promise.allSettled(inFlight),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, SHUTDOWN_DRAIN_MS);
+          }),
+        ]);
+        if (timer !== undefined) clearTimeout(timer);
+      }
+
       try {
         workspaceOnClose();
       } finally {

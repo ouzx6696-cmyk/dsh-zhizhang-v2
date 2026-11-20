@@ -1,6 +1,6 @@
 # 织章 V2（`@zhizhang/dsh-workbench`）
 
-**织章 V2（v2.1.0）** 是运行在 **DeepSeek Harness（DsH Web `0.2.2-rc.4`）** 上的**作者主权创作工作台插件**。项目采用零运行时依赖的 TypeScript + `node:sqlite` 架构，把长篇连载与短中篇图文创作中的「规划、正文修订、设定连续性、模型候选对照、质检回改、版本审批与本地交稿」收拢到同一套事件溯源与版本账本之下。
+**织章 V2.2（`v2.2.0`）** 是运行在 **DeepSeek Harness（DsH Web `0.2.2+`）** 上的**作者主权创作工作台插件**。项目采用零运行时依赖的 TypeScript + `node:sqlite` 架构，把长篇连载与短中篇图文创作中的「控制面与滚动规划、标准 `SKILL.md` 方法论沙箱、离线体检与定性观察审稿、正文修订、SHA-256 记忆同步与四维历史召回、逐段字级合稿与选段微改写、QA 自动回改、版本审批与原子交稿」收拢到同一套事件溯源与版本账本之下。
 
 > 核心定位：**作者写作者的正文，模型只产隔离候选，一切采纳、定稿、设定确认与交稿批准皆由作者主权决定。**
 
@@ -21,7 +21,10 @@
 ## 二、能做什么（核心能力一览）
 
 ### 1. 番茄连载与长篇小说工作流
-- **卷 → 幕 → 章三层级管理**：支持卷、幕、章的创建、重命名、跨卷幕重排与看板管理；前端侧边栏采用虚拟滚动列表与细粒度脏检查门控，支撑千章规模流畅切换。
+- **卷 → 幕 → 章与指南针控制面（5000 章流畅虚拟化）**：支持 `author_project_controls`（全书 `authorIntent` 指南针注入 Prefix 稳定区 + 近 1–3 章 `currentFocus` 注入动态区）与滚动幕规划提案（`arc_plan`）；`tree-sidebar.ts` 与 `outline-board.ts` 全虚拟化与惰性挂载，5000 章规模保持极低恒定 DOM 节点，并提供书斋冷启动页、三步开新书向导、题材种子包及墨纸/青简/夜航三套纸面主题与正文排版控制。
+- **标准 `SKILL.md` 沙箱、离线体检与外科手术式合稿**：支持 `skill.import` 安全沙箱导入（剥离脚本/Hook/工具声明、≤ 128 KiB）与分阶段 Prefix 绑定（`plan`/`write`/`review`/`refine`/`deslop`）；提供零 Token 黄金三章 6 维体检与可配置 AI 味扫描（`chapter.diagnose`）、带原文摘句举证的定性 `Observation` 审稿与定向修稿、逐段字级 Diff（`📍 定位`/顶部实时预览/30 步撤销/`partial` 部分采纳）与选段浮动微操作条（`selection.rewrite`）。
+- **记忆闭环与 FTS5 检索**：支持 SHA-256 改稿漂移感知 + `fact_sync` 增量提案 + `CHAPTER_COMMIT` 原子同步、4 维相关远期历史章召回、External Content FTS5 + BM25/RRF 多 Scope 防饿死检索与 DsH 双入口（7 只读 + 3 提案工具 + `settings.plugins.tab` 配置与脱敏 `/api/zhizhang/diag`）。
+- **构建与缓存防呆**：`npm run build` 分离服务端产物（`dist/server/host/plugin.js`）与浏览器产物（`dist/client/slot.js`），配套 `node scripts/preflight.mjs` 与 `node scripts/deploy.mjs --touch-only`（刷新产物 `mtime`，避免 `npm pack` 1985 时间戳触发 DsH 缓存僵死）。
 - **结构化章纲与篇幅提醒**：固定四段式章纲（剧情梗概、核心冲突与看点、情节推进节点、章末落点）与四项头注（视角人物、目标篇幅、锁定事实、人物知识边界）；默认建议 2,000–2,500 非空白字符，1,500–6,000 为提醒带。
 - **动态设定库、伏笔追踪与叙事锚点**：以 `(chapterId, point)` 为锚点、半开区间 `[effectiveFrom, effectiveTo)` 记录设定，支持单条提案为多人物分别设定知情时点、伏笔生命周期追踪与设定冲突检测；已锁定设定拒绝后续覆盖；按作者批准序号 `decided_seq` 统一裁决查询、事件回放与生成冻结输入。
 - **拆书库与技法卡片（全局共享 + 工程覆盖）**：支持全局拆书样章与技法卡片库，以及面向单本长篇的挂载与局部覆盖（`overrideOfId`），并可按章节意图与标签进行确定性推荐。
@@ -52,7 +55,7 @@
 | [02 · 领域规则与共享契约](docs/02-domain-rules.md) | **做什么的精确规范** | 两条线状态机、受保护阈值（34/84/2/2/尾句）、11 个错误码、6 字段批准门、§2 七大权威命令表 |
 | [03 · 系统架构与接口手册](docs/03-architecture.md) | **怎么做（架构与端到端链路）** | 分层依赖边界、垂直应用服务、DsH Cordis 宿主与 LLM 桥接、客户端模块、`GET /state` 与 `/mutate` 动作手册、架构演进说明 |
 | [04 · 数据存储与工作流内核](docs/04-data-and-workflow.md) | **怎么做（数据与内核机制）** | SQLite 表结构与 ER 图、幂等命令账本、事件日志与 6 大持久化读模型冷恢复、运行状态机、预算守卫与生成账本 |
-| [05 · 开发、验收与运维指南](docs/05-development-and-ops.md) | **怎么做（工程实操与运维）** | 环境安装、双管线 TS 构建、本地预览服务器、53 文件 / 391 项分层离线测试与浏览器/性能基准、打包安装、SHA-256 备份恢复与故障排查 |
+| [05 · 开发、验收与运维指南](docs/05-development-and-ops.md) | **怎么做（工程实操与运维）** | 环境安装、双管线 TS 构建（`dist/server` + `dist/client`）、本地预览服务器、58 文件 / 417 项分层离线测试与浏览器/性能基准、打包与 `mtime` 刷新、SHA-256 备份恢复与故障排查 |
 
 ### 一体化框架设计规范（文档先行）
 
@@ -81,27 +84,28 @@
 # 1. 安装 pinned 开发期编译器（不执行包生命周期脚本）
 npm ci --ignore-scripts
 
-# 2. 日常验证：后端与客户端只读类型检查 + 核心离线测试（27 文件 / 218 用例）
+# 2. 日常验证：后端与客户端只读类型检查 + 核心离线测试（32 文件 / 244 用例）
 npm run verify
 
-# 3. 分层专项离线回归（契约 147 / V2 全栈 71 / 宿主与灾备 16 / 客户端 6 / 架构 13）
+# 3. 分层专项离线回归（契约 147 / V2 全栈 97 / 宿主与灾备 16 / 客户端 6 / 架构 13）
 npm run test:contracts
 npm run test:v2
 npm run test:host
 npm run test:client
 npm run test:arch
 
-# 4. 历史规则取证夹具（173 用例）与全量离线测试（53 文件 / 391 用例）
+# 4. 历史规则取证夹具（173 用例）与全量离线测试（58 文件 / 417 用例）
 npm run test:evidence
 npm run test:all
 
-# 5. 构建宿主 ESM 与模块化浏览器客户端（输出至 dist/ 与 dist/client/）
+# 5. 构建服务端 ESM 与模块化浏览器客户端（输出至 dist/server/ 与 dist/client/）并刷新时间戳
 npm run build
+npm run deploy:touch
 
 # 6. 启动本地零依赖预览工作台（需先执行 build，默认仅监听 127.0.0.1:3000/workbench）
 npm run dev
 
-# 7. 专项验证（模型回放 / 650 章性能基准 / Playwright 三旅程浏览器验收）
+# 7. 专项验证（模型回放 / 650 章性能基准 / Playwright 三旅程 + 4 视口浏览器验收）
 npm run test:model
 npm run test:bench
 npm run test:browser
@@ -117,24 +121,24 @@ npm pack --ignore-scripts
 ```text
 dsh-zhizhangv2/
 ├── AGENTS.md                   # V2 独立工作区硬性规则与受保护语义声明
-├── package.json                # @zhizhang/dsh-workbench v2.1.0、dsh 插件声明与脚本入口
+├── package.json                # @zhizhang/dsh-workbench v2.2.0、dsh 插件声明与脚本入口
 ├── tsconfig.json               # 后端只读类型检查配置（noEmit）
-├── tsconfig.build.json         # 后端构建配置（输出 dist/）
+├── tsconfig.build.json         # 后端构建配置（输出 dist/server/）
 ├── tsconfig.client.json        # 浏览器端构建配置（输出 dist/client/）
 ├── docs/                       # 项目文档体系（01-overview ~ 05-development-and-ops 与 framework/ 一体化框架设计）
 ├── src/
 │   ├── contracts/              # 冻结共享契约（错误信封、批准门、§2 命令表）与单一 DTO 真源 workspace-dto.ts
 │   ├── domain/
 │   │   ├── shared/             # 叙事锚点、章序比较与半开区间原语
-│   │   ├── fanqie/             # 番茄领域规则（三层级大纲/设定冲突/拆书与技法推荐/审稿/定稿/知情过滤/重排影响）
+│   │   ├── fanqie/             # 番茄领域规则（三层级/设定冲突/4维历史召回/离线体检/拆书与技法推荐/审稿/定稿/重排影响）
 │   │   └── toutiao/            # 头条领域规则（6格矩阵/34字/84分QA/双轮回改/交稿格式）
-│   ├── storage/                # SQLite 驱动缝、语句池化（stmt-pool）、FTS5 全文索引、本地 Markdown 包 IO、Schema 与备份
+│   ├── storage/                # SQLite 驱动缝、语句池化（stmt-pool）、事务/迁移、FTS5 外表、本地 Markdown 包 IO 与备份
 │   ├── workflow/               # 运行状态机、阶段注册表、预算守卫、Prefix-First 上下文槽位引擎（context-slots）、读模型
-│   ├── application/            # 一体化底座（context/run/snapshot/proposal-service）与隔离产品线（products/fanqie/*, toutiao）
-│   ├── host/                   # DsH Cordis 宿主插件（plugin.ts）与纯单次 LLM 传输（writing.ts）
-│   ├── client/                 # DsH UI Slot、唯一资产清单（manifest.ts）与多视图工作台（store、virtual-list、views/*）
+│   ├── application/            # 一体化底座（context/run/snapshot/proposal-service）与隔离产品线（products/fanqie/*, toutiao/*）
+│   ├── host/                   # DsH 宿主插件（plugin.ts）、单次 LLM 传输（writing.ts）、7+3 工具（tools.ts）、配置与诊断（settings.ts）
+│   ├── client/                 # DsH UI Slot、唯一资产清单（manifest.ts）与多视图工作台（书斋/三步向导/主题/虚拟列表/字级 Diff/微改写）
 │   └── bundle/                 # DsH Cordis 补丁声明与中英文元数据
-├── scripts/                    # dev-server、browser-check、model-check、workspace-bench、workspace-data
+├── scripts/                    # preflight、deploy、dev-server、browser-check、model-check、workspace-bench、workspace-data
 ├── support/                    # 共享离线测试底座（a01.mjs + v2-harness.mjs，独立于 test/ 以避免误计用例数）
 └── test/                       # 53 个分层离线自动化测试文件（d02/w02 契约合规 + ?01 规则取证 + *-v2 全栈/宿主/客户端/架构测试）
 ```

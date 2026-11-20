@@ -115,7 +115,7 @@ export function createRun(): Run {
       return state;
     },
     recordLateUsage(tokens) {
-      if (state === "cancelled") {
+      if (isTerminal(state)) {
         usage.pendingLate += tokens;
         return { state, applied: false };
       }

@@ -1,5 +1,5 @@
 import { ContractError } from "../../contracts/errors.ts";
-import { anchor, isEffective, precedes } from "../shared/anchors.ts";
+import { anchor, type Anchor, type ValidityInterval } from "../shared/anchors.ts";
 import type { SettingFact } from "./editorial.ts";
 
 export const LORE_CATEGORIES = [
@@ -39,7 +39,13 @@ export interface ChapterOutlineFacts {
 }
 
 export interface LoreConflictReport {
-  readonly kind: "expiry-before-known" | "outline-fact-mismatch" | "stale-foreshadow" | "foreshadow-order-flip";
+  readonly kind:
+    | "expiry-before-known"
+    | "inverted-validity-interval"
+    | "known-before-effective"
+    | "outline-fact-mismatch"
+    | "stale-foreshadow"
+    | "foreshadow-order-flip";
   readonly severity: "warning" | "error";
   readonly targetId: string;
   readonly chapterId?: string;
@@ -63,6 +69,11 @@ export function assertForeshadowStatus(status: unknown): ForeshadowState {
   return status as ForeshadowState;
 }
 
+function matchesFactToken(text: string, factId: string): boolean {
+  const escaped = factId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`(?<![A-Za-z0-9_-])${escaped}(?![A-Za-z0-9_-])`, "u").test(text);
+}
+
 /**
  * Pure continuity & worldbook conflict detector across approved settings,
  * foreshadow lifecycles, and chapter outlines.
@@ -79,11 +90,40 @@ export function detectLoreConflicts(
     if (!positions.has(id)) positions.set(id, index);
   });
 
-  // 1. Check setting effectiveTo vs character knownFrom ordering
+  const orderPos = (chapterId: string): number => positions.get(chapterId) ?? chapterOrder.length;
+  const precedesFast = (a: Anchor, b: Anchor): boolean => {
+    const posA = orderPos(a.chapterId);
+    const posB = orderPos(b.chapterId);
+    return posA === posB ? a.point < b.point : posA < posB;
+  };
+  const isEffectiveFast = (entry: ValidityInterval, at: Anchor): boolean => {
+    const afterStart = !precedesFast(at, entry.effectiveFrom);
+    const beforeEnd = entry.effectiveTo ? precedesFast(at, entry.effectiveTo) : true;
+    return afterStart && beforeEnd;
+  };
+
+  // 1. Check setting validity interval & character knownFrom ordering
   for (const fact of facts) {
-    if (!fact.effectiveTo) continue;
+    if (fact.effectiveTo && !precedesFast(fact.effectiveFrom, fact.effectiveTo)) {
+      conflicts.push({
+        kind: "inverted-validity-interval",
+        severity: "error",
+        targetId: fact.id,
+        chapterId: fact.effectiveTo.chapterId,
+        message: `设定 ${fact.id} 的失效时点早于或等于生效时点`,
+      });
+    }
     for (const [character, knownAt] of Object.entries(fact.knownFrom)) {
-      if (!precedes(knownAt, fact.effectiveTo, chapterOrder)) {
+      if (precedesFast(knownAt, fact.effectiveFrom)) {
+        conflicts.push({
+          kind: "known-before-effective",
+          severity: "error",
+          targetId: fact.id,
+          chapterId: knownAt.chapterId,
+          message: `${character} 在设定 ${fact.id} 生效之前已提前知情`,
+        });
+      }
+      if (fact.effectiveTo && !precedesFast(knownAt, fact.effectiveTo)) {
         conflicts.push({
           kind: "expiry-before-known",
           severity: "error",
@@ -106,8 +146,8 @@ export function detectLoreConflicts(
     if (!outline.lockedFacts.trim()) continue;
     const at = anchor(outline.chapterId, 1);
     for (const [factId, versions] of factsById) {
-      if (factId.length < 2 || !outline.lockedFacts.includes(factId)) continue;
-      const anyActive = versions.some((entry) => isEffective(entry, at, chapterOrder));
+      if (factId.length < 2 || !matchesFactToken(outline.lockedFacts, factId)) continue;
+      const anyActive = versions.some((entry) => isEffectiveFast(entry, at));
       if (!anyActive) {
         conflicts.push({
           kind: "outline-fact-mismatch",

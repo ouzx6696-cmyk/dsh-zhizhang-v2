@@ -73,7 +73,7 @@ export function createApproval(
 ): { ok: true; record: ApprovalRecord } | { ok: false; code: "input.invalid"; details: Record<string, unknown> } {
   const missing = APPROVAL_FIELDS.filter((field) => {
     const value = record[field];
-    return typeof value !== "string" || value.length === 0;
+    return typeof value !== "string" || value.trim().length === 0;
   });
   if (missing.length > 0) {
     return { ok: false, code: "input.invalid", details: { field: "approval", reason: "missing-fields", missing } };

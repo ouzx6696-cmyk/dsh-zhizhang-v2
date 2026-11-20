@@ -1,4 +1,5 @@
 import { ContractError } from "../contracts/index.ts";
+import type { RecoveryHintDto, RecoveryHintKind } from "../contracts/workspace-dto.ts";
 import {
   createWritingBudgetGuard,
   estimateWritingInput,
@@ -46,6 +47,7 @@ export interface GenerationRunInput {
   readonly provider: string;
   readonly model: string;
   readonly reserved: number;
+  readonly inputBudget?: number;
   readonly autoQa: boolean;
   readonly frozenInput: string;
 }
@@ -69,6 +71,55 @@ export type GenerationPipelineRunner = (deps: {
   readonly reserveRefinement: () => void;
 }) => Promise<GenerationResult>;
 
+function attachRecoveryKind<T extends Error>(error: T, kind: RecoveryHintKind): T {
+  (error as T & { recoveryKind?: RecoveryHintKind }).recoveryKind = kind;
+  return error;
+}
+
+/**
+ * Translates structured generation failure markers into actionable author
+ * recovery hints without altering frozen error envelopes.
+ */
+export function buildRecoveryHints(
+  recoveryKind?: string | null,
+  errorCode?: string | null,
+): RecoveryHintDto[] {
+  const resolved = recoveryKind ?? (errorCode === "budget.exhausted" ? "budget_exhausted" : null);
+  if (resolved === "thinking_exhausted") {
+    return [
+      {
+        kind: "thinking_exhausted",
+        action: "disable_thinking",
+        message: "模型深度思考耗尽了输出额度，建议关闭深度思考后原地重试。",
+      },
+      {
+        kind: "output_truncated",
+        action: "increase_output_limit",
+        message: "也可适当提高单次输出上限或任务总预算后重试。",
+      },
+    ];
+  }
+  if (resolved === "output_truncated") {
+    return [
+      {
+        kind: "output_truncated",
+        action: "increase_output_limit",
+        message: "输出因上限被截断，建议提高单次输出上限或总预算后重试。",
+      },
+    ];
+  }
+  if (resolved === "budget_exhausted") {
+    return [
+      {
+        kind: "budget_exhausted",
+        action: "increase_budget",
+        message: "当前任务预算不足，建议追加 Token 预算后原地重试。",
+      },
+    ];
+  }
+  return [];
+}
+
 /**
  * Creates a pure one-shot streaming LLM caller with zero domain knowledge.
  *
@@ -77,30 +128,45 @@ export type GenerationPipelineRunner = (deps: {
  */
 export function createSingleShotCaller(
   llm: LlmTransport,
-  run: Pick<GenerationRunInput, "provider" | "model" | "reserved">,
+  run: Pick<GenerationRunInput, "provider" | "model" | "reserved" | "inputBudget">,
   signal: AbortSignal,
   receipts: GenerationReceiptLedger,
 ): SingleShotLlmCaller {
-  const budget = createWritingBudgetGuard(run.reserved);
+  const budget = createWritingBudgetGuard(run.reserved, 0, run.inputBudget);
 
   return {
     usedTokens() {
       return budget.snapshot().usedTokens;
     },
 
-    async complete({ phase, system, prompt, maxOutputTokens = Infinity, cachePrefix }) {
+    async complete({ phase, system, prompt, maxOutputTokens = Infinity, cachePrefix, disableThinking }) {
       const inputReserve = estimateWritingInput(system, prompt);
-      const remainingBefore = run.reserved - budget.snapshot().usedTokens - inputReserve;
+      const snap = budget.snapshot();
+      const remainingBefore = run.reserved - snap.usedTokens - snap.inflightTokens - inputReserve;
       const maxTokens = Math.min(remainingBefore, maxOutputTokens);
       if (maxTokens < 1) {
-        throw new ContractError("budget.exhausted", { scope: "run", reason: "input-reservation" });
+        throw attachRecoveryKind(
+          new ContractError("budget.exhausted", { scope: "run", reason: "input-reservation" }),
+          "budget_exhausted",
+        );
       }
 
-      const reservation = budget.reserve(inputReserve);
+      let reservation;
+      try {
+        reservation = budget.reserve(inputReserve);
+      } catch (error) {
+        if (error instanceof ContractError && error.code === "budget.exhausted") {
+          attachRecoveryKind(error, "budget_exhausted");
+        }
+        throw error;
+      }
+
       const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(180_000)]);
       const blocks = new Map<number, string>();
       let usage: LlmUsage | undefined;
       let completed = false;
+      let finishReasonKind: string | null = null;
+      let sawThinkingBlock = false;
       let length = 0;
       let counts: number[] = [];
 
@@ -119,17 +185,24 @@ export function createSingleShotCaller(
             messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
           };
           if (cachePrefix) streamOptions.cachePrefix = cachePrefix;
+          if (disableThinking === true) streamOptions.thinking = false;
           for await (const chunk of call.stream(streamOptions)) {
             if (chunk.type === "text-delta") {
               length += chunk.text.length;
               if (length > MAX_CANDIDATE_LENGTH) throw new Error("Candidate too long");
               blocks.set(chunk.index, (blocks.get(chunk.index) ?? "") + chunk.text);
             }
-            if (chunk.type === "block-end" && chunk.block.type === "text" && typeof chunk.block.text === "string") {
-              blocks.set(chunk.index, chunk.block.text);
+            if (chunk.type === "block-end") {
+              if (chunk.block.type === "thinking") sawThinkingBlock = true;
+              if (chunk.block.type === "text" && typeof chunk.block.text === "string") {
+                blocks.set(chunk.index, chunk.block.text);
+              }
             }
             if (chunk.type === "usage") usage = chunk.usage;
-            if (chunk.type === "finish") completed = chunk.reason.kind === "stop";
+            if (chunk.type === "finish") {
+              finishReasonKind = chunk.reason.kind;
+              completed = chunk.reason.kind === "stop";
+            }
           }
         } finally {
           counts = usage
@@ -161,13 +234,30 @@ export function createSingleShotCaller(
         .join("\n");
       if (signal.aborted) return body;
       if (budget.snapshot().usedTokens > run.reserved) {
-        throw new ContractError("budget.exhausted", { scope: "run", reason: "actual-usage" });
+        throw attachRecoveryKind(
+          new ContractError("budget.exhausted", { scope: "run", reason: "actual-usage" }),
+          "budget_exhausted",
+        );
       }
       if (!completed) {
-        throw new ContractError("stage.output_invalid", { stage: WRITING_STAGE_IDS[phase], missing: "complete-text" });
+        const err = new ContractError("stage.output_invalid", {
+          stage: WRITING_STAGE_IDS[phase],
+          missing: "complete-text",
+        });
+        if (finishReasonKind === "length" || finishReasonKind === "max_tokens") {
+          attachRecoveryKind(err, sawThinkingBlock && !body.trim() ? "thinking_exhausted" : "output_truncated");
+        }
+        throw err;
       }
       if (!isJsonStagePhase(phase)) {
-        assertStageOutput(WRITING_STAGE_IDS[phase], body, "complete-text");
+        try {
+          assertStageOutput(WRITING_STAGE_IDS[phase], body, "complete-text");
+        } catch (error) {
+          if (error instanceof ContractError && sawThinkingBlock && !body.trim()) {
+            attachRecoveryKind(error, "thinking_exhausted");
+          }
+          throw error;
+        }
       }
       return body;
     },

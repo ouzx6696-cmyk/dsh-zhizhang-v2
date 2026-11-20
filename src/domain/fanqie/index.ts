@@ -47,6 +47,8 @@ export {
 
 export {
   TECHNIQUE_CATEGORIES,
+  WRITING_STAGE_BINDINGS,
+  normalizeStageBindings,
   normalizeTags,
   rankTechniquesForChapter,
   resolveEffectiveMount,
@@ -56,4 +58,23 @@ export {
   type TechniqueCardForRank,
   type TechniqueCategory,
   type TechniqueMatchResult,
+  type WritingStageBinding,
 } from "./library.ts";
+
+export {
+  DEFAULT_AI_SLOP_PATTERNS,
+  OBSERVATION_DIMENSIONS,
+  diagnoseChapterOffline,
+  diagnoseGoldenThree,
+  scanAiSlop,
+  type AiSlopPattern,
+} from "./diagnostics.ts";
+
+export {
+  rankRelatedChapters,
+  type ChapterEntityMention,
+  type RelatedChapterCandidate,
+  type RelatedChapterForeshadow,
+  type RelatedChapterMatch,
+  type RelatedChaptersInput,
+} from "./related-chapters.ts";

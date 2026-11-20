@@ -5,8 +5,9 @@ import type {
   SettingFactDto,
   WorkspaceSnapshot,
 } from "../../../contracts/workspace-dto.ts";
-import { el } from "../store.ts";
+import { byId, el } from "../dom.ts";
 import { createContextPreviewPanel } from "../views/context-preview.ts";
+import { createDiagnosticsPanel } from "../views/diagnostics-panel.ts";
 import { createIoView } from "../views/io-view.ts";
 import { createLibraryView } from "../views/library-view.ts";
 import { createOutlineBoardView } from "../views/outline-board.ts";
@@ -18,12 +19,6 @@ const DECISION_LABELS: Readonly<Record<string, string>> = {
   rejected: "已拒绝",
   pending: "待确认",
 };
-
-function byId<T extends HTMLElement = HTMLElement>(id: string): T {
-  const node = document.getElementById(id);
-  if (!node) throw new Error(`Missing workbench element #${id}`);
-  return node as T;
-}
 
 export const fanqieUiModule: ProductLineUiModule = {
   id: "fanqie",
@@ -37,6 +32,8 @@ export const fanqieUiModule: ProductLineUiModule = {
     final: "已定稿",
   },
   visibleTabs: ["workflow", "planning", "continuity", "runs"],
+  supportsCustomTree: true,
+  supportsStudioViews: true,
 
   documentTypeLabel() {
     return "番茄连载";
@@ -56,11 +53,32 @@ export const fanqieUiModule: ProductLineUiModule = {
     let treeLoadSeq = 0;
 
     const contextPreview = createContextPreviewPanel(byId("context-preview-root"), host);
-    const outlineView = createOutlineBoardView(byId("view-outline"), host);
+    const getRunProviderModel = () => {
+      const form = byId<HTMLFormElement>("generate-run");
+      return {
+        provider: (form.elements.namedItem("provider") as HTMLInputElement | null)?.value?.trim() || "deepseek-account",
+        model: (form.elements.namedItem("model") as HTMLInputElement | null)?.value?.trim() || "deepseek-flash",
+      };
+    };
+    const outlineView = createOutlineBoardView(byId("view-outline"), host, { getProviderModel: getRunProviderModel });
     const worldbookView = createWorldbookView(byId("view-worldbook"), host);
     const deconstructView = createLibraryView(byId("view-deconstruct"), host, "deconstruct");
     const techniqueView = createLibraryView(byId("view-techniques"), host, "techniques");
     const ioView = createIoView(byId("view-io"), host);
+    const diagnosticsRoot = el("div", "", "diagnostics-root");
+    byId("fanqie-actions").append(diagnosticsRoot);
+    const diagnosticsPanel = createDiagnosticsPanel(diagnosticsRoot, host, {
+      getProviderModel: getRunProviderModel,
+      getRunDefaults: () => {
+        const startForm = byId<HTMLFormElement>("start-run");
+        const pointVal = Number((startForm.elements.namedItem("point") as HTMLInputElement | null)?.value || 1);
+        const tokenVal = Number((startForm.elements.namedItem("tokenLimit") as HTMLInputElement | null)?.value || 16000);
+        return {
+          point: Number.isFinite(pointVal) && pointVal >= 1 ? Math.floor(pointVal) : 1,
+          tokenLimit: Number.isFinite(tokenVal) && tokenVal >= 1000 ? Math.floor(tokenVal) : 16000,
+        };
+      },
+    });
 
     function settingPoint({ chapterId, point }: AnchorPoint): string {
       return `${chapterTitles.get(chapterId) ?? chapterId}第 ${point} 段`;
@@ -129,15 +147,10 @@ export const fanqieUiModule: ProductLineUiModule = {
       target.append(fragment);
     }
 
-    // Bind Fanqie sidebar tree quick controls
+    // Bind Fanqie sidebar tree quick controls through virtualized treeSidebar filter
     const treeFilter = byId<HTMLInputElement>("tree-filter");
-    const docContainer = byId("documents");
     treeFilter.addEventListener("input", () => {
-      const q = treeFilter.value.trim().toLowerCase();
-      for (const btn of docContainer.querySelectorAll<HTMLButtonElement>("button.doc-nav-btn")) {
-        const text = (btn.textContent ?? "").toLowerCase();
-        btn.hidden = Boolean(q && !text.includes(q));
-      }
+      host.setTreeFilter(treeFilter.value);
     });
 
     host.bindClick("tree-new-volume", async () => {
@@ -363,7 +376,7 @@ export const fanqieUiModule: ProductLineUiModule = {
         void host.request<NovelTreeDto>("tree.get", { projectId })
           .then((tree) => {
             if (reqSeq !== treeLoadSeq || host.getState().projectId !== projectId) return;
-            if (tree.volumes.length > 0 || tree.chapters.some((c) => c.charCount > 0)) {
+            if (tree.volumes.length > 0 || tree.chapters.some((c) => c.charCount > 0 || c.syncStatus === "dirty")) {
               host.setDirectoryTree(tree);
             }
           })
@@ -398,6 +411,7 @@ export const fanqieUiModule: ProductLineUiModule = {
           planDocument = undefined;
           contextDoc = undefined;
           contextPreview.clear();
+          diagnosticsPanel.clear();
           return;
         }
 
@@ -425,6 +439,7 @@ export const fanqieUiModule: ProductLineUiModule = {
         if (contextDoc !== `${active.id}:${snapshot.asOfSeq ?? 0}`) {
           contextDoc = `${active.id}:${snapshot.asOfSeq ?? 0}`;
           void contextPreview.refresh();
+          void diagnosticsPanel.refreshForDocument(active.id, projectId);
         }
 
         const nextSettingsKey = JSON.stringify([projectId, snapshot.settings, snapshot.settingsCursor]);

@@ -2,6 +2,7 @@ import type {
   AiProposalDto,
   DeconstructionDto,
   LibraryMountDto,
+  SkillImportPreviewDto,
   TechniqueCardDto,
 } from "../../../contracts/workspace-dto.ts";
 import type { WorkbenchShellHost } from "../plugins/types.ts";
@@ -57,6 +58,7 @@ export function createLibraryView(
       el("h1", kind === "deconstruct" ? "长篇拆书库" : "写作技法卡片库"),
     );
 
+    const toolbar = el("div", "", "actions");
     const seg = el("div", "", "segmented");
     for (const [id, label] of [["all", "全部有效"], ["global", "全局库"], ["project", "本书专属/覆写"]] as const) {
       const btn = el("button", label, scopeFilter === id ? "active" : undefined);
@@ -67,7 +69,55 @@ export function createLibraryView(
       };
       seg.append(btn);
     }
-    header.append(left, seg);
+    toolbar.append(seg);
+    if (kind === "techniques") {
+      const importSkillBtn = el("button", "导入 SKILL.md");
+      importSkillBtn.type = "button";
+      importSkillBtn.onclick = () =>
+        void host.perform(async () => {
+          const skillMd = await host.modal.prompt({
+            title: "导入标准 SKILL.md（纯提示词沙箱）",
+            message: "请粘贴 SKILL.md 全文。导入前将自动校验大小（≤ 128 KiB）、剥离脚本/Hook/工具声明并展示预览。",
+            label: "SKILL.md 原文",
+            placeholder: "---\nname: 去AI味写法\nstage_bindings: [write, deslop]\n---\n\n...",
+            confirmLabel: "沙箱解析预览",
+          });
+          if (!skillMd?.trim()) return;
+          const targetScope = scopeFilter === "project" && projectId ? "project" : "global";
+          const preview = await host.request<SkillImportPreviewDto>("skill.import", {
+            skillMd,
+            preview: true,
+            scope: targetScope,
+            ...(targetScope === "project" && projectId ? { projectId } : {}),
+          });
+          const details: string[] = [
+            `标题：${preview.title}`,
+            `适用阶段：${preview.stageBindings.join(" / ") || "write"}`,
+            preview.strippedCapabilities.length > 0
+              ? `已自动剥离危险/非提示词字段：${preview.strippedCapabilities.join("、")}`
+              : "未检出需剥离的脚本/Hook/工具字段",
+            ...preview.warnings.map((w) => `提示：${w}`),
+            `正文字数摘要：${preview.rawPreview.slice(0, 140).replace(/\s+/gu, " ")}`,
+          ];
+          const confirmed = await host.modal.confirm({
+            title: "确认导入标准 SKILL.md（沙箱预览）",
+            message: `将以「${targetScope === "global" ? "全局共享" : "本书专属"}」纯提示词 Skill 入库，确认继续？`,
+            details,
+            confirmLabel: "确认入库",
+          });
+          if (!confirmed) return;
+          await host.request("skill.import", {
+            skillMd,
+            preview: false,
+            scope: targetScope,
+            ...(targetScope === "project" && projectId ? { projectId } : {}),
+          });
+          host.notice(`Skill「${preview.title}」已通过沙箱导入`);
+          await refresh();
+        });
+      toolbar.append(importSkillBtn);
+    }
+    header.append(left, toolbar);
     container.append(header);
 
     // Pending AI proposals
@@ -198,7 +248,8 @@ export function createLibraryView(
       for (const item of items) {
         const card = el("article", "", "setting-item");
         const scopeBadge = item.overrideOfId ? "本书覆写全局" : item.scope === "global" ? "全局共享" : "本书专属";
-        card.append(el("p", `${item.title} · [${scopeBadge}]${item.pacing ? ` · ${item.pacing}` : ""}`, "setting-title"));
+        const skillTag = kind === "techniques" && (item as TechniqueCardDto).assetKind === "skill" ? " · [Skill]" : "";
+        card.append(el("p", `${item.title} · [${scopeBadge}]${skillTag}${item.pacing ? ` · ${item.pacing}` : ""}`, "setting-title"));
         if (kind === "deconstruct") {
           const dec = item as DeconstructionDto;
           card.append(
@@ -207,8 +258,10 @@ export function createLibraryView(
           );
         } else {
           const tech = item as TechniqueCardDto;
+          const stageNote = tech.stageBindings?.length ? `阶段: ${tech.stageBindings.join("/")}` : "";
+          const refNote = tech.references?.length ? `参考附件 ${tech.references.length} 份` : "";
           card.append(
-            el("p", [tech.category, tech.triggerWhen, tech.sceneTags.join("、")].filter(Boolean).join(" · "), "setting-meta"),
+            el("p", [tech.category, stageNote, refNote, tech.triggerWhen, tech.sceneTags.join("、")].filter(Boolean).join(" · "), "setting-meta"),
             el("p", tech.executionSteps),
           );
         }
@@ -287,6 +340,9 @@ export function createLibraryView(
                     executionSteps: tech.executionSteps,
                     constraints: tech.constraints,
                     antiPatterns: tech.antiPatterns,
+                    ...(tech.assetKind ? { assetKind: tech.assetKind } : {}),
+                    ...(tech.stageBindings ? { stageBindings: tech.stageBindings } : {}),
+                    ...(tech.references ? { references: tech.references } : {}),
                   });
                 }
                 host.notice("已创建本书专属覆写版本，不影响全局原卡");

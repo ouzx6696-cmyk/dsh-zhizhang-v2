@@ -66,7 +66,7 @@ function truncateTextToTokenBudget(
 /**
  * Pure deterministic context assembler that partitions slots into a
  * prefix-cache-friendly stable header (`prefix`) and per-chapter `dynamic`
- * tail, enforcing priority-based budget trimming without altering critical text.
+ * tail, enforcing priority-based budget trimming with dynamic framing overhead.
  */
 export function assembleContextBundle(params: {
   readonly slots: readonly ContextSlotInput[];
@@ -77,25 +77,34 @@ export function assembleContextBundle(params: {
 }): AssembledContextResult {
   const estimateTokens = params.estimateTokens ?? estimateTokenCount;
   const maxInputTokens = Math.max(256, Math.floor(params.maxInputTokens));
-  const framingOverhead = 32;
-  const availableBudget = Math.max(64, maxInputTokens - framingOverhead);
+  const joinTokens = estimateTokens("\n\n");
+  const groupSepTokens = estimateTokens("\n\n---\n\n");
 
   const states = params.slots.map((slot) => {
     const rawContent = slot.content.trim();
     const rawTokens = rawContent ? estimateTokens(rawContent) : 0;
+    const headerTokens = estimateTokens(`### ${slot.label}\n`);
     return {
       slot,
       rawTokens,
+      headerTokens,
       text: rawContent,
       includedTokens: rawTokens,
       status: (rawContent ? "included" : "empty") as ContextSlotReportDto["status"],
     };
   });
 
+  const nonEmptyCount = states.filter((item) => item.status !== "empty").length;
+  const nonEmptyFraming =
+    states.reduce((sum, item) => sum + (item.status !== "empty" ? item.headerTokens : 0), 0) +
+    Math.max(0, nonEmptyCount - 1) * joinTokens +
+    groupSepTokens;
+  const availableForShares = Math.max(64, maxInputTokens - Math.min(maxInputTokens - 64, nonEmptyFraming));
+
   // 1. Apply soft per-slot share caps on non-critical slots first.
   for (const item of states) {
     if (item.status === "empty" || item.slot.priority === "critical" || !item.slot.maxShare) continue;
-    const capTokens = Math.max(64, Math.floor(availableBudget * item.slot.maxShare));
+    const capTokens = Math.max(64, Math.floor(availableForShares * item.slot.maxShare));
     if (item.includedTokens > capTokens) {
       const nextText = truncateTextToTokenBudget(
         item.text,
@@ -109,14 +118,31 @@ export function assembleContextBundle(params: {
     }
   }
 
-  const currentTotal = () => states.reduce((sum, item) => sum + item.includedTokens, 0);
+  const currentTotal = () => {
+    let prefixCount = 0;
+    let dynamicCount = 0;
+    let total = 0;
+    for (const item of states) {
+      if (item.includedTokens <= 0) continue;
+      total += item.headerTokens + item.includedTokens;
+      if (item.slot.group === "prefix") {
+        if (prefixCount > 0) total += joinTokens;
+        prefixCount += 1;
+      } else {
+        if (dynamicCount > 0) total += joinTokens;
+        dynamicCount += 1;
+      }
+    }
+    if (prefixCount > 0 && dynamicCount > 0) total += groupSepTokens;
+    return total;
+  };
 
-  // 2. Iteratively trim or drop lower-priority slots until within budget.
+  // 2. Iteratively trim or drop lower-priority slots until within maxInputTokens.
   for (const tier of PRIORITY_DROP_ORDER) {
-    if (currentTotal() <= availableBudget) break;
+    if (currentTotal() <= maxInputTokens) break;
     const candidates = states.filter((item) => item.slot.priority === tier && item.includedTokens > 0).reverse();
     for (const item of candidates) {
-      const excess = currentTotal() - availableBudget;
+      const excess = currentTotal() - maxInputTokens;
       if (excess <= 0) break;
       const target = item.includedTokens - excess;
       if (target < 48) {
@@ -139,24 +165,27 @@ export function assembleContextBundle(params: {
 
   const prefixParts: string[] = [];
   const dynamicParts: string[] = [];
-  let prefixTokens = 0;
-  let dynamicTokens = 0;
+  let sumIncludedSlotTokens = 0;
 
   for (const item of states) {
     if (!item.text) continue;
+    sumIncludedSlotTokens += item.includedTokens;
     const block = `### ${item.slot.label}\n${item.text}`;
     if (item.slot.group === "prefix") {
       prefixParts.push(block);
-      prefixTokens += item.includedTokens;
     } else {
       dynamicParts.push(block);
-      dynamicTokens += item.includedTokens;
     }
   }
 
   const stablePrefix = prefixParts.join("\n\n");
   const dynamicTail = dynamicParts.join("\n\n");
   const promptText = [stablePrefix, dynamicTail].filter(Boolean).join("\n\n---\n\n");
+  const prefixTokens = stablePrefix ? estimateTokens(stablePrefix) : 0;
+  const dynamicTokens = dynamicTail ? estimateTokens(dynamicTail) : 0;
+  const totalEstimatedTokens = promptText ? estimateTokens(promptText) : 0;
+  const framingTokens = Math.max(0, totalEstimatedTokens - sumIncludedSlotTokens);
+  const overBudget = totalEstimatedTokens > maxInputTokens;
 
   const slotReports: ContextSlotReportDto[] = states.map((item) => ({
     id: item.slot.id,
@@ -174,9 +203,11 @@ export function assembleContextBundle(params: {
     promptText,
     report: {
       maxInputTokens,
-      totalEstimatedTokens: prefixTokens + dynamicTokens,
+      totalEstimatedTokens,
       prefixTokens,
       dynamicTokens,
+      framingTokens,
+      overBudget,
       slots: slotReports,
       activeTechniqueIds: params.activeTechniqueIds ?? [],
       activeDeconstructionIds: params.activeDeconstructionIds ?? [],

@@ -1,6 +1,6 @@
 {
   "name": "@zhizhang/dsh-workbench",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "description": "Author-controlled Fanqie and Toutiao workbench for DeepSeek Harness",
   "type": "module",
@@ -11,6 +11,8 @@
   "scripts": {
     "check": "tsc --project tsconfig.json --noEmit && tsc --project tsconfig.client.json --noEmit",
     "build": "tsc --project tsconfig.build.json && tsc --project tsconfig.client.json",
+    "preflight": "node scripts/preflight.mjs",
+    "deploy:touch": "node scripts/deploy.mjs --touch-only",
     "dev": "node scripts/dev-server.mjs",
     "test": "node --test \"test/*-d02.test.mjs\" \"test/*-w02.test.mjs\" \"test/*-v2.test.mjs\" test/smoke.test.mjs",
     "test:contracts": "node --test \"test/*-d02.test.mjs\" \"test/*-w02.test.mjs\"",
@@ -29,7 +31,7 @@
     "typescript": "5.8.3"
   },
   "exports": {
-    ".": "./dist/host/plugin.js",
+    ".": "./dist/server/host/plugin.js",
     "./client": "./dist/client/slot.js",
     "./locale/*.json": "./src/bundle/locale/*.json"
   },

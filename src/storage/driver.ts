@@ -33,6 +33,6 @@ export interface SqliteDatabase {
 }
 
 /** Opens (or creates) a database file through the built-in driver. */
-export function openDatabase(path: string): SqliteDatabase {
-  return new DatabaseSync(path);
+export function openDatabase(path: string, options?: { readonly readOnly?: boolean }): SqliteDatabase {
+  return options?.readOnly !== undefined ? new DatabaseSync(path, { readOnly: options.readOnly }) : new DatabaseSync(path);
 }

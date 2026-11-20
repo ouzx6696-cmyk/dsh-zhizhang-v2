@@ -26,8 +26,10 @@ npm ci --ignore-scripts
 | 配置文件 | 目标环境 | 输出位置 | 覆盖范围与说明 |
 | --- | --- | --- | --- |
 | [tsconfig.json](../tsconfig.json) | Node 24 (`NodeNext`) | 不发射文件 (`noEmit`) | 后端只读静态检查（供 `npm run check` 使用） |
-| [tsconfig.build.json](../tsconfig.build.json) | Node 24 (`NodeNext`) | `dist/`（含 `.d.ts`） | 编译宿主插件、应用服务、领域、存储与工作流模块为原生 ESM |
+| [tsconfig.build.json](../tsconfig.build.json) | Node 24 (`NodeNext`) | `dist/server/`（含 `.d.ts`） | 编译宿主插件、应用服务、领域、存储与工作流模块为原生 ESM |
 | [tsconfig.client.json](../tsconfig.client.json) | 浏览器 (`ESNext` + DOM) | `dist/client/` | 编译 `src/client/slot.ts` 与 `src/client/workbench/**/*.ts` 浏览器 ESM 模块 |
+
+> 打包前建议运行 `node scripts/preflight.mjs` 校验 Node 版本与零依赖状态，并通过 `node scripts/deploy.mjs --touch-only` 刷新 `dist/client/` 产物与静态 HTML/CSS 的 `mtime`（规避 `npm pack` 旧时间戳触发 DsH 缓存僵死）。
 
 常用构建与检查命令：
 
@@ -80,14 +82,14 @@ npm run dev
 | 命令 | 测试范围 | 文件数 | 用例数 | 覆盖职责与说明 |
 | --- | --- | :---: | :---: | --- |
 | `npm run test:contracts` | `*-d02`、`*-w02` | 14 | 147 | **冻结契约合规**：存储格式窗口、命令幂等账本、事件日志、冷启动恢复、运行状态机、预算守卫与交稿批准门 |
-| `npm run test:v2` | `*-v2`、`smoke` | 9 | 61 | **V2 应用与全栈测试**：工作区核心流程、宿主 Cordis 插件 HTTP/SSE 状态流、LLM 单次传输与自动回改、双线深度边界、离线灾备恢复、前端无浏览器单测与静态架构守卫 |
-| `npm run test:host` | `host-plugin-v2`、`generation-v2`、`backup-v2` | 3 | 16 | **宿主、传输与灾备专测**：`/workbench`/`/state`/`/mutate` CSP 与状态码映射、202 异步生成与取消、`export.conflict` 与重启恢复、SHA-256 整库备份还原与防篡改 |
-| `npm run test:client` | `client-v2` | 1 | 5 | **前端无浏览器单元测试**：`DraftVault` 多标签 owner 隔离与慢保存恢复、大型段落 LCS `computeParagraphDiff`、`apiRequest` 错误汉化、`slot.ts` 三槽位注入、`workbench.html` 全量 ID/页签/Manifest 静态契约校验 |
+| `npm run test:v2` | `*-v2`、`smoke` | 18 | 97 | **V2.2 应用与全栈测试**：工作区核心流程、Sprint 1–4 优化闭环（缓存/记忆/FTS5/SKILL 沙箱/体检/ diff/微改写/5000 章虚拟化/控制面/7+3 工具）、宿主插件 HTTP/SSE、灾备恢复与静态架构守卫 |
+| `npm run test:host` | `host-plugin-v2`、`generation-v2`、`backup-v2` | 3 | 16 | **宿主、传输与灾备专测**：`/workbench`/`/state`/`/diag`/`/mutate` CSP 与状态码映射、202 异步生成与取消、`export.conflict` 与重启恢复、SHA-256 整库备份还原与防篡改 |
+| `npm run test:client` | `client-v2` | 1 | 6 | **前端无浏览器单元测试**：`DraftVault` 多标签 owner 隔离与慢保存恢复、大型段落 LCS `computeParagraphDiff`、`apiRequest` 错误汉化、`slot.ts` 三槽位注入、`workbench.html` 全量 ID/页签/Manifest 静态契约校验 |
 | `npm run test:arch` | `smoke`、`refactor-v2` | 2 | 13 | **架构边界与布局守卫**：全仓库 `.ts` 递归依赖隔离（双产品线/宿主/存储/客户端零越界）、`workspace-dto.ts` 纯类型零运行时校验、`AGENTS.md` 目录纯净度、`manifest`/`package.json`/`cordis.patch.yml` 一致性 |
-| `npm test` | `test:contracts` + `test:v2` | 23 | 208 | **日常核心回归** |
+| `npm test` | `test:contracts` + `test:v2` | 32 | 244 | **日常核心回归** |
 | `npm run test:evidence` | `*-?01.test.mjs` | 26 | 173 | **历史规则取证**：固定录存 v1.x 规则裁决证据与原始对照行为 |
-| `npm run test:all` | `test/*.test.mjs` | 49 | 381 | **发版前全量验收**：核心 + 取证全覆盖（无跳过、总数精确等于 `test` + `test:evidence`） |
-| `npm run verify` | `check` + `npm test` | 23 | 208 | **日常开发必跑门禁** |
+| `npm run test:all` | `test/*.test.mjs` | 58 | 417 | **发版前全量验收**：核心 + 取证全覆盖（无跳过、总数精确等于 `test` + `test:evidence`） |
+| `npm run verify` | `check` + `npm test` | 32 | 244 | **日常开发必跑门禁** |
 
 > **测试目录布局规范（[AGENTS.md](../AGENTS.md)）**：`node --test` 默认把 `test/` 下所有 `.mjs` 文件计为测试文件，因此多夹具共享辅助工具严格位于 `support/` 下，且由 [test/refactor-v2.test.mjs](../test/refactor-v2.test.mjs) 自动化断言 `test/` 目录内仅存在 `*.test.mjs` 文件。
 
@@ -123,9 +125,9 @@ npm run test:all
 npm run build
 npm pack --ignore-scripts
 ```
-执行后会在根目录生成安装包 `zhizhang-dsh-workbench-2.1.0.tgz`（包含 `dist/`、`src/client/workbench.html`、`src/client/workbench.css`、`src/bundle/cordis.patch.yml`、`src/bundle/locale/`、`docs/`）。
+执行后会在根目录生成安装包 `zhizhang-dsh-workbench-2.2.0.tgz`（包含 `dist/server/`、`dist/client/`、`src/client/workbench.html`、`src/client/workbench.css`、`src/bundle/cordis.patch.yml`、`src/bundle/locale/`、`docs/`）。
 
-### 2. 在 DsH Web `0.2.2-rc.4` 中安装运行
+### 2. 在 DsH Web `0.2.2+` 中安装运行
 1. 打开 DsH Web 插件管理器 → **添加插件** → 选择本地包 `zhizhang-dsh-workbench-2.1.0.tgz`，启用 **织章工作台**。
 2. 从 DsH 左侧面板点击 **织章**（`sidebar.panellist`），或在会话视图选择 **织章**（`conversation.view`）进入工作台。
 3. **运行时数据布局**（默认位于 `DSH_HOME/zhizhang-v2/`）：

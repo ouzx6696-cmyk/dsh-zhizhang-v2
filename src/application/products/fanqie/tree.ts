@@ -35,6 +35,7 @@ function loadVolumes(ctx: WorkspaceContext, projectId: string): VolumeDto[] {
 function loadActs(ctx: WorkspaceContext, projectId: string): ActDto[] {
   return stmt(ctx.db, `
     SELECT id, project_id AS projectId, volume_id AS volumeId, title, goal, summary,
+      arc_goal AS arcGoal, arc_summary AS arcSummary, pacing_template AS pacingTemplate,
       sort_order AS sortOrder, created_at AS createdAt
     FROM author_acts
     WHERE project_id = ?
@@ -45,9 +46,11 @@ function loadActs(ctx: WorkspaceContext, projectId: string): ActDto[] {
 function loadTreeChapters(ctx: WorkspaceContext, projectId: string) {
   return stmt(ctx.db, `
     SELECT a.id, a.title, a.state, a.volume_id AS volumeId, a.act_id AS actId,
-      a.char_count AS charCount, a.summary, a.updated_at AS updatedAt, p.value AS planningJson
+      a.char_count AS charCount, a.summary, a.updated_at AS updatedAt, p.value AS planningJson,
+      ms.sync_status AS syncStatus
     FROM author_documents a
     LEFT JOIN author_planning p ON p.document_id = a.id
+    LEFT JOIN author_chapter_memory_sync ms ON ms.document_id = a.id
     WHERE a.project_id = ?
     ORDER BY a.rowid ASC;
   `).all(projectId) as readonly {
@@ -60,6 +63,7 @@ function loadTreeChapters(ctx: WorkspaceContext, projectId: string) {
     summary: string;
     updatedAt: number;
     planningJson: string | null;
+    syncStatus: string | null;
   }[];
 }
 
@@ -178,6 +182,7 @@ export function queryTree(ctx: WorkspaceContext, projectId: string): NovelTreeDt
       summary: row.summary,
       targetLength,
       viewpoint,
+      syncStatus: row.syncStatus === "dirty" ? "dirty" : "clean",
       order: index + 1,
       updatedAt: row.updatedAt,
     });
@@ -243,6 +248,8 @@ export function updateVolume(ctx: WorkspaceContext, input: Input): VolumeDto {
 
     if (title !== existing.title) {
       ctx.event(projectId, "chapter", "volume.renamed", { volumeId, title });
+    } else if (goal !== existing.goal || summary !== existing.summary) {
+      ctx.event(projectId, "chapter", "volume.updated", { volumeId, title });
     }
     if (sortOrder !== existing.sortOrder) {
       applyHierarchyOrderChecked(
@@ -273,6 +280,7 @@ export function deleteVolume(ctx: WorkspaceContext, input: Input) {
     const hasDocs = stmt(ctx.db, "SELECT 1 FROM author_documents WHERE volume_id = ? LIMIT 1;").get(volumeId);
     if (hasActs || hasDocs) refuse("volume.delete", "volume-not-empty");
     stmt(ctx.db, "DELETE FROM author_volumes WHERE id = ?;").run(volumeId);
+    ctx.event(projectId, "chapter", "volume.deleted", { volumeId });
     return { deleted: volumeId };
   });
 }
@@ -282,8 +290,11 @@ export function createAct(ctx: WorkspaceContext, input: Input): ActDto {
   assertFanqieProject(ctx, projectId);
   const volumeId = text(input, "volumeId");
   const title = text(input, "title").trim();
-  const goal = optionalText(input, "goal") ?? "";
-  const summary = optionalText(input, "summary") ?? "";
+  const arcGoal = optionalText(input, "arcGoal") ?? optionalText(input, "goal") ?? "";
+  const goal = optionalText(input, "goal") ?? arcGoal;
+  const arcSummary = optionalText(input, "arcSummary") ?? optionalText(input, "summary") ?? "";
+  const summary = optionalText(input, "summary") ?? arcSummary;
+  const pacingTemplate = optionalText(input, "pacingTemplate") ?? "";
   return ctx.atomic(() => {
     requiredRow(
       stmt(ctx.db, "SELECT id FROM author_volumes WHERE id = ? AND project_id = ?;").get(volumeId, projectId),
@@ -296,10 +307,12 @@ export function createAct(ctx: WorkspaceContext, input: Input): ActDto {
     const id = randomUUID();
     const createdAt = Date.now();
     stmt(ctx.db, `
-      INSERT INTO author_acts (id, project_id, volume_id, title, goal, summary, sort_order, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?);
-    `).run(id, projectId, volumeId, title, goal, summary, sortOrder, createdAt);
-    return { id, projectId, volumeId, title, goal, summary, sortOrder, createdAt };
+      INSERT INTO author_acts (
+        id, project_id, volume_id, title, goal, summary, arc_goal, arc_summary, pacing_template, sort_order, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    `).run(id, projectId, volumeId, title, goal, summary, arcGoal, arcSummary, pacingTemplate, sortOrder, createdAt);
+    ctx.event(projectId, "chapter", "act.created", { actId: id, volumeId, title, sortOrder });
+    return { id, projectId, volumeId, title, goal, summary, arcGoal, arcSummary, pacingTemplate, sortOrder, createdAt };
   });
 }
 
@@ -311,6 +324,7 @@ export function updateAct(ctx: WorkspaceContext, input: Input): ActDto {
     const existing = requiredRow<ActDto>(
       stmt(ctx.db, `
         SELECT id, project_id AS projectId, volume_id AS volumeId, title, goal, summary,
+          arc_goal AS arcGoal, arc_summary AS arcSummary, pacing_template AS pacingTemplate,
           sort_order AS sortOrder, created_at AS createdAt
         FROM author_acts WHERE id = ? AND project_id = ?;
       `).get(actId, projectId),
@@ -320,10 +334,27 @@ export function updateAct(ctx: WorkspaceContext, input: Input): ActDto {
     const title = input.title !== undefined ? text(input, "title").trim() : existing.title;
     const goal = input.goal !== undefined ? (optionalText(input, "goal") ?? "") : existing.goal;
     const summary = input.summary !== undefined ? (optionalText(input, "summary") ?? "") : existing.summary;
+    const arcGoal = input.arcGoal !== undefined ? (optionalText(input, "arcGoal") ?? "") : (existing.arcGoal ?? goal);
+    const arcSummary = input.arcSummary !== undefined ? (optionalText(input, "arcSummary") ?? "") : (existing.arcSummary ?? summary);
+    const pacingTemplate = input.pacingTemplate !== undefined ? (optionalText(input, "pacingTemplate") ?? "") : (existing.pacingTemplate ?? "");
     const sortOrder = input.sortOrder !== undefined ? count(input, "sortOrder") : existing.sortOrder;
 
-    stmt(ctx.db, "UPDATE author_acts SET title = ?, goal = ?, summary = ?, sort_order = ? WHERE id = ?;")
-      .run(title, goal, summary, sortOrder, actId);
+    stmt(ctx.db, `
+      UPDATE author_acts
+      SET title = ?, goal = ?, summary = ?, arc_goal = ?, arc_summary = ?, pacing_template = ?, sort_order = ?
+      WHERE id = ?;
+    `).run(title, goal, summary, arcGoal, arcSummary, pacingTemplate, sortOrder, actId);
+    if (
+      title !== existing.title ||
+      goal !== existing.goal ||
+      summary !== existing.summary ||
+      arcGoal !== (existing.arcGoal ?? "") ||
+      arcSummary !== (existing.arcSummary ?? "") ||
+      pacingTemplate !== (existing.pacingTemplate ?? "") ||
+      sortOrder !== existing.sortOrder
+    ) {
+      ctx.event(projectId, "chapter", "act.updated", { actId, title });
+    }
     if (sortOrder !== existing.sortOrder) {
       applyHierarchyOrderChecked(
         ctx,
@@ -335,7 +366,7 @@ export function updateAct(ctx: WorkspaceContext, input: Input): ActDto {
         input,
       );
     }
-    return { ...existing, title, goal, summary, sortOrder };
+    return { ...existing, title, goal, summary, arcGoal, arcSummary, pacingTemplate, sortOrder };
   });
 }
 
@@ -352,6 +383,7 @@ export function deleteAct(ctx: WorkspaceContext, input: Input) {
     const hasDocs = stmt(ctx.db, "SELECT 1 FROM author_documents WHERE act_id = ? LIMIT 1;").get(actId);
     if (hasDocs) refuse("act.delete", "act-not-empty");
     stmt(ctx.db, "DELETE FROM author_acts WHERE id = ?;").run(actId);
+    ctx.event(projectId, "chapter", "act.deleted", { actId });
     return { deleted: actId };
   });
 }

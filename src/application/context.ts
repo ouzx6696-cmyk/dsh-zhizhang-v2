@@ -10,6 +10,8 @@ import {
   executeCommand,
   stmt,
   syncChapterFts,
+  withReadTx,
+  withWriteTx,
   type SqliteDatabase,
 } from "../storage/index.ts";
 import { createGenerationLedger, type GenerationLedger } from "../storage/author-generation.ts";
@@ -100,24 +102,8 @@ export function createWorkspaceContext(db: SqliteDatabase, registry: ProductLine
   createFtsSchema(db);
   for (const mod of registry.all()) mod.initSchema(db);
 
-  function transaction<T>(apply: () => T, begin: "BEGIN" | "BEGIN IMMEDIATE"): T {
-    db.exec(begin);
-    try {
-      const result = apply();
-      db.exec("COMMIT");
-      return result;
-    } catch (error) {
-      try {
-        db.exec("ROLLBACK");
-      } catch {
-        // Preserve the original failure rather than masking it with rollback errors.
-      }
-      throw error;
-    }
-  }
-
-  const atomic = <T>(apply: () => T): T => transaction(apply, "BEGIN IMMEDIATE");
-  const read = <T>(query: () => T): T => transaction(query, "BEGIN");
+  const atomic = <T>(apply: () => T): T => withWriteTx(db, apply);
+  const read = <T>(query: () => T): T => withReadTx(db, query);
 
   const generation: GenerationLedger = createGenerationLedger(db);
   const readAuthorModel = createAuthorModelReader(db, { read, atomic }, registry.collectReadModels());
@@ -244,7 +230,14 @@ export function createWorkspaceContext(db: SqliteDatabase, registry: ProductLine
       summary: row.summary,
       body,
     });
-    onSavedState(row);
+    const updatedRow: DocumentRow = {
+      ...row,
+      body,
+      revisionId: revision.revisionId,
+      charCount,
+      updatedAt: now,
+    };
+    onSavedState(updatedRow);
     event(row.projectId, "revision", "revision.saved", {
       documentId: row.id,
       revisionId: revision.revisionId,

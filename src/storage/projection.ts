@@ -24,6 +24,7 @@
 import type { SqliteDatabase } from "./driver.ts";
 import { appendEvent, currentSeq, readEvents } from "./eventlog.ts";
 import { StorageError } from "./errors.ts";
+import { withWriteTx } from "./tx.ts";
 
 /** One registered read model. */
 export interface ProjectionUnit<S> {
@@ -219,23 +220,14 @@ export function createProjectionStore(db: SqliteDatabase, projectId: string): Pr
     },
 
     saveCheckpoint() {
-      db.exec("BEGIN IMMEDIATE");
-      try {
+      withWriteTx(db, () => {
         db.prepare("DELETE FROM projection_rows WHERE project_id = ?;").run(projectId);
         for (const row of this.checkpoint()) {
           db.prepare(
             "INSERT INTO projection_rows (project_id, key, version, seq, state) VALUES (?, ?, ?, ?, ?);",
           ).run(projectId, row.key, row.ver, row.seq, JSON.stringify(row.val));
         }
-        db.exec("COMMIT");
-      } catch (error) {
-        try {
-          db.exec("ROLLBACK");
-        } catch {
-          // Reported through the original failure.
-        }
-        throw error;
-      }
+      });
     },
 
     loadCheckpoint() {

@@ -4,7 +4,10 @@ import {
   chapterLengthWarnings,
   EDITORIAL_REJECTION_LIMIT,
   OUTLINE_SECTIONS,
+  scanAiSlop,
+  settingsAt,
   type ChapterState,
+  type SettingFact,
 } from "../../domain/fanqie/index.ts";
 import { stmt, type SqliteDatabase } from "../../storage/index.ts";
 import { createAuthorSchema } from "../../storage/author-schema.ts";
@@ -12,6 +15,7 @@ import { projectReadUnit, type AuthorReadUnitFactory } from "../../workflow/auth
 import {
   count,
   invalid,
+  optionalText,
   refuse,
   text,
   type DocumentRow,
@@ -19,8 +23,31 @@ import {
   type WorkspaceContext,
 } from "../context.ts";
 import type { ActionDefinition, ProductLineModule } from "../product-line.ts";
-import { buildFanqieFrozenContext, createFanqieGenerationRunner, previewContext } from "./fanqie/context.ts";
+import {
+  buildFanqieFrozenContext,
+  createFanqieGenerationRunner,
+  formatTechniquesBlock,
+  previewContext,
+} from "./fanqie/context.ts";
+import { getProjectControls, loadProjectControls, saveProjectControls } from "./fanqie/controls.ts";
+import {
+  createObservation,
+  diagnoseChapter,
+  getSlopConfig,
+  listObservations,
+  loadSlopConfig,
+  saveSlopConfig,
+  updateObservation,
+} from "./fanqie/diagnostics.ts";
 import { exportProjectBundle, importProjectBundle, type ProjectBundleDiskWriter } from "./fanqie/io.ts";
+import {
+  computeParagraphDelta,
+  getChapterMemorySyncRecord,
+  getChapterSyncStatus,
+  syncChapterMemoryAndEntities,
+} from "./fanqie/memory-sync.ts";
+import { importSkillDocument } from "./fanqie/skill-importer.ts";
+import { approvedFacts } from "./fanqie/shared.ts";
 import {
   createManualProposal,
   decideProposal,
@@ -32,6 +59,7 @@ import {
   listTechniques,
   mountLibraryItem,
   recommendTechniquesForChapter,
+  resolveMountedLibraryForChapter,
   saveDeconstruction,
   saveTechnique,
   unmountLibraryItem,
@@ -44,7 +72,9 @@ import {
   settingsPage,
   upsertForeshadow,
 } from "./fanqie/lore.ts";
-import { searchFanqieWorkspace } from "./fanqie/search.ts";
+import {
+  searchFanqieWorkspace,
+} from "./fanqie/search.ts";
 import {
   attachChapterToTree,
   createAct,
@@ -58,7 +88,6 @@ import {
   updateVolume,
 } from "./fanqie/tree.ts";
 import { anchor } from "../../domain/shared/index.ts";
-import { settingsAt, type SettingFact } from "../../domain/fanqie/index.ts";
 
 /**
  * Fanqie (serialized novel) product-line module.
@@ -252,6 +281,15 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
     "workspace.search": { scope: "project", handler: (ctx, input) => searchFanqieWorkspace(ctx, input) },
     "project.export_bundle": { scope: "project", handler: (ctx, input) => exportProjectBundle(ctx, input, writeProjectExport) },
     "project.import_bundle": { scope: "global", handler: (ctx, input) => importProjectBundle(ctx, input) },
+    "skill.import": { scope: "global", handler: (ctx, input) => importSkillDocument(ctx, input) },
+    "chapter.diagnose": { scope: "document", handler: (ctx, _input, row) => diagnoseChapter(ctx, row!) },
+    "slop.config.get": { scope: "project", handler: (ctx, input) => getSlopConfig(ctx, input) },
+    "slop.config.save": { scope: "project", handler: (ctx, input) => saveSlopConfig(ctx, input) },
+    "observation.list": { scope: "document", handler: (ctx, input, row) => listObservations(ctx, row!, input) },
+    "observation.create": { scope: "document", handler: (ctx, input, row) => createObservation(ctx, row!, input) },
+    "observation.update": { scope: "project", handler: (ctx, input) => updateObservation(ctx, input) },
+    "controls.get": { scope: "project", handler: (ctx, input) => getProjectControls(ctx, input) },
+    "controls.save": { scope: "project", handler: (ctx, input) => saveProjectControls(ctx, input) },
   };
 
   return {
@@ -270,7 +308,172 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
     onDraftSaved(ctx, row) {
       const next: ChapterState = row.state === "planned" || row.state === "drafting" ? "drafting" : "drafted";
       stmt(ctx.db, "UPDATE author_documents SET state = ? WHERE id = ?;").run(next, row.id);
+      syncChapterMemoryAndEntities(ctx, row.projectId, row.id, row.body ?? "");
       ctx.event(row.projectId, "chapter", "document.state", { documentId: row.id, state: next });
+    },
+    buildActiveContext(ctx, active) {
+      return {
+        volumeId: active.volumeId,
+        volumeTitle: active.volumeId
+          ? ((stmt(ctx.db, "SELECT title FROM author_volumes WHERE id = ?;").get(active.volumeId) as { title?: string } | undefined)?.title ?? null)
+          : null,
+        actId: active.actId,
+        actTitle: active.actId
+          ? ((stmt(ctx.db, "SELECT title FROM author_acts WHERE id = ?;").get(active.actId) as { title?: string } | undefined)?.title ?? null)
+          : null,
+        charCount: active.charCount,
+        summary: active.summary,
+        syncStatus: getChapterSyncStatus(ctx, active.id),
+      };
+    },
+    buildProposalContext(ctx, { kind, projectId, documentId, input }) {
+      if (!projectId) return {};
+      const existingLoreHints = stmt(ctx.db, `
+        SELECT fact_id AS factId, category, entity_name AS entityName
+        FROM author_lore_current
+        WHERE project_id = ?
+        ORDER BY decided_seq DESC LIMIT 40;
+      `).all(projectId) as readonly { factId: string; category: string; entityName: string }[];
+
+      if (kind === "setting") {
+        return { extra: { existingLoreHints } };
+      }
+      if (kind === "fact_sync" && documentId) {
+        const doc = ctx.document(documentId);
+        const body = doc.body ?? "";
+        const syncRecord = getChapterMemorySyncRecord(ctx, documentId);
+        const delta = computeParagraphDelta(syncRecord?.syncedBody ?? "", body);
+        const existingForeshadows = stmt(ctx.db, `
+          SELECT id, title, fact_id AS factId, status, note
+          FROM author_foreshadows
+          WHERE project_id = ? AND status IN ('planted', 'hinted')
+          ORDER BY updated_at DESC LIMIT 30;
+        `).all(projectId);
+        const manualSource = optionalText(input, "sourceText");
+        return {
+          sourceText: manualSource ?? (body.trim() ? delta.deltaText : ""),
+          sourceRef: doc.title,
+          extra: {
+            hasBaseline: delta.hasBaseline,
+            changedParagraphCount: delta.changedParagraphCount,
+            existingLoreHints,
+            existingForeshadows,
+          },
+        };
+      }
+      if (kind === "chapter_review" && documentId) {
+        const doc = ctx.document(documentId);
+        const order = ctx.chapterOrder(projectId);
+        const plan = ctx.planning(doc.id);
+        const viewpoint = typeof plan?.viewpoint === "string" ? plan.viewpoint : undefined;
+        const knownFacts = viewpoint ? settingsAt(approvedFacts(ctx, projectId), order, anchor(doc.id, 1), viewpoint) : [];
+        const diagnostics = diagnoseChapter(ctx, doc);
+        const mountedReview = resolveMountedLibraryForChapter(ctx, doc, "", "", "review");
+        const reviewMethodology = formatTechniquesBlock(mountedReview.techniques);
+        const existingForeshadows = stmt(ctx.db, `
+          SELECT id, title, fact_id AS factId, status, note
+          FROM author_foreshadows
+          WHERE project_id = ? AND status IN ('planted', 'hinted')
+          ORDER BY updated_at DESC LIMIT 30;
+        `).all(projectId);
+        return {
+          sourceText: optionalText(input, "sourceText") ?? (doc.body ?? ""),
+          sourceRef: doc.title,
+          extra: {
+            viewpoint: viewpoint ?? "",
+            lockedFacts: typeof plan?.lockedFacts === "string" ? plan.lockedFacts : "",
+            knownFacts,
+            existingLoreHints,
+            existingForeshadows,
+            diagnostics,
+            reviewMethodology,
+          },
+        };
+      }
+      if (kind === "arc_plan") {
+        const controls = loadProjectControls(ctx, projectId);
+        const volumes = stmt(ctx.db, `
+          SELECT id, title, goal, summary FROM author_volumes
+          WHERE project_id = ? ORDER BY sort_order ASC, rowid ASC;
+        `).all(projectId) as readonly { id: string; title: string; goal: string; summary: string }[];
+        const acts = stmt(ctx.db, `
+          SELECT id, volume_id AS volumeId, title, goal, summary, arc_goal AS arcGoal, arc_summary AS arcSummary
+          FROM author_acts WHERE project_id = ? ORDER BY sort_order ASC, rowid ASC;
+        `).all(projectId) as readonly {
+          id: string;
+          volumeId: string;
+          title: string;
+          goal: string;
+          summary: string;
+          arcGoal: string;
+          arcSummary: string;
+        }[];
+        const chapters = stmt(ctx.db, `
+          SELECT id, title, summary, act_id AS actId FROM author_documents
+          WHERE project_id = ? ORDER BY rowid DESC LIMIT 12;
+        `).all(projectId) as readonly { id: string; title: string; summary: string; actId: string | null }[];
+        const actId = optionalText(input, "actId") ?? null;
+        const targetAct = actId ? acts.find((a) => a.id === actId) : acts[acts.length - 1];
+        const fallbackSummaryText = [
+          ...chapters.map((ch) => `《${ch.title}》：${ch.summary || "（暂无摘要）"}`),
+          ...acts.map((a) => `[幕] ${a.title}：${a.arcSummary || a.summary || a.arcGoal || a.goal || ""}`),
+          controls.currentFocus ? `[焦点] ${controls.currentFocus}` : "",
+          controls.authorIntent ? `[指南针] ${controls.authorIntent}` : "",
+        ].filter(Boolean).join("\n") || "（新书初期，暂无卷幕历史，请规划第一幕）";
+        return {
+          sourceText: optionalText(input, "sourceText") ?? fallbackSummaryText,
+          sourceRef: targetAct?.title ?? volumes[0]?.title ?? "全书卷幕规划",
+          extra: {
+            authorIntent: controls.authorIntent,
+            currentFocus: controls.currentFocus,
+            targetAct: targetAct ?? null,
+            volumes,
+            acts,
+            recentChapters: [...chapters].reverse(),
+          },
+        };
+      }
+      return {};
+    },
+    buildSelectionContext(ctx, row, mode) {
+      const agreements = stmt(ctx.db, `
+        SELECT fact_id AS factId, value FROM author_lore_current
+        WHERE project_id = ? AND category = 'agreement'
+        ORDER BY fact_id ASC;
+      `).all(row.projectId) as readonly { factId: string; value: string }[];
+      const agreementText = agreements
+        .map((entry) => {
+          try {
+            const parsed = JSON.parse(entry.value) as { note?: string };
+            return `- [${entry.factId}] ${parsed.note ?? ""}`;
+          } catch {
+            return "";
+          }
+        })
+        .filter(Boolean)
+        .join("\n");
+      const stage = mode === "polish" ? "deslop" : "refine";
+      const mounted = resolveMountedLibraryForChapter(ctx, row, "", "", stage);
+      const sortedSkills = [...mounted.techniques].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      const skillText = formatTechniquesBlock(sortedSkills);
+      const cachePrefix = [agreementText, skillText].filter(Boolean).join("\n\n---\n\n") || undefined;
+
+      const plan = ctx.planning(row.id);
+      const viewpoint = typeof plan?.viewpoint === "string" ? plan.viewpoint : undefined;
+      const order = ctx.chapterOrder(row.projectId);
+      const knownFacts = viewpoint ? settingsAt(approvedFacts(ctx, row.projectId), order, anchor(row.id, 1), viewpoint) : [];
+      const slopHints = mode === "polish"
+        ? scanAiSlop(row.body ?? "", loadSlopConfig(ctx, row.projectId)).topPhrases
+        : [];
+      return {
+        cachePrefix,
+        extra: {
+          viewpoint: viewpoint ?? "",
+          lockedFacts: typeof plan?.lockedFacts === "string" ? plan.lockedFacts : "",
+          knownFacts,
+          aiSlopHints: slopHints,
+        },
+      };
     },
     buildFrozenContext(ctx, row, input) {
       return buildFanqieFrozenContext(ctx, row, input);

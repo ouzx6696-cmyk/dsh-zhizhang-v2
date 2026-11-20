@@ -1,14 +1,9 @@
 import type { CandidateQaReport, WorkspaceSnapshot } from "../../../contracts/workspace-dto.ts";
 import { countUnicodeCodePoints } from "../diff.ts";
+import { byId } from "../dom.ts";
 import type { ProductLineUiModule, ProductLineUiSession, WorkbenchShellHost } from "./types.ts";
 
 const TITLE_MAX = 34;
-
-function byId<T extends HTMLElement = HTMLElement>(id: string): T {
-  const node = document.getElementById(id);
-  if (!node) throw new Error(`Missing workbench element #${id}`);
-  return node as T;
-}
 
 function syncTitleCount(field: HTMLInputElement, output: HTMLOutputElement, titled: boolean): void {
   const length = countUnicodeCodePoints(field.value);

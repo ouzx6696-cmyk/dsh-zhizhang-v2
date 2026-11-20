@@ -21,31 +21,28 @@ export function createSnapshotService(ctx: WorkspaceContext, registry: ProductLi
       .map(({ id, title }) => ({ id, title }));
 
     const active = documentId && byId.has(documentId) ? ctx.document(documentId) : undefined;
+    const activeModule = active ? registry.get(active.product) : undefined;
     const activeContext = active
-      ? {
+      ? (activeModule?.buildActiveContext?.(ctx, active) ?? {
           volumeId: active.volumeId,
-          volumeTitle: active.volumeId
-            ? ((stmt(db, "SELECT title FROM author_volumes WHERE id = ?;").get(active.volumeId) as { title?: string } | undefined)?.title ?? null)
-            : null,
+          volumeTitle: null,
           actId: active.actId,
-          actTitle: active.actId
-            ? ((stmt(db, "SELECT title FROM author_acts WHERE id = ?;").get(active.actId) as { title?: string } | undefined)?.title ?? null)
-            : null,
+          actTitle: null,
           charCount: active.charCount,
           summary: active.summary,
-        }
+        })
       : null;
 
-    const runs = active
-      ? stmt(db, `
+    const baseRuns = active
+      ? (stmt(db, `
           SELECT r.id, r.state, r.base_revision_id AS baseRevisionId,
             r.reserved, r.settled, r.candidate_id AS candidateId,
             CASE WHEN r.state = 'awaiting-author' THEN c.body END AS candidateBody,
-            q.report AS candidateQa, q.rounds AS refinementRounds,
-            g.state AS generationState, g.error AS generationError
+            NULL AS candidateQa, NULL AS refinementRounds,
+            g.state AS generationState, g.error AS generationError,
+            r.recovery_hints AS recoveryHintsRaw
           FROM author_runs r
           LEFT JOIN candidates c ON c.candidate_id = r.candidate_id AND r.state = 'awaiting-author'
-          LEFT JOIN author_candidate_qa q ON q.candidate_id = c.candidate_id
           LEFT JOIN author_generation_attempts g ON g.rowid = (
             SELECT MAX(a.rowid) FROM author_generation_attempts a WHERE a.run_id = r.id
           )
@@ -58,10 +55,26 @@ export function createSnapshotService(ctx: WorkspaceContext, registry: ProductLi
             OR g.state = 'uncertain'
           )
           ORDER BY r.rowid DESC;
-        `).all(active.id, active.id, active.id)
+        `).all(active.id, active.id, active.id) as readonly Record<string, unknown>[]).map((runRow) => {
+          const { recoveryHintsRaw, ...rest } = runRow;
+          if (typeof recoveryHintsRaw === "string" && recoveryHintsRaw.length > 0) {
+            try {
+              const parsed = JSON.parse(recoveryHintsRaw) as unknown;
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                return { ...rest, recoveryHints: parsed };
+              }
+            } catch {
+              // Ignore malformed hints metadata on snapshot read.
+            }
+          }
+          return rest;
+        })
       : [];
 
-    const activeModule = active ? registry.get(active.product) : undefined;
+    const runs = active && activeModule?.enrichRunSummaries
+      ? activeModule.enrichRunSummaries(ctx, active, baseRuns)
+      : baseRuns;
+
     const productContribution = activeModule ? activeModule.contributeSnapshot(ctx, projectId, active) : {};
 
     return {

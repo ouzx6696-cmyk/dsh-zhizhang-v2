@@ -31,6 +31,7 @@ export function createWorldbookView(container: HTMLElement, host: WorkbenchShell
   let category: string = "all";
   let query = "";
   let entries: readonly LoreEntryDto[] = [];
+  let loreCursor: string | null = null;
   let foreshadows: readonly ForeshadowDto[] = [];
   let conflicts: readonly LoreConflictDto[] = [];
   let proposals: readonly AiProposalDto[] = [];
@@ -42,8 +43,8 @@ export function createWorldbookView(container: HTMLElement, host: WorkbenchShell
       container.replaceChildren(el("p", "请选择番茄连载项目以管理动态设定库与伏笔追踪。", "muted-copy"));
       return;
     }
-    const [loreRes, fsRes, conflictRes, propRes] = await Promise.all([
-      host.request<{ entries: readonly LoreEntryDto[] }>("lore.list", {
+    const [loreRes, fsRes, conflictRes, propSettingRes, propFactSyncRes] = await Promise.all([
+      host.request<{ entries: readonly LoreEntryDto[]; cursor?: string | null }>("lore.list", {
         projectId,
         ...(category !== "all" ? { category: category as LoreCategory } : {}),
         ...(query.trim() ? { entityName: query.trim() } : {}),
@@ -51,11 +52,27 @@ export function createWorldbookView(container: HTMLElement, host: WorkbenchShell
       host.request<readonly ForeshadowDto[]>("foreshadow.list", { projectId }),
       host.request<readonly LoreConflictDto[]>("lore.conflicts", { projectId }),
       host.request<readonly AiProposalDto[]>("proposal.list", { projectId, kind: "setting", status: "pending" }),
+      host.request<readonly AiProposalDto[]>("proposal.list", { projectId, kind: "fact_sync", status: "pending" }),
     ]);
     entries = loreRes.entries;
+    loreCursor = loreRes.cursor ?? null;
     foreshadows = fsRes;
     conflicts = conflictRes;
-    proposals = propRes;
+    proposals = [...propFactSyncRes, ...propSettingRes].sort((a, b) => b.createdAt - a.createdAt);
+    paint();
+  }
+
+  async function loadMoreLore(): Promise<void> {
+    const { projectId } = host.getState();
+    if (!projectId || !loreCursor) return;
+    const more = await host.request<{ entries: readonly LoreEntryDto[]; cursor?: string | null }>("lore.list", {
+      projectId,
+      cursor: loreCursor,
+      ...(category !== "all" ? { category: category as LoreCategory } : {}),
+      ...(query.trim() ? { entityName: query.trim() } : {}),
+    });
+    entries = [...entries, ...more.entries];
+    loreCursor = more.cursor ?? null;
     paint();
   }
 
@@ -107,28 +124,55 @@ export function createWorldbookView(container: HTMLElement, host: WorkbenchShell
       container.append(box);
     }
 
-    // 2. Pending AI Setting/Foreshadow Proposals
+    // 2. Pending AI Setting / Fact-Sync Proposals
     if (proposals.length > 0) {
       const propBox = el("section", "", "panel-card");
-      propBox.append(el("h2", `待确认 AI 章末设定提取提案（${proposals.length}）`));
+      propBox.append(el("h2", `待确认 AI 设定与记忆同步提案（${proposals.length}）`));
       for (const prop of proposals) {
         const row = el("div", "", "proposal-row");
+        const isFactSync = prop.kind === "fact_sync";
+        const newFacts = Array.isArray(prop.payload.newFacts) ? (prop.payload.newFacts as readonly Record<string, unknown>[]) : [];
         const settingsList = Array.isArray(prop.payload.settings) ? prop.payload.settings : [];
-        const fsList = Array.isArray(prop.payload.foreshadows) ? prop.payload.foreshadows : [];
-        row.append(
-          el(
-            "p",
-            `来源：${prop.sourceRef || "章节提取"} · 含 ${settingsList.length} 条设定、${fsList.length} 条伏笔`,
-            "setting-title",
-          ),
-          el("pre", JSON.stringify(prop.payload, null, 2), "server-body-preview"),
-        );
+        const knownUpdates = Array.isArray(prop.payload.knownFromUpdates) ? prop.payload.knownFromUpdates : [];
+        const fsList = isFactSync
+          ? (Array.isArray(prop.payload.foreshadowUpdates) ? prop.payload.foreshadowUpdates : [])
+          : (Array.isArray(prop.payload.foreshadows) ? prop.payload.foreshadows : []);
+        const summaryLine = isFactSync
+          ? `记忆同步 · ${prop.sourceRef || "章节增量"} · 含 ${newFacts.length} 条新事实、${knownUpdates.length} 条知情更新、${fsList.length} 条伏笔${typeof prop.payload.summaryDraft === "string" && prop.payload.summaryDraft ? " + 摘要草案" : ""}`
+          : `来源：${prop.sourceRef || "章节提取"} · 含 ${settingsList.length} 条设定、${fsList.length} 条伏笔`;
+        row.append(el("p", summaryLine, "setting-title"));
+
+        const checkboxes: HTMLInputElement[] = [];
+        if (isFactSync && newFacts.length > 0) {
+          const checklist = el("div", "", "proposal-checklist");
+          for (const item of newFacts) {
+            const fid = typeof item.factId === "string" ? item.factId : "";
+            if (!fid) continue;
+            const label = document.createElement("label");
+            const cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.checked = true;
+            cb.value = fid;
+            checkboxes.push(cb);
+            label.append(cb, ` ${typeof item.entityName === "string" && item.entityName ? item.entityName : fid}：${typeof item.note === "string" ? item.note : ""}`);
+            checklist.append(label);
+          }
+          row.append(checklist);
+        }
+        row.append(el("pre", JSON.stringify(prop.payload, null, 2), "server-body-preview"));
+
         const actions = el("div", "", "actions");
         const approveBtn = el("button", "确认入库", "primary");
         approveBtn.type = "button";
         approveBtn.onclick = () =>
           void host.perform(async () => {
-            await host.request("proposal.decide", { proposalId: prop.id, accept: true });
+            await host.request("proposal.decide", {
+              proposalId: prop.id,
+              accept: true,
+              ...(isFactSync && checkboxes.length > 0
+                ? { selectedFactIds: checkboxes.filter((cb) => cb.checked).map((cb) => cb.value) }
+                : {}),
+            });
             host.notice("设定提案已确认入库");
             await refresh();
             await host.load();
@@ -188,6 +232,12 @@ export function createWorldbookView(container: HTMLElement, host: WorkbenchShell
           el("p", `来源 ${entry.fact.source} · 生效章 ${entry.fact.effectiveFrom.chapterId} 第 ${entry.fact.effectiveFrom.point} 段`, "setting-meta"),
         );
         loreCard.append(item);
+      }
+      if (loreCursor) {
+        const moreBtn = el("button", "加载更多设定");
+        moreBtn.type = "button";
+        moreBtn.onclick = () => void host.perform(loadMoreLore);
+        loreCard.append(moreBtn);
       }
     }
     container.append(loreCard);

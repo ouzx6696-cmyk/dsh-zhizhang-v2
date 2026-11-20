@@ -6,7 +6,7 @@ export interface CommandPaletteDeps {
   readonly dialog: HTMLDialogElement;
   readonly getDocuments: () => readonly DocumentSummary[];
   readonly getProjectId: () => string;
-  readonly isFanqieActive: () => boolean;
+  readonly supportsStudioViews: () => boolean;
   readonly searchRemote: (query: string) => Promise<readonly SearchHitDto[]>;
   readonly onSelectDocument: (documentId: string) => void;
   readonly onSwitchView: (viewId: WorkspaceViewId) => void;
@@ -101,7 +101,7 @@ export function createCommandPalette(deps: CommandPaletteDeps) {
             onPick: deps.onToggleFocusMode,
           });
         }
-        if (deps.isFanqieActive()) {
+        if (deps.supportsStudioViews()) {
           for (const view of VIEW_ENTRIES) {
             if (!lower || view.label.toLowerCase().includes(lower) || view.id.includes(lower)) {
               items.push({
@@ -133,8 +133,8 @@ export function createCommandPalette(deps: CommandPaletteDeps) {
         results.replaceChildren(el("p", "请输入检索词开始检索。", "muted-copy"));
         return;
       }
-      if (!deps.getProjectId() || !deps.isFanqieActive()) {
-        results.replaceChildren(el("p", "全文检索需先打开一个番茄连载小说项目。", "muted-copy"));
+      if (!deps.getProjectId() || !deps.supportsStudioViews()) {
+        results.replaceChildren(el("p", "全文检索需先打开支持多视图长篇工程的项目。", "muted-copy"));
         return;
       }
 

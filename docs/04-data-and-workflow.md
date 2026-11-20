@@ -55,6 +55,14 @@ erDiagram
   candidates ||--o| author_candidate_qa : "scores"
 ```
 
+### 4. V2.2 新增 Schema 演进表（`schema_migrations` 原子版本迁移）
+
+除核心 23 张基线表外，[author-schema.ts](../src/storage/author-schema.ts) 与 [fts.ts](../src/storage/fts.ts) 在 V2.2 原子追加：
+- **FTS5 External Content 与行号映射**：`fts_rowid_map` + `v_fts_chapters` / `v_fts_lore` / `v_fts_library` + `fts_chapters` / `fts_lore` / `fts_library`（支持 BM25 + RRF 多 Scope 防饿死排序）；
+- **连贯性记忆闭环**：`author_chapter_memory_sync`（SHA-256 变更感知）与 `author_chapter_entities`（零 Token 实体出现倒排）；
+- **技能、诊断与观察审稿**：`library_technique_cards` 扩展 `asset_kind`/`stage_bindings_json`/`references_json`、`author_project_slop_config` 与 `author_chapter_observations`；
+- **控制面与滚动规划**：`author_project_controls`（`author_intent` / `current_focus`）及 `author_acts` 扩展 `arc_goal`/`arc_summary`/`pacing_template`、`author_runs` 扩展 `context_trace`/`recovery_hints`。
+
 ---
 
 ## 二、权威写事务与幂等命令账本

@@ -5,7 +5,7 @@
     "noEmitOnError": true,
     "declaration": true,
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist/server"
   },
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules", "test", "src/client/workbench/**/*.ts", "src/client/slot.ts"]

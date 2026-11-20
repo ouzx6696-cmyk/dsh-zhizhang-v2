@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join, normalize } from "node:path";
 import { CLIENT_ENTRY_CSS, CLIENT_ENTRY_HTML, CLIENT_JS_MODULES } from "../src/client/manifest.ts";
 import { ContractError } from "../src/contracts/index.ts";
+import { writeDeliveryFile } from "../src/host/delivery-io.ts";
 import { openAuthorWorkspace } from "../src/host/workspace.ts";
 import {
   configureStorePragmas,
@@ -49,7 +50,7 @@ const workspace = openAuthorWorkspace(
   (id, contents) => {
     deliveries.set(id, contents);
     if (DATA_DIR) {
-      writeFileSync(join(DATA_DIR, "deliveries", `${id}.md`), contents, "utf8");
+      writeDeliveryFile(join(DATA_DIR, "deliveries"), id, contents);
     }
   },
   DATA_DIR

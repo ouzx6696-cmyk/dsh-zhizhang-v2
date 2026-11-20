@@ -1,15 +1,20 @@
 import { randomUUID } from "node:crypto";
+import type { RecoveryHintDto, SelectionRewriteMode } from "../contracts/workspace-dto.ts";
 import { createCandidate, stmt } from "../storage/index.ts";
 import {
+  computeRunBilling,
   estimateWritingInput,
   recommendedTokenBudget,
+  SELECTION_REWRITE_SYSTEM,
   sumUsageTuple,
   WRITER_SYSTEM,
 } from "../workflow/writing-budget.ts";
 import { WRITING_STAGE_IDS } from "../workflow/writing-stages.ts";
 import {
   count,
+  countNonWhitespace,
   invalid,
+  optionalText,
   refuse,
   requiredRow,
   text,
@@ -120,10 +125,19 @@ export function createRunService(
       if (reserved === 0) invalid("tokenLimit", "positive-budget-required");
       const id = randomUUID();
       const frozenInput = freezeWriting(current, input);
+      let contextTrace: string | null = null;
+      try {
+        const parsed = JSON.parse(frozenInput) as { contextBundle?: { report?: unknown } };
+        if (parsed.contextBundle?.report) {
+          contextTrace = JSON.stringify(parsed.contextBundle.report);
+        }
+      } catch {
+        // Non-JSON synthetic input has no trace.
+      }
       stmt(db, `
-        INSERT INTO author_runs (id, document_id, state, base_revision_id, frozen_input, reserved)
-        VALUES (?, ?, 'running', ?, ?, ?);
-      `).run(id, row.id, current.revisionId, frozenInput, reserved);
+        INSERT INTO author_runs (id, document_id, state, base_revision_id, frozen_input, reserved, context_trace)
+        VALUES (?, ?, 'running', ?, ?, ?, ?);
+      `).run(id, row.id, current.revisionId, frozenInput, reserved, contextTrace);
       ctx.event(row.projectId, "run", "run.started", { documentId: row.id, runId: id, reserved });
       return { id };
     });
@@ -170,9 +184,74 @@ export function createRunService(
         "candidate",
         current.candidateId,
       );
-      const revision = saveDraftForRow(ctx.document(row.id), candidate.body);
+      const hasMerged = input.mergedBody !== undefined;
+      if (hasMerged && typeof input.mergedBody !== "string") {
+        invalid("mergedBody", "string-required");
+      }
+      const adoptionMode =
+        input.adoptionMode === "partial" || input.adoptionMode === "full"
+          ? input.adoptionMode
+          : hasMerged
+            ? "partial"
+            : "full";
+      const targetBody = hasMerged ? (input.mergedBody as string) : candidate.body;
+      const revision = saveDraftForRow(ctx.document(row.id), targetBody);
       ctx.stage(current, "applied");
-      return revision;
+      ctx.event(row.projectId, "candidate", "candidate.adopted", {
+        documentId: row.id,
+        candidateId: current.candidateId,
+        revisionId: revision.revisionId,
+        adoptionMode,
+      });
+      return input.adoptionMode !== undefined || hasMerged ? { ...revision, adoptionMode } : revision;
+    });
+  }
+
+  function buildSelectionRewriteInput(input: Input) {
+    const documentId = text(input, "documentId");
+    const selectedText = typeof input.selectedText === "string" ? input.selectedText : "";
+    if (countNonWhitespace(selectedText) < 4) {
+      invalid("selectedText", "selection-too-short");
+    }
+    const rawMode = optionalText(input, "mode") ?? "polish";
+    if (!["polish", "expand", "dialogue", "continue", "custom"].includes(rawMode)) {
+      invalid("mode", "invalid-selection-mode");
+    }
+    const mode = rawMode as SelectionRewriteMode;
+    const provider = text(input, "provider");
+    const model = text(input, "model");
+    const reserved = input.tokenLimit === undefined ? 6_000 : count(input, "tokenLimit");
+    if (reserved === 0) invalid("tokenLimit", "positive-budget-required");
+
+    return ctx.read(() => {
+      const row = ctx.document(documentId);
+      if (ctx.isLockedDocument(row)) refuse("selection.rewrite", "revision-locked");
+      const beforeContext = typeof input.beforeContext === "string" ? input.beforeContext.slice(-400) : "";
+      const afterContext = typeof input.afterContext === "string" ? input.afterContext.slice(0, 400) : "";
+      const instruction = optionalText(input, "instruction") ?? "";
+      const mod = registry.require(row.product);
+      const selectionCtx = mod.buildSelectionContext?.(ctx, row, mode);
+
+      const prompt = JSON.stringify({
+        title: row.title,
+        mode,
+        instruction,
+        ...(selectionCtx?.extra ?? {}),
+        beforeContext,
+        selectedText,
+        afterContext,
+      });
+      return {
+        documentId: row.id,
+        projectId: row.projectId,
+        mode,
+        provider,
+        model,
+        reserved,
+        system: SELECTION_REWRITE_SYSTEM,
+        prompt,
+        cachePrefix: selectionCtx?.cachePrefix,
+      };
     });
   }
 
@@ -188,14 +267,48 @@ export function createRunService(
     return ctx.read(() => {
       const detail = ctx.run(text(input, "runId"));
       if (detail.documentId !== row.id) invalid("runId", "document-mismatch");
+      const meta = stmt(db, "SELECT context_trace AS contextTrace, recovery_hints AS recoveryHints FROM author_runs WHERE id = ?;")
+        .get(detail.id) as { contextTrace?: string | null; recoveryHints?: string | null } | undefined;
       const candidate = detail.candidateId
         ? stmt(db, "SELECT body FROM candidates WHERE candidate_id = ?;").get(detail.candidateId)
         : null;
+      const calls = generation.calls(detail.id);
+      const billing = computeRunBilling(
+        calls.map((call) => {
+          if (!call.usage) return null;
+          try {
+            const parsed = JSON.parse(call.usage) as unknown;
+            return Array.isArray(parsed) ? parsed.map((v) => Number(v)) : null;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      let contextTrace: unknown = null;
+      if (meta?.contextTrace) {
+        try {
+          contextTrace = JSON.parse(meta.contextTrace);
+        } catch {
+          contextTrace = null;
+        }
+      }
+      let recoveryHints: readonly RecoveryHintDto[] = [];
+      if (meta?.recoveryHints) {
+        try {
+          const parsed = JSON.parse(meta.recoveryHints) as unknown;
+          if (Array.isArray(parsed)) recoveryHints = parsed as RecoveryHintDto[];
+        } catch {
+          recoveryHints = [];
+        }
+      }
       return {
         ...detail,
         candidate,
         attempts: generation.history(detail.id),
-        calls: generation.calls(detail.id),
+        calls,
+        billing,
+        contextTrace,
+        recoveryHints,
       };
     });
   }
@@ -236,7 +349,10 @@ export function createRunService(
         refuse("run.generate", "run-no-longer-running");
       }
       ctx.assertRunAvailable("run.generate", row.id, current.id);
-      if (current.state === "failed") ctx.stage(current, "running");
+      if (current.state === "failed") {
+        stmt(db, "UPDATE author_runs SET recovery_hints = NULL WHERE id = ?;").run(current.id);
+        ctx.stage(current, "running");
+      }
       let attemptId: string | null = null;
       if (claim) {
         attemptId = randomUUID();
@@ -277,7 +393,12 @@ export function createRunService(
     });
   }
 
-  function finishGeneration(id: string, result: Input | null, failure: string | null) {
+  function finishGeneration(
+    id: string,
+    result: Input | null,
+    failure: string | null,
+    recoveryHints?: readonly RecoveryHintDto[],
+  ) {
     return ctx.atomic(() => {
       const attempt = generation.openAttempt(id);
       if (!attempt) return;
@@ -288,9 +409,12 @@ export function createRunService(
       const uncertain = attempt.state === "inflight";
       generation.close(id, uncertain ? "uncertain" : result ? "completed" : "failed", failure);
       if (current.state === "running" && result && !uncertain) {
+        stmt(db, "UPDATE author_runs SET recovery_hints = NULL WHERE id = ?;").run(current.id);
         return completeRun(current, row, { ...result, tokens });
       }
-      stmt(db, "UPDATE author_runs SET settled = settled + ? WHERE id = ?;").run(tokens, current.id);
+      const hintsJson = recoveryHints && recoveryHints.length > 0 ? JSON.stringify(recoveryHints) : null;
+      stmt(db, "UPDATE author_runs SET settled = settled + ?, recovery_hints = ? WHERE id = ?;")
+        .run(tokens, hintsJson, current.id);
       ctx.event(row.projectId, "run", "run.attempt", {
         runId: current.id,
         attemptId: id,
@@ -345,6 +469,7 @@ export function createRunService(
     startRun,
     handleRunLifecycle,
     adoptCandidate,
+    buildSelectionRewriteInput,
     runHistory,
     runDetail,
     reconcileRun,

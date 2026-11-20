@@ -2,7 +2,7 @@ import { ContractError } from "../contracts/errors.ts";
 import {
   createProjectionStore,
   currentSeq,
-  readTail,
+  readEvents,
   stmt,
   type CheckpointRow,
   type ProjectionStore,
@@ -227,10 +227,14 @@ function run(definition: ReadDefinition, runId: string) {
       if (event.kind === "run.attempt") {
         const stage = typeof event.stage === "string" ? event.stage : "draft.write.candidate";
         const attempt = { stage, attemptNo: state.attempts.length + 1, outcome: event.outcome };
-        const checkpoints =
-          typeof event.outputRef === "string"
-            ? [{ stage, version: 1, outputRef: event.outputRef }]
-            : state.checkpoints;
+        let checkpoints = state.checkpoints;
+        if (typeof event.outputRef === "string") {
+          const entry = { stage, version: 1, outputRef: event.outputRef };
+          const idx = state.checkpoints.findIndex((cp) => cp.stage === stage);
+          checkpoints = idx >= 0
+            ? state.checkpoints.map((cp, index) => (index === idx ? entry : cp))
+            : [...state.checkpoints, entry];
+        }
         return {
           ...state,
           checkpoints,
@@ -324,10 +328,13 @@ export interface ReadTransactionRunner {
   readonly atomic: <T>(apply: () => T) => T;
 }
 
+const REPLAY_PAGE_LIMIT = 1000;
+
 /**
  * Author read-model reader backed by durable SQLite projection checkpoints
  * (`author_read_checkpoints`) and an in-memory LRU cache. Cold opens restore
- * from the checkpoint and replay only the event-log tail via `ProjectionStore`.
+ * from the checkpoint and replay only the event-log tail via `ProjectionStore`
+ * in bounded 1000-event pages.
  */
 export function createAuthorModelReader(
   db: SqliteDatabase,
@@ -364,10 +371,19 @@ export function createAuthorModelReader(
         if (saved.length > 0 && saved[0].seq <= logHead) {
           const floor = store.restoreFloor(saved);
           if (floor !== undefined && floor >= 0) {
-            const tail = readTail(db, projectId, floor);
-            if (tail.events.length > 0 || saved[0].seq === 0) {
-              store.restore(saved, tail.events, tail.baseSeq);
+            if (saved[0].seq === 0) {
+              store.restore(saved, [], 0);
               hydratedFromCheckpoint = true;
+            } else {
+              const anchorEvents = readEvents(db, projectId, { afterSeq: floor, limit: 1 });
+              if (anchorEvents.length === 1 && anchorEvents[0].seq === saved[0].seq) {
+                store.restore(
+                  saved,
+                  [{ seq: anchorEvents[0].seq, payload: anchorEvents[0].payload }],
+                  saved[0].seq,
+                );
+                hydratedFromCheckpoint = true;
+              }
             }
           }
         }
@@ -375,8 +391,22 @@ export function createAuthorModelReader(
       }
 
       const { store, unit } = entry;
-      const result = serveReadFromLog(db, projectId, store, { definition, unit }, { afterSeq: store.seqOf() });
-      const checkpointToPersist = result.folded > 0 || hydratedFromCheckpoint
+      let totalFolded = 0;
+      let result = serveReadFromLog(db, projectId, store, { definition, unit }, {
+        afterSeq: store.seqOf(),
+        limit: REPLAY_PAGE_LIMIT,
+      });
+      totalFolded += result.folded;
+      while (store.seqOf() < logHead) {
+        result = serveReadFromLog(db, projectId, store, { definition, unit }, {
+          afterSeq: store.seqOf(),
+          limit: REPLAY_PAGE_LIMIT,
+        });
+        totalFolded += result.folded;
+      }
+
+      const finalResult = totalFolded === result.folded ? result : { ...result, folded: totalFolded };
+      const checkpointToPersist = totalFolded > 0 || (hydratedFromCheckpoint && logHead === 0)
         ? store.checkpoint()[0]
         : undefined;
 
@@ -385,7 +415,7 @@ export function createAuthorModelReader(
       if (cache.size > 256) cache.delete(cache.keys().next().value!);
 
       return {
-        result: structuredClone(result),
+        result: structuredClone(finalResult),
         checkpointToPersist,
       };
     });

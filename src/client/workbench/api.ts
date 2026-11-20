@@ -1,4 +1,4 @@
-import type { WorkspaceSnapshot } from "../../contracts/workspace-dto.ts";
+import type { WorkspaceStateResponse } from "../../contracts/workspace-dto.ts";
 
 interface ApiPacket<T> {
   readonly ok: boolean;
@@ -11,6 +11,7 @@ interface ApiPacket<T> {
 const REASON_MESSAGES: Readonly<Record<string, string>> = {
   "generation-in-progress": "该稿件已有活动任务，请先完成或取消当前任务。",
   "generation-needs-reconciliation": "上一次任务仍在结束或等待用量核对。请刷新任务查看状态。",
+  "proposal-in-progress": "同类型 AI 提案任务正在生成中，请稍候。",
   "export.conflict": "目标文件与获批稿件不同，请处理同名文件后重试。",
   "revision-locked": "该稿件已锁定，无法继续修改正文。",
   "setting-is-locked": "该编号的设定已锁定，拒绝覆盖。",
@@ -74,6 +75,6 @@ export async function apiRequest<T>(
 export async function fetchWorkspaceState(
   context: WorkbenchRequestContext,
   ifSequence?: number,
-): Promise<WorkspaceSnapshot> {
-  return apiRequest<WorkspaceSnapshot>(context, undefined, undefined, ifSequence);
+): Promise<WorkspaceStateResponse> {
+  return apiRequest<WorkspaceStateResponse>(context, undefined, undefined, ifSequence);
 }

@@ -13,6 +13,8 @@ interface StoredDraft extends DraftEntry {
   readonly owner?: string;
 }
 
+const MAX_VAULT_CACHE = 256;
+
 /**
  * Manages browser-local unsaved draft persistence (`sessionStorage` + owner-scoped
  * `localStorage`) so slow saves, page reloads, and multi-tab edits never lose text.
@@ -23,6 +25,14 @@ export function createDraftVault(onStorageWarning: (message: string) => void) {
   let storageUnavailable = false;
 
   const keyFor = (id: string) => `zhizhang:draft:${id}`;
+
+  function cacheSet(id: string, entry: DraftEntry | null): void {
+    cache.delete(id);
+    cache.set(id, entry);
+    if (cache.size > MAX_VAULT_CACHE) {
+      cache.delete(cache.keys().next().value!);
+    }
+  }
 
   function read(id: string): DraftEntry | null {
     if (cache.has(id)) return cache.get(id) ?? null;
@@ -41,7 +51,7 @@ export function createDraftVault(onStorageWarning: (message: string) => void) {
     } catch {
       draft = null;
     }
-    cache.set(id, draft);
+    cacheSet(id, draft);
     return draft;
   }
 
@@ -50,11 +60,15 @@ export function createDraftVault(onStorageWarning: (message: string) => void) {
     if (draft?.body === previous?.body && draft?.revisionId === previous?.revisionId && !storageUnavailable) {
       return;
     }
-    cache.set(id, draft);
+    cacheSet(id, draft);
     const key = keyFor(id);
     let stored = false;
     try {
-      sessionStorage.setItem(key, JSON.stringify(draft));
+      if (draft) {
+        sessionStorage.setItem(key, JSON.stringify(draft));
+      } else {
+        sessionStorage.removeItem(key);
+      }
       stored = true;
     } catch {
       // Fall through to localStorage.

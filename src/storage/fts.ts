@@ -1,5 +1,6 @@
 import type { SqliteDatabase } from "./driver.ts";
 import { stmt } from "./stmt-pool.ts";
+import { withWriteTx } from "./tx.ts";
 
 export type FtsSearchScope = "chapter" | "lore" | "deconstruction" | "technique";
 
@@ -12,39 +13,322 @@ export interface FtsSearchHit {
 }
 
 const FTS_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS fts_rowid_map (
+    fts_rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    entity_key TEXT NOT NULL,
+    item_scope TEXT NOT NULL DEFAULT 'project',
+    indexed INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(scope, project_id, entity_key)
+  );
+  CREATE INDEX IF NOT EXISTS fts_rowid_map_lookup ON fts_rowid_map(scope, entity_key);
+  CREATE INDEX IF NOT EXISTS fts_rowid_map_project ON fts_rowid_map(scope, project_id);
+
+  CREATE VIEW IF NOT EXISTS v_fts_chapters AS
+    SELECT m.fts_rowid AS fts_rowid, a.title, a.summary, COALESCE(r.body, '') AS body
+    FROM fts_rowid_map m
+    JOIN author_documents a ON m.scope = 'chapter' AND m.project_id = a.project_id AND m.entity_key = a.id
+    JOIN documents d ON d.document_id = a.id
+    LEFT JOIN revisions r ON r.revision_id = d.current_revision_id
+    WHERE m.indexed = 1;
+
+  CREATE VIEW IF NOT EXISTS v_fts_lore AS
+    SELECT m.fts_rowid AS fts_rowid, l.entity_name,
+      COALESCE(json_extract(l.value, '$.note'), '') AS note,
+      COALESCE(json_extract(l.value, '$.source'), '') AS source
+    FROM fts_rowid_map m
+    JOIN author_lore_current l ON m.scope = 'lore' AND m.project_id = l.project_id AND m.entity_key = l.fact_id
+    WHERE m.indexed = 1;
+
+  CREATE VIEW IF NOT EXISTS v_fts_library AS
+    SELECT m.fts_rowid AS fts_rowid, d.title,
+      COALESCE(d.source_book, '') || char(10) || COALESCE(d.genre, '') || char(10) || COALESCE(d.tags_json, '[]') || char(10) ||
+      COALESCE(d.hook_analysis, '') || char(10) || COALESCE(d.conflict_beats, '') || char(10) ||
+      COALESCE(d.payoff_rhythm, '') || char(10) || COALESCE(d.prose_notes, '') || char(10) || COALESCE(d.excerpt, '') AS body
+    FROM fts_rowid_map m
+    JOIN library_deconstructions d ON m.scope = 'deconstruction' AND m.entity_key = d.id AND d.status = 'approved'
+    WHERE m.indexed = 1
+    UNION ALL
+    SELECT m.fts_rowid AS fts_rowid, t.title,
+      COALESCE(t.category, '') || char(10) || COALESCE(t.scene_tags_json, '[]') || char(10) || COALESCE(t.trigger_when, '') || char(10) ||
+      COALESCE(t.execution_steps, '') || char(10) || COALESCE(t.constraints, '') || char(10) ||
+      COALESCE(t.anti_patterns, '') || char(10) || COALESCE(t.example_excerpt, '') AS body
+    FROM fts_rowid_map m
+    JOIN library_technique_cards t ON m.scope = 'technique' AND m.entity_key = t.id AND t.status = 'approved'
+    WHERE m.indexed = 1;
+
   CREATE VIRTUAL TABLE IF NOT EXISTS fts_chapters USING fts5(
-    project_id UNINDEXED,
-    document_id UNINDEXED,
     title,
     summary,
     body,
+    content='v_fts_chapters',
+    content_rowid='fts_rowid',
     tokenize='trigram'
   );
   CREATE VIRTUAL TABLE IF NOT EXISTS fts_lore USING fts5(
-    project_id UNINDEXED,
-    fact_id UNINDEXED,
     entity_name,
     note,
     source,
+    content='v_fts_lore',
+    content_rowid='fts_rowid',
     tokenize='trigram'
   );
   CREATE VIRTUAL TABLE IF NOT EXISTS fts_library USING fts5(
-    item_id UNINDEXED,
-    item_kind UNINDEXED,
-    scope UNINDEXED,
-    project_id UNINDEXED,
     title,
     body,
+    content='v_fts_library',
+    content_rowid='fts_rowid',
     tokenize='trigram'
   );
+
+  CREATE TRIGGER IF NOT EXISTS tr_fts_doc_rev_bu BEFORE UPDATE OF current_revision_id ON documents
+  WHEN OLD.current_revision_id IS NOT NEW.current_revision_id
+  BEGIN
+    INSERT INTO fts_chapters(fts_chapters, rowid, title, summary, body)
+    SELECT 'delete', m.fts_rowid, a.title, a.summary, COALESCE(r.body, '')
+    FROM fts_rowid_map m
+    JOIN author_documents a ON a.id = OLD.document_id AND m.project_id = a.project_id
+    LEFT JOIN revisions r ON r.revision_id = OLD.current_revision_id
+    WHERE m.scope = 'chapter' AND m.entity_key = OLD.document_id AND m.indexed = 1;
+    UPDATE fts_rowid_map SET indexed = 0 WHERE scope = 'chapter' AND entity_key = OLD.document_id AND indexed = 1;
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS tr_fts_doc_rev_au AFTER UPDATE OF current_revision_id ON documents
+  WHEN OLD.current_revision_id IS NOT NEW.current_revision_id
+  BEGIN
+    UPDATE fts_rowid_map SET indexed = 1 WHERE scope = 'chapter' AND entity_key = NEW.document_id AND indexed = 0;
+    INSERT INTO fts_chapters(rowid, title, summary, body)
+    SELECT fts_rowid, title, summary, body FROM v_fts_chapters
+    WHERE fts_rowid IN (SELECT fts_rowid FROM fts_rowid_map WHERE scope = 'chapter' AND entity_key = NEW.document_id AND indexed = 1);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS tr_fts_adoc_bu BEFORE UPDATE OF title, summary ON author_documents
+  WHEN OLD.title IS NOT NEW.title OR OLD.summary IS NOT NEW.summary
+  BEGIN
+    INSERT INTO fts_chapters(fts_chapters, rowid, title, summary, body)
+    SELECT 'delete', m.fts_rowid, OLD.title, OLD.summary, COALESCE(r.body, '')
+    FROM fts_rowid_map m
+    JOIN documents d ON d.document_id = OLD.id
+    LEFT JOIN revisions r ON r.revision_id = d.current_revision_id
+    WHERE m.scope = 'chapter' AND m.project_id = OLD.project_id AND m.entity_key = OLD.id AND m.indexed = 1;
+    UPDATE fts_rowid_map SET indexed = 0 WHERE scope = 'chapter' AND project_id = OLD.project_id AND entity_key = OLD.id AND indexed = 1;
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS tr_fts_adoc_au AFTER UPDATE OF title, summary ON author_documents
+  WHEN OLD.title IS NOT NEW.title OR OLD.summary IS NOT NEW.summary
+  BEGIN
+    UPDATE fts_rowid_map SET indexed = 1 WHERE scope = 'chapter' AND project_id = NEW.project_id AND entity_key = NEW.id AND indexed = 0;
+    INSERT INTO fts_chapters(rowid, title, summary, body)
+    SELECT fts_rowid, title, summary, body FROM v_fts_chapters
+    WHERE fts_rowid IN (SELECT fts_rowid FROM fts_rowid_map WHERE scope = 'chapter' AND project_id = NEW.project_id AND entity_key = NEW.id AND indexed = 1);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS tr_fts_adoc_bd BEFORE DELETE ON author_documents
+  BEGIN
+    INSERT INTO fts_chapters(fts_chapters, rowid, title, summary, body)
+    SELECT 'delete', m.fts_rowid, OLD.title, OLD.summary, COALESCE(r.body, '')
+    FROM fts_rowid_map m
+    JOIN documents d ON d.document_id = OLD.id
+    LEFT JOIN revisions r ON r.revision_id = d.current_revision_id
+    WHERE m.scope = 'chapter' AND m.project_id = OLD.project_id AND m.entity_key = OLD.id AND m.indexed = 1;
+    DELETE FROM fts_rowid_map WHERE scope = 'chapter' AND project_id = OLD.project_id AND entity_key = OLD.id;
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS tr_fts_lore_bu BEFORE UPDATE OF entity_name, value ON author_lore_current
+  BEGIN
+    INSERT INTO fts_lore(fts_lore, rowid, entity_name, note, source)
+    SELECT 'delete', m.fts_rowid, OLD.entity_name,
+      COALESCE(json_extract(OLD.value, '$.note'), ''),
+      COALESCE(json_extract(OLD.value, '$.source'), '')
+    FROM fts_rowid_map m
+    WHERE m.scope = 'lore' AND m.project_id = OLD.project_id AND m.entity_key = OLD.fact_id AND m.indexed = 1;
+    UPDATE fts_rowid_map SET indexed = 0 WHERE scope = 'lore' AND project_id = OLD.project_id AND entity_key = OLD.fact_id AND indexed = 1;
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS tr_fts_lore_au AFTER UPDATE OF entity_name, value ON author_lore_current
+  BEGIN
+    UPDATE fts_rowid_map SET indexed = 1 WHERE scope = 'lore' AND project_id = NEW.project_id AND entity_key = NEW.fact_id AND indexed = 0;
+    INSERT INTO fts_lore(rowid, entity_name, note, source)
+    SELECT fts_rowid, entity_name, note, source FROM v_fts_lore
+    WHERE fts_rowid IN (SELECT fts_rowid FROM fts_rowid_map WHERE scope = 'lore' AND project_id = NEW.project_id AND entity_key = NEW.fact_id AND indexed = 1);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS tr_fts_lore_bd BEFORE DELETE ON author_lore_current
+  BEGIN
+    INSERT INTO fts_lore(fts_lore, rowid, entity_name, note, source)
+    SELECT 'delete', m.fts_rowid, OLD.entity_name,
+      COALESCE(json_extract(OLD.value, '$.note'), ''),
+      COALESCE(json_extract(OLD.value, '$.source'), '')
+    FROM fts_rowid_map m
+    WHERE m.scope = 'lore' AND m.project_id = OLD.project_id AND m.entity_key = OLD.fact_id AND m.indexed = 1;
+    DELETE FROM fts_rowid_map WHERE scope = 'lore' AND project_id = OLD.project_id AND entity_key = OLD.fact_id;
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS tr_fts_dec_bd BEFORE DELETE ON library_deconstructions
+  BEGIN
+    INSERT INTO fts_library(fts_library, rowid, title, body)
+    SELECT 'delete', m.fts_rowid, OLD.title,
+      COALESCE(OLD.source_book, '') || char(10) || COALESCE(OLD.genre, '') || char(10) || COALESCE(OLD.tags_json, '[]') || char(10) ||
+      COALESCE(OLD.hook_analysis, '') || char(10) || COALESCE(OLD.conflict_beats, '') || char(10) ||
+      COALESCE(OLD.payoff_rhythm, '') || char(10) || COALESCE(OLD.prose_notes, '') || char(10) || COALESCE(OLD.excerpt, '')
+    FROM fts_rowid_map m
+    WHERE m.scope = 'deconstruction' AND m.entity_key = OLD.id AND m.indexed = 1;
+    DELETE FROM fts_rowid_map WHERE scope = 'deconstruction' AND entity_key = OLD.id;
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS tr_fts_dec_bu BEFORE UPDATE ON library_deconstructions
+  BEGIN
+    INSERT INTO fts_library(fts_library, rowid, title, body)
+    SELECT 'delete', m.fts_rowid, OLD.title,
+      COALESCE(OLD.source_book, '') || char(10) || COALESCE(OLD.genre, '') || char(10) || COALESCE(OLD.tags_json, '[]') || char(10) ||
+      COALESCE(OLD.hook_analysis, '') || char(10) || COALESCE(OLD.conflict_beats, '') || char(10) ||
+      COALESCE(OLD.payoff_rhythm, '') || char(10) || COALESCE(OLD.prose_notes, '') || char(10) || COALESCE(OLD.excerpt, '')
+    FROM fts_rowid_map m
+    WHERE m.scope = 'deconstruction' AND m.entity_key = OLD.id AND m.indexed = 1;
+    UPDATE fts_rowid_map SET indexed = 0 WHERE scope = 'deconstruction' AND entity_key = OLD.id AND indexed = 1;
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS tr_fts_dec_au AFTER UPDATE ON library_deconstructions
+  BEGIN
+    UPDATE fts_rowid_map SET indexed = CASE WHEN NEW.status = 'approved' THEN 1 ELSE 0 END
+    WHERE scope = 'deconstruction' AND entity_key = NEW.id AND indexed = 0;
+    INSERT INTO fts_library(rowid, title, body)
+    SELECT fts_rowid, title, body FROM v_fts_library
+    WHERE fts_rowid IN (SELECT fts_rowid FROM fts_rowid_map WHERE scope = 'deconstruction' AND entity_key = NEW.id AND indexed = 1);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS tr_fts_tech_bd BEFORE DELETE ON library_technique_cards
+  BEGIN
+    INSERT INTO fts_library(fts_library, rowid, title, body)
+    SELECT 'delete', m.fts_rowid, OLD.title,
+      COALESCE(OLD.category, '') || char(10) || COALESCE(OLD.scene_tags_json, '[]') || char(10) || COALESCE(OLD.trigger_when, '') || char(10) ||
+      COALESCE(OLD.execution_steps, '') || char(10) || COALESCE(OLD.constraints, '') || char(10) ||
+      COALESCE(OLD.anti_patterns, '') || char(10) || COALESCE(OLD.example_excerpt, '')
+    FROM fts_rowid_map m
+    WHERE m.scope = 'technique' AND m.entity_key = OLD.id AND m.indexed = 1;
+    DELETE FROM fts_rowid_map WHERE scope = 'technique' AND entity_key = OLD.id;
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS tr_fts_tech_bu BEFORE UPDATE ON library_technique_cards
+  BEGIN
+    INSERT INTO fts_library(fts_library, rowid, title, body)
+    SELECT 'delete', m.fts_rowid, OLD.title,
+      COALESCE(OLD.category, '') || char(10) || COALESCE(OLD.scene_tags_json, '[]') || char(10) || COALESCE(OLD.trigger_when, '') || char(10) ||
+      COALESCE(OLD.execution_steps, '') || char(10) || COALESCE(OLD.constraints, '') || char(10) ||
+      COALESCE(OLD.anti_patterns, '') || char(10) || COALESCE(OLD.example_excerpt, '')
+    FROM fts_rowid_map m
+    WHERE m.scope = 'technique' AND m.entity_key = OLD.id AND m.indexed = 1;
+    UPDATE fts_rowid_map SET indexed = 0 WHERE scope = 'technique' AND entity_key = OLD.id AND indexed = 1;
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS tr_fts_tech_au AFTER UPDATE ON library_technique_cards
+  BEGIN
+    UPDATE fts_rowid_map SET indexed = CASE WHEN NEW.status = 'approved' THEN 1 ELSE 0 END
+    WHERE scope = 'technique' AND entity_key = NEW.id AND indexed = 0;
+    INSERT INTO fts_library(rowid, title, body)
+    SELECT fts_rowid, title, body FROM v_fts_library
+    WHERE fts_rowid IN (SELECT fts_rowid FROM fts_rowid_map WHERE scope = 'technique' AND entity_key = NEW.id AND indexed = 1);
+  END;
 `;
 
-/** Creates FTS5 trigram virtual tables idempotently. */
-export function createFtsSchema(db: SqliteDatabase): void {
-  db.exec(FTS_SCHEMA);
+function masterObjectSql(db: SqliteDatabase, type: "table" | "view", name: string): string | null {
+  const row = stmt(db, "SELECT sql FROM sqlite_master WHERE type = ? AND name = ?;").get(type, name) as
+    | { sql?: string | null }
+    | undefined;
+  return typeof row?.sql === "string" ? row.sql : null;
 }
 
-/** Upserts a chapter's searchable title, summary, and current draft body into `fts_chapters`. */
+function backfillAllFtsMapsAndRebuild(db: SqliteDatabase): void {
+  db.exec(`
+    INSERT OR IGNORE INTO fts_rowid_map (scope, project_id, entity_key, item_scope, indexed)
+    SELECT 'chapter', project_id, id, 'project', 1 FROM author_documents;
+
+    INSERT OR IGNORE INTO fts_rowid_map (scope, project_id, entity_key, item_scope, indexed)
+    SELECT 'lore', project_id, fact_id, 'project', 1 FROM author_lore_current;
+
+    INSERT OR IGNORE INTO fts_rowid_map (scope, project_id, entity_key, item_scope, indexed)
+    SELECT 'deconstruction', COALESCE(project_id, ''), id, scope, 1
+    FROM library_deconstructions WHERE status = 'approved';
+
+    INSERT OR IGNORE INTO fts_rowid_map (scope, project_id, entity_key, item_scope, indexed)
+    SELECT 'technique', COALESCE(project_id, ''), id, scope, 1
+    FROM library_technique_cards WHERE status = 'approved';
+
+    UPDATE fts_rowid_map SET indexed = 1 WHERE indexed = 0;
+
+    INSERT INTO fts_chapters(fts_chapters) VALUES('rebuild');
+    INSERT INTO fts_lore(fts_lore) VALUES('rebuild');
+    INSERT INTO fts_library(fts_library) VALUES('rebuild');
+  `);
+}
+
+/**
+ * Creates External Content FTS5 trigram virtual tables, `fts_rowid_map`, read-only
+ * views, and incremental maintenance triggers idempotently, migrating legacy v2.1.0
+ * standalone FTS5 tables automatically when detected.
+ */
+export function createFtsSchema(db: SqliteDatabase): void {
+  const chaptersSql = masterObjectSql(db, "table", "fts_chapters");
+  const loreSql = masterObjectSql(db, "table", "fts_lore");
+  const librarySql = masterObjectSql(db, "table", "fts_library");
+  const viewsMissing =
+    !masterObjectSql(db, "view", "v_fts_chapters") ||
+    !masterObjectSql(db, "view", "v_fts_lore") ||
+    !masterObjectSql(db, "view", "v_fts_library");
+  const legacyDetected =
+    (chaptersSql !== null && !chaptersSql.includes("v_fts_chapters")) ||
+    (loreSql !== null && !loreSql.includes("v_fts_lore")) ||
+    (librarySql !== null && !librarySql.includes("v_fts_library")) ||
+    (chaptersSql !== null && viewsMissing);
+
+  withWriteTx(db, () => {
+    if (legacyDetected) {
+      db.exec(`
+        DROP TABLE IF EXISTS fts_chapters;
+        DROP TABLE IF EXISTS fts_lore;
+        DROP TABLE IF EXISTS fts_library;
+        DROP VIEW IF EXISTS v_fts_chapters;
+        DROP VIEW IF EXISTS v_fts_lore;
+        DROP VIEW IF EXISTS v_fts_library;
+      `);
+    }
+    db.exec(FTS_SCHEMA);
+    if (legacyDetected) {
+      backfillAllFtsMapsAndRebuild(db);
+    }
+  });
+}
+
+function ensureMappingRow(
+  db: SqliteDatabase,
+  scope: FtsSearchScope,
+  projectId: string,
+  entityKey: string,
+  itemScope: string,
+): { readonly ftsRowid: number; readonly action: "insert" | "noop" } {
+  const existing = stmt(db, `
+    SELECT fts_rowid AS ftsRowid, indexed
+    FROM fts_rowid_map
+    WHERE scope = ? AND project_id = ? AND entity_key = ?;
+  `).get(scope, projectId, entityKey) as { ftsRowid: number; indexed: number } | undefined;
+
+  if (!existing) {
+    const res = stmt(db, `
+      INSERT INTO fts_rowid_map (scope, project_id, entity_key, item_scope, indexed)
+      VALUES (?, ?, ?, ?, 1);
+    `).run(scope, projectId, entityKey, itemScope);
+    return { ftsRowid: Number(res.lastInsertRowid), action: "insert" };
+  }
+  if (existing.indexed === 0) {
+    stmt(db, "UPDATE fts_rowid_map SET indexed = 1, item_scope = ? WHERE fts_rowid = ?;")
+      .run(itemScope, existing.ftsRowid);
+    return { ftsRowid: existing.ftsRowid, action: "insert" };
+  }
+  return { ftsRowid: existing.ftsRowid, action: "noop" };
+}
+
+/** Ensures a chapter row is registered and indexed in `fts_chapters`. */
 export function syncChapterFts(
   db: SqliteDatabase,
   entry: {
@@ -55,15 +339,15 @@ export function syncChapterFts(
     readonly body: string;
   },
 ): void {
-  stmt(db, "DELETE FROM fts_chapters WHERE project_id = ? AND document_id = ?;")
-    .run(entry.projectId, entry.documentId);
+  const mapped = ensureMappingRow(db, "chapter", entry.projectId, entry.documentId, "project");
+  if (mapped.action === "noop") return;
   stmt(db, `
-    INSERT INTO fts_chapters (project_id, document_id, title, summary, body)
-    VALUES (?, ?, ?, ?, ?);
-  `).run(entry.projectId, entry.documentId, entry.title, entry.summary, entry.body);
+    INSERT INTO fts_chapters(rowid, title, summary, body)
+    SELECT fts_rowid, title, summary, body FROM v_fts_chapters WHERE fts_rowid = ?;
+  `).run(mapped.ftsRowid);
 }
 
-/** Upserts an approved lore entry into `fts_lore`. */
+/** Ensures an approved lore entry is registered and indexed in `fts_lore`. */
 export function syncLoreFts(
   db: SqliteDatabase,
   entry: {
@@ -74,15 +358,15 @@ export function syncLoreFts(
     readonly source: string;
   },
 ): void {
-  stmt(db, "DELETE FROM fts_lore WHERE project_id = ? AND fact_id = ?;")
-    .run(entry.projectId, entry.factId);
+  const mapped = ensureMappingRow(db, "lore", entry.projectId, entry.factId, "project");
+  if (mapped.action === "noop") return;
   stmt(db, `
-    INSERT INTO fts_lore (project_id, fact_id, entity_name, note, source)
-    VALUES (?, ?, ?, ?, ?);
-  `).run(entry.projectId, entry.factId, entry.entityName, entry.note, entry.source);
+    INSERT INTO fts_lore(rowid, entity_name, note, source)
+    SELECT fts_rowid, entity_name, note, source FROM v_fts_lore WHERE fts_rowid = ?;
+  `).run(mapped.ftsRowid);
 }
 
-/** Upserts a deconstruction sample or technique card into `fts_library`. */
+/** Ensures an approved deconstruction sample or technique card is registered and indexed in `fts_library`. */
 export function syncLibraryFts(
   db: SqliteDatabase,
   entry: {
@@ -94,53 +378,104 @@ export function syncLibraryFts(
     readonly body: string;
   },
 ): void {
-  stmt(db, "DELETE FROM fts_library WHERE item_id = ? AND item_kind = ?;")
-    .run(entry.itemId, entry.itemKind);
+  const mapped = ensureMappingRow(db, entry.itemKind, entry.projectId ?? "", entry.itemId, entry.scope);
+  if (mapped.action === "noop") return;
   stmt(db, `
-    INSERT INTO fts_library (item_id, item_kind, scope, project_id, title, body)
-    VALUES (?, ?, ?, ?, ?, ?);
-  `).run(entry.itemId, entry.itemKind, entry.scope, entry.projectId ?? "", entry.title, entry.body);
+    INSERT INTO fts_library(rowid, title, body)
+    SELECT fts_rowid, title, body FROM v_fts_library WHERE fts_rowid = ?;
+  `).run(mapped.ftsRowid);
 }
 
-/** Removes a library entry from `fts_library`. */
+/** Removes a library entry from `fts_library` and `fts_rowid_map` if triggers have not already deleted it. */
 export function deleteLibraryFts(
   db: SqliteDatabase,
   itemId: string,
   itemKind: "deconstruction" | "technique",
 ): void {
-  stmt(db, "DELETE FROM fts_library WHERE item_id = ? AND item_kind = ?;").run(itemId, itemKind);
+  const rows = stmt(db, `
+    SELECT fts_rowid AS ftsRowid, indexed
+    FROM fts_rowid_map
+    WHERE scope = ? AND entity_key = ?;
+  `).all(itemKind, itemId) as readonly { ftsRowid: number; indexed: number }[];
+  for (const row of rows) {
+    if (row.indexed === 1) {
+      stmt(db, `
+        INSERT INTO fts_library(fts_library, rowid, title, body)
+        SELECT 'delete', fts_rowid, title, body FROM v_fts_library WHERE fts_rowid = ?;
+      `).run(row.ftsRowid);
+    }
+    stmt(db, "DELETE FROM fts_rowid_map WHERE fts_rowid = ?;").run(row.ftsRowid);
+  }
 }
 
-/** Rebuilds FTS indexes for one project from authoritative base tables. */
+/** Reconciles `fts_rowid_map` and rebuilds chapters, lore, and library FTS5 indexes. */
 export function rebuildProjectFts(db: SqliteDatabase, projectId: string): void {
-  stmt(db, "DELETE FROM fts_chapters WHERE project_id = ?;").run(projectId);
-  const chapters = stmt(db, `
-    SELECT a.id AS documentId, a.title, a.summary, COALESCE(r.body, '') AS body
-    FROM author_documents a
-    JOIN documents d ON d.document_id = a.id
-    LEFT JOIN revisions r ON r.revision_id = d.current_revision_id
-    WHERE a.project_id = ?;
-  `).all(projectId) as readonly { documentId: string; title: string; summary: string; body: string }[];
-  for (const ch of chapters) {
-    syncChapterFts(db, { projectId, ...ch });
-  }
+  withWriteTx(db, () => {
+    stmt(db, `
+      DELETE FROM fts_rowid_map
+      WHERE scope = 'chapter' AND project_id = ?
+        AND entity_key NOT IN (SELECT id FROM author_documents WHERE project_id = ?);
+    `).run(projectId, projectId);
+    stmt(db, `
+      INSERT OR IGNORE INTO fts_rowid_map (scope, project_id, entity_key, item_scope, indexed)
+      SELECT 'chapter', project_id, id, 'project', 1 FROM author_documents WHERE project_id = ?;
+    `).run(projectId);
+    stmt(db, "UPDATE fts_rowid_map SET indexed = 1 WHERE scope = 'chapter' AND project_id = ?;").run(projectId);
 
-  stmt(db, "DELETE FROM fts_lore WHERE project_id = ?;").run(projectId);
-  const loreRows = stmt(db, `
-    SELECT fact_id AS factId, entity_name AS entityName, value
-    FROM author_lore_current
-    WHERE project_id = ?;
-  `).all(projectId) as readonly { factId: string; entityName: string; value: string }[];
-  for (const row of loreRows) {
-    const parsed = JSON.parse(row.value) as { note?: string; source?: string };
-    syncLoreFts(db, {
-      projectId,
-      factId: row.factId,
-      entityName: row.entityName,
-      note: parsed.note ?? "",
-      source: parsed.source ?? "",
-    });
-  }
+    stmt(db, `
+      DELETE FROM fts_rowid_map
+      WHERE scope = 'lore' AND project_id = ?
+        AND entity_key NOT IN (SELECT fact_id FROM author_lore_current WHERE project_id = ?);
+    `).run(projectId, projectId);
+    stmt(db, `
+      INSERT OR IGNORE INTO fts_rowid_map (scope, project_id, entity_key, item_scope, indexed)
+      SELECT 'lore', project_id, fact_id, 'project', 1 FROM author_lore_current WHERE project_id = ?;
+    `).run(projectId);
+    stmt(db, "UPDATE fts_rowid_map SET indexed = 1 WHERE scope = 'lore' AND project_id = ?;").run(projectId);
+
+    stmt(db, `
+      DELETE FROM fts_rowid_map
+      WHERE scope = 'deconstruction'
+        AND entity_key NOT IN (SELECT id FROM library_deconstructions WHERE status = 'approved');
+    `).run();
+    stmt(db, `
+      INSERT OR IGNORE INTO fts_rowid_map (scope, project_id, entity_key, item_scope, indexed)
+      SELECT 'deconstruction', COALESCE(project_id, ''), id, scope, 1
+      FROM library_deconstructions
+      WHERE status = 'approved' AND (scope = 'global' OR project_id = ?);
+    `).run(projectId);
+
+    stmt(db, `
+      DELETE FROM fts_rowid_map
+      WHERE scope = 'technique'
+        AND entity_key NOT IN (SELECT id FROM library_technique_cards WHERE status = 'approved');
+    `).run();
+    stmt(db, `
+      INSERT OR IGNORE INTO fts_rowid_map (scope, project_id, entity_key, item_scope, indexed)
+      SELECT 'technique', COALESCE(project_id, ''), id, scope, 1
+      FROM library_technique_cards
+      WHERE status = 'approved' AND (scope = 'global' OR project_id = ?);
+    `).run(projectId);
+    stmt(db, `
+      UPDATE fts_rowid_map SET indexed = 1
+      WHERE scope IN ('deconstruction', 'technique') AND (item_scope = 'global' OR project_id = ?);
+    `).run(projectId);
+
+    db.exec(`
+      INSERT INTO fts_chapters(fts_chapters) VALUES('rebuild');
+      INSERT INTO fts_lore(fts_lore) VALUES('rebuild');
+      INSERT INTO fts_library(fts_library) VALUES('rebuild');
+    `);
+  });
+}
+
+/** Verifies structural integrity of all three External Content FTS5 tables against their views. */
+export function verifyFtsIntegrity(db: SqliteDatabase): void {
+  db.exec(`
+    INSERT INTO fts_chapters(fts_chapters) VALUES('integrity-check');
+    INSERT INTO fts_lore(fts_lore) VALUES('integrity-check');
+    INSERT INTO fts_library(fts_library) VALUES('integrity-check');
+  `);
 }
 
 function escapeFtsPhrase(query: string): string {
@@ -159,10 +494,179 @@ function makePreviewSnippet(text: string, needle: string): string {
   return `${start > 0 ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
 }
 
+function queryChapterScopeHits(
+  db: SqliteDatabase,
+  projectId: string,
+  needle: string,
+  useFts: boolean,
+  ftsQuery: string,
+  likeQuery: string,
+  limit: number,
+): FtsSearchHit[] {
+  const rows = useFts
+    ? (stmt(db, `
+        SELECT m.entity_key AS id, v.title,
+          snippet(fts_chapters, 2, '[', ']', '…', 14) AS bodySnip,
+          snippet(fts_chapters, 1, '[', ']', '…', 14) AS sumSnip
+        FROM fts_chapters
+        JOIN fts_rowid_map m ON m.fts_rowid = fts_chapters.rowid AND m.scope = 'chapter'
+        JOIN v_fts_chapters v ON v.fts_rowid = fts_chapters.rowid
+        WHERE m.project_id = ? AND fts_chapters MATCH ?
+        ORDER BY bm25(fts_chapters, 6.0, 3.0, 1.0) ASC
+        LIMIT ?;
+      `).all(projectId, ftsQuery, limit) as readonly {
+        id: string;
+        title: string;
+        bodySnip: string;
+        sumSnip: string;
+      }[])
+    : (stmt(db, `
+        SELECT a.id, a.title, a.summary AS sumSnip, COALESCE(r.body, '') AS rawBody
+        FROM author_documents a
+        JOIN documents d ON d.document_id = a.id
+        LEFT JOIN revisions r ON r.revision_id = d.current_revision_id
+        WHERE a.project_id = ?
+          AND (a.title LIKE ? ESCAPE '\\' OR a.summary LIKE ? ESCAPE '\\' OR COALESCE(r.body, '') LIKE ? ESCAPE '\\')
+        ORDER BY CASE WHEN a.title LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END ASC, a.rowid ASC
+        LIMIT ?;
+      `).all(projectId, likeQuery, likeQuery, likeQuery, likeQuery, limit) as readonly {
+        id: string;
+        title: string;
+        sumSnip: string;
+        rawBody: string;
+      }[]).map((row) => ({
+        id: row.id,
+        title: row.title,
+        sumSnip: row.sumSnip,
+        bodySnip: makePreviewSnippet(row.rawBody || row.sumSnip || row.title, needle),
+      }));
+  return rows.map((row) => ({
+    scope: "chapter",
+    id: row.id,
+    title: row.title || "未命名章节",
+    subtitle: "章节正文 / 摘要",
+    snippet: row.bodySnip || row.sumSnip || row.title,
+  }));
+}
+
+function queryLoreScopeHits(
+  db: SqliteDatabase,
+  projectId: string,
+  needle: string,
+  useFts: boolean,
+  ftsQuery: string,
+  likeQuery: string,
+  limit: number,
+): FtsSearchHit[] {
+  const rows = useFts
+    ? (stmt(db, `
+        SELECT m.entity_key AS id, v.entity_name AS entityName,
+          snippet(fts_lore, 1, '[', ']', '…', 14) AS snip
+        FROM fts_lore
+        JOIN fts_rowid_map m ON m.fts_rowid = fts_lore.rowid AND m.scope = 'lore'
+        JOIN v_fts_lore v ON v.fts_rowid = fts_lore.rowid
+        WHERE m.project_id = ? AND fts_lore MATCH ?
+        ORDER BY bm25(fts_lore, 5.0, 2.0, 1.0) ASC
+        LIMIT ?;
+      `).all(projectId, ftsQuery, limit) as readonly { id: string; entityName: string; snip: string }[])
+    : (stmt(db, `
+        SELECT fact_id AS id, entity_name AS entityName, value
+        FROM author_lore_current
+        WHERE project_id = ? AND (fact_id LIKE ? ESCAPE '\\' OR entity_name LIKE ? ESCAPE '\\' OR value LIKE ? ESCAPE '\\')
+        ORDER BY CASE WHEN entity_name LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END ASC, decided_seq DESC
+        LIMIT ?;
+      `).all(projectId, likeQuery, likeQuery, likeQuery, likeQuery, limit) as readonly {
+        id: string;
+        entityName: string;
+        value: string;
+      }[]).map((row) => {
+        const parsed = JSON.parse(row.value) as { note?: string };
+        return {
+          id: row.id,
+          entityName: row.entityName,
+          snip: makePreviewSnippet(parsed.note ?? row.id, needle),
+        };
+      });
+  return rows.map((row) => ({
+    scope: "lore",
+    id: row.id,
+    title: row.entityName ? `${row.entityName} (${row.id})` : row.id,
+    subtitle: "动态设定库",
+    snippet: row.snip,
+  }));
+}
+
+function queryLibraryScopeHits(
+  db: SqliteDatabase,
+  itemKind: "deconstruction" | "technique",
+  projectId: string,
+  needle: string,
+  useFts: boolean,
+  ftsQuery: string,
+  likeQuery: string,
+  limit: number,
+): FtsSearchHit[] {
+  const rows = useFts
+    ? (stmt(db, `
+        SELECT m.entity_key AS id, m.item_scope AS scope, v.title,
+          snippet(fts_library, 1, '[', ']', '…', 14) AS snip
+        FROM fts_library
+        JOIN fts_rowid_map m ON m.fts_rowid = fts_library.rowid AND m.scope = ?
+        JOIN v_fts_library v ON v.fts_rowid = fts_library.rowid
+        WHERE (m.item_scope = 'global' OR m.project_id = ?) AND fts_library MATCH ?
+        ORDER BY bm25(fts_library, 4.0, 1.0) ASC
+        LIMIT ?;
+      `).all(itemKind, projectId, ftsQuery, limit) as readonly {
+        id: string;
+        scope: string;
+        title: string;
+        snip: string;
+      }[])
+    : (itemKind === "deconstruction"
+        ? (stmt(db, `
+            SELECT id, scope, title,
+              excerpt || ' ' || hook_analysis || ' ' || prose_notes AS body
+            FROM library_deconstructions
+            WHERE status = 'approved' AND (scope = 'global' OR project_id = ?)
+              AND (title LIKE ? ESCAPE '\\' OR source_book LIKE ? ESCAPE '\\'
+                   OR excerpt LIKE ? ESCAPE '\\' OR hook_analysis LIKE ? ESCAPE '\\')
+            ORDER BY CASE WHEN title LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END ASC, updated_at DESC
+            LIMIT ?;
+          `).all(projectId, likeQuery, likeQuery, likeQuery, likeQuery, likeQuery, limit) as readonly {
+            id: string;
+            scope: string;
+            title: string;
+            body: string;
+          }[])
+        : (stmt(db, `
+            SELECT id, scope, title,
+              trigger_when || ' ' || execution_steps || ' ' || constraints AS body
+            FROM library_technique_cards
+            WHERE status = 'approved' AND (scope = 'global' OR project_id = ?)
+              AND (title LIKE ? ESCAPE '\\' OR trigger_when LIKE ? ESCAPE '\\'
+                   OR execution_steps LIKE ? ESCAPE '\\' OR scene_tags_json LIKE ? ESCAPE '\\')
+            ORDER BY CASE WHEN title LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END ASC, priority DESC
+            LIMIT ?;
+          `).all(projectId, likeQuery, likeQuery, likeQuery, likeQuery, likeQuery, limit) as readonly {
+            id: string;
+            scope: string;
+            title: string;
+            body: string;
+          }[])
+      ).map((row) => ({ ...row, snip: makePreviewSnippet(row.body || row.title, needle) }));
+
+  return rows.map((row) => ({
+    scope: itemKind,
+    id: row.id,
+    title: row.title,
+    subtitle: `${itemKind === "deconstruction" ? "拆书库" : "技法卡"} · ${row.scope === "global" ? "全局" : "本书"}`,
+    snippet: row.snip || row.title,
+  }));
+}
+
 /**
- * Searches chapters, lore, deconstructions, and technique cards.
- * Uses SQLite FTS5 `trigram` when the query has >= 3 code points, and
- * falls back to escaped `LIKE` matching for 1–2 character Chinese queries.
+ * Searches chapters, lore, deconstructions, and technique cards with weighted BM25,
+ * Reciprocal Rank Fusion (RRF), and anti-starvation Top-2 quota per non-empty scope.
  */
 export function searchWorkspaceFts(
   db: SqliteDatabase,
@@ -175,146 +679,124 @@ export function searchWorkspaceFts(
 ): FtsSearchHit[] {
   const needle = options.query.trim();
   if (!needle) return [];
-  const scopes = new Set<FtsSearchScope>(
+  const requestedOrder: FtsSearchScope[] =
     options.scopes && options.scopes.length > 0
-      ? options.scopes
-      : ["chapter", "lore", "deconstruction", "technique"],
-  );
+      ? [...new Set(options.scopes)]
+      : ["chapter", "lore", "deconstruction", "technique"];
   const limit = Math.max(1, Math.min(options.limit ?? 30, 100));
   const useFts = [...needle].length >= 3;
   const ftsQuery = escapeFtsPhrase(needle);
   const likeQuery = escapeLike(needle);
-  const hits: FtsSearchHit[] = [];
 
-  if (scopes.has("chapter")) {
-    const rows = useFts
-      ? (stmt(db, `
-          SELECT document_id AS id, title,
-            snippet(fts_chapters, 4, '[', ']', '…', 14) AS bodySnip,
-            snippet(fts_chapters, 3, '[', ']', '…', 14) AS sumSnip
-          FROM fts_chapters
-          WHERE project_id = ? AND fts_chapters MATCH ?
-          LIMIT ?;
-        `).all(options.projectId, ftsQuery, limit) as readonly {
-          id: string; title: string; bodySnip: string; sumSnip: string;
-        }[])
-      : (stmt(db, `
-          SELECT a.id, a.title, a.summary AS sumSnip, COALESCE(r.body, '') AS rawBody
-          FROM author_documents a
-          JOIN documents d ON d.document_id = a.id
-          LEFT JOIN revisions r ON r.revision_id = d.current_revision_id
-          WHERE a.project_id = ?
-            AND (a.title LIKE ? ESCAPE '\\' OR a.summary LIKE ? ESCAPE '\\' OR COALESCE(r.body, '') LIKE ? ESCAPE '\\')
-          LIMIT ?;
-        `).all(options.projectId, likeQuery, likeQuery, likeQuery, limit) as readonly {
-          id: string; title: string; sumSnip: string; rawBody: string;
-        }[]).map((row) => ({
-          id: row.id,
-          title: row.title,
-          sumSnip: row.sumSnip,
-          bodySnip: makePreviewSnippet(row.rawBody || row.sumSnip || row.title, needle),
-        }));
-    for (const row of rows) {
-      hits.push({
-        scope: "chapter",
-        id: row.id,
-        title: row.title || "未命名章节",
-        subtitle: "章节正文 / 摘要",
-        snippet: row.bodySnip || row.sumSnip || row.title,
-      });
+  const scopeLists = requestedOrder
+    .map((scope) => {
+      if (scope === "chapter") {
+        return queryChapterScopeHits(db, options.projectId, needle, useFts, ftsQuery, likeQuery, limit);
+      }
+      if (scope === "lore") {
+        return queryLoreScopeHits(db, options.projectId, needle, useFts, ftsQuery, likeQuery, limit);
+      }
+      return queryLibraryScopeHits(db, scope, options.projectId, needle, useFts, ftsQuery, likeQuery, limit);
+    })
+    .filter((list) => list.length > 0);
+
+  if (scopeLists.length === 0) return [];
+  if (scopeLists.length === 1) return scopeLists[0].slice(0, limit);
+
+  const pickedKeys = new Set<string>();
+  const result: FtsSearchHit[] = [];
+  const guaranteed = Math.min(2, Math.max(1, Math.floor(limit / scopeLists.length)));
+
+  for (const list of scopeLists) {
+    for (let i = 0; i < Math.min(guaranteed, list.length) && result.length < limit; i++) {
+      const hit = list[i];
+      const key = `${hit.scope}\0${hit.id}`;
+      if (!pickedKeys.has(key)) {
+        pickedKeys.add(key);
+        result.push(hit);
+      }
     }
   }
 
-  if (scopes.has("lore")) {
-    const rows = useFts
-      ? (stmt(db, `
-          SELECT fact_id AS id, entity_name AS entityName,
-            snippet(fts_lore, 3, '[', ']', '…', 14) AS snip
-          FROM fts_lore
-          WHERE project_id = ? AND fts_lore MATCH ?
-          LIMIT ?;
-        `).all(options.projectId, ftsQuery, limit) as readonly { id: string; entityName: string; snip: string }[])
-      : (stmt(db, `
-          SELECT fact_id AS id, entity_name AS entityName, value
-          FROM author_lore_current
-          WHERE project_id = ? AND (fact_id LIKE ? ESCAPE '\\' OR entity_name LIKE ? ESCAPE '\\' OR value LIKE ? ESCAPE '\\')
-          LIMIT ?;
-        `).all(options.projectId, likeQuery, likeQuery, likeQuery, limit) as readonly {
-          id: string; entityName: string; value: string;
-        }[]).map((row) => {
-          const parsed = JSON.parse(row.value) as { note?: string };
-          return {
-            id: row.id,
-            entityName: row.entityName,
-            snip: makePreviewSnippet(parsed.note ?? row.id, needle),
-          };
-        });
-    for (const row of rows) {
-      hits.push({
-        scope: "lore",
-        id: row.id,
-        title: row.entityName ? `${row.entityName} (${row.id})` : row.id,
-        subtitle: "动态设定库",
-        snippet: row.snip,
-      });
+  if (result.length < limit) {
+    const remaining: Array<{ readonly hit: FtsSearchHit; readonly rrf: number; readonly order: number }> = [];
+    let seq = 0;
+    for (const list of scopeLists) {
+      for (let rank = 0; rank < list.length; rank++) {
+        const hit = list[rank];
+        const key = `${hit.scope}\0${hit.id}`;
+        if (!pickedKeys.has(key)) {
+          remaining.push({ hit, rrf: 1 / (60 + rank + 1), order: seq++ });
+        }
+      }
+    }
+    remaining.sort((a, b) => (b.rrf !== a.rrf ? b.rrf - a.rrf : a.order - b.order));
+    for (const entry of remaining) {
+      if (result.length >= limit) break;
+      result.push(entry.hit);
     }
   }
 
-  const wantedLibKinds: Array<"deconstruction" | "technique"> = [];
-  if (scopes.has("deconstruction")) wantedLibKinds.push("deconstruction");
-  if (scopes.has("technique")) wantedLibKinds.push("technique");
+  return result;
+}
 
-  if (wantedLibKinds.length > 0) {
-    const rows = useFts
-      ? (stmt(db, `
-          SELECT item_id AS id, item_kind AS itemKind, scope, title,
-            snippet(fts_library, 5, '[', ']', '…', 14) AS snip
-          FROM fts_library
-          WHERE (scope = 'global' OR project_id = ?) AND fts_library MATCH ?
-          LIMIT ?;
-        `).all(options.projectId, ftsQuery, limit) as readonly {
-          id: string; itemKind: "deconstruction" | "technique"; scope: string; title: string; snip: string;
-        }[])
-      : [
-          ...(scopes.has("deconstruction")
-            ? (stmt(db, `
-                SELECT id, 'deconstruction' AS itemKind, scope, title,
-                  excerpt || ' ' || hook_analysis || ' ' || prose_notes AS body
-                FROM library_deconstructions
-                WHERE status = 'approved' AND (scope = 'global' OR project_id = ?)
-                  AND (title LIKE ? ESCAPE '\\' OR source_book LIKE ? ESCAPE '\\'
-                       OR excerpt LIKE ? ESCAPE '\\' OR hook_analysis LIKE ? ESCAPE '\\')
-                LIMIT ?;
-              `).all(options.projectId, likeQuery, likeQuery, likeQuery, likeQuery, limit) as readonly {
-                id: string; itemKind: "deconstruction"; scope: string; title: string; body: string;
-              }[])
-            : []),
-          ...(scopes.has("technique")
-            ? (stmt(db, `
-                SELECT id, 'technique' AS itemKind, scope, title,
-                  trigger_when || ' ' || execution_steps || ' ' || constraints AS body
-                FROM library_technique_cards
-                WHERE status = 'approved' AND (scope = 'global' OR project_id = ?)
-                  AND (title LIKE ? ESCAPE '\\' OR trigger_when LIKE ? ESCAPE '\\'
-                       OR execution_steps LIKE ? ESCAPE '\\' OR scene_tags_json LIKE ? ESCAPE '\\')
-                LIMIT ?;
-              `).all(options.projectId, likeQuery, likeQuery, likeQuery, likeQuery, limit) as readonly {
-                id: string; itemKind: "technique"; scope: string; title: string; body: string;
-              }[])
-            : []),
-        ].map((row) => ({ ...row, snip: makePreviewSnippet(row.body || row.title, needle) }));
+/**
+ * Computes normalized FTS5 BM25 semantic similarity scores across historical chapters
+ * for multiple query phrases using Reciprocal Rank Fusion.
+ */
+export function searchRelatedChaptersByFts(
+  db: SqliteDatabase,
+  options: {
+    readonly projectId: string;
+    readonly queryTerms: readonly string[];
+    readonly excludeIds?: readonly string[];
+    readonly limit?: number;
+  },
+): Array<{ readonly documentId: string; readonly score: number }> {
+  const excluded = new Set(options.excludeIds ?? []);
+  const terms: string[] = [];
+  const seenTerms = new Set<string>();
+  for (const raw of options.queryTerms) {
+    const term = raw.trim();
+    if ([...term].length < 3 || seenTerms.has(term)) continue;
+    seenTerms.add(term);
+    terms.push(term);
+    if (terms.length >= 8) break;
+  }
+  if (terms.length === 0) return [];
 
+  const rrfScores = new Map<string, number>();
+  const queryStmt = stmt(db, `
+    SELECT m.entity_key AS id
+    FROM fts_chapters
+    JOIN fts_rowid_map m ON m.fts_rowid = fts_chapters.rowid AND m.scope = 'chapter'
+    WHERE m.project_id = ? AND fts_chapters MATCH ?
+    ORDER BY bm25(fts_chapters, 6.0, 3.0, 1.0) ASC
+    LIMIT 24;
+  `);
+
+  for (const term of terms) {
+    const rows = queryStmt.all(options.projectId, escapeFtsPhrase(term)) as readonly { id: string }[];
+    let rankIdx = 0;
     for (const row of rows) {
-      if (!wantedLibKinds.includes(row.itemKind)) continue;
-      hits.push({
-        scope: row.itemKind,
-        id: row.id,
-        title: row.title,
-        subtitle: `${row.itemKind === "deconstruction" ? "拆书库" : "技法卡"} · ${row.scope === "global" ? "全局" : "本书"}`,
-        snippet: row.snip || row.title,
-      });
+      if (excluded.has(row.id)) continue;
+      rrfScores.set(row.id, (rrfScores.get(row.id) ?? 0) + 1 / (10 + rankIdx));
+      rankIdx += 1;
     }
   }
 
-  return hits.slice(0, limit);
+  let maxScore = 0;
+  for (const val of rrfScores.values()) {
+    if (val > maxScore) maxScore = val;
+  }
+  if (maxScore <= 0) return [];
+
+  const limit = Math.max(1, options.limit ?? 12);
+  return [...rrfScores.entries()]
+    .map(([documentId, score]) => ({
+      documentId,
+      score: Math.round((score / maxScore) * 10000) / 10000,
+    }))
+    .sort((a, b) => (b.score !== a.score ? b.score - a.score : a.documentId < b.documentId ? -1 : 1))
+    .slice(0, limit);
 }

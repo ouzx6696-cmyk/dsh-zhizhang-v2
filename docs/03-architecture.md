@@ -92,7 +92,10 @@ flowchart TD
 
 ### 3. 打包与 DsH 插件声明（`src/bundle/` & `package.json`）
 
-- [package.json](../package.json) 暴露入口 `"." -> "./dist/host/plugin.js"` 与 `"./client" -> "./dist/client/slot.js"`，并声明 `dsh.client.inject` 注入 `@deepseek-ai/dsh-client-ui-conversation` 与 `@deepseek-ai/dsh-client-ui-sidebar`。
+- **[src/host/plugin.ts](../src/host/plugin.ts) / [tools.ts](../src/host/tools.ts) / [settings.ts](../src/host/settings.ts)**：
+  - 宿主入口暴露 `GET /api/zhizhang/workbench`、`state`、`diag`（脱敏诊断）与 `POST /api/zhizhang/mutate`（含异步 `run.generate` / `proposal.generate` 与同步零工具 `selection.rewrite`）；
+  - 向 DsH 暴露 **7 个严格只读工具 + 3 个作者审批制提案工具**（绝不越权改写权威表）及 `settings.plugins.tab` 配置表单；
+  - [package.json](../package.json) 显式分离服务端入口 `"." -> "./dist/server/host/plugin.js"` 与浏览器扩展入口 `"./client" -> "./dist/client/slot.js"`。
 - [src/bundle/cordis.patch.yml](../src/bundle/cordis.patch.yml) 注册插件 ID `zhizhang-workbench`，默认配置 `dataDirectory: !!js dshHomePath('zhizhang-v2')`。
 
 ---

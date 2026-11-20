@@ -16,6 +16,7 @@ import { openDatabase } from "./driver.ts";
 import type { SqliteDatabase } from "./driver.ts";
 import { StorageError } from "./errors.ts";
 import { assertSupportedSchema, SCHEMA_ID } from "./schema.ts";
+import { configureStorePragmas } from "./stmt-pool.ts";
 
 /** Creates a new store at `path`, recording the current schema id. */
 export function createStore(path: string, schemaId: string = SCHEMA_ID): void {
@@ -53,12 +54,19 @@ export function readSchemaId(db: SqliteDatabase): string {
  * Opens an existing store, refusing anything unreadable, corrupt or outside
  * the V2 schema window. The returned handle stays open; the caller closes it.
  */
-export function openStore(path: string): SqliteDatabase {
+export function openStore(path: string, options?: { readonly readOnly?: boolean }): SqliteDatabase {
   let db: SqliteDatabase | undefined;
   try {
-    db = openDatabase(path);
+    db = openDatabase(path, options?.readOnly ? { readOnly: true } : undefined);
     const schemaId = readSchemaId(db);
     assertSupportedSchema(schemaId);
+    if (options?.readOnly) {
+      db.exec("PRAGMA foreign_keys = ON;");
+      db.exec("PRAGMA busy_timeout = 5000;");
+    } else {
+      const isMemory = path === ":memory:" || path.startsWith("file::memory:");
+      configureStorePragmas(db, isMemory);
+    }
     return db;
   } catch (error) {
     if (error instanceof StorageError) {

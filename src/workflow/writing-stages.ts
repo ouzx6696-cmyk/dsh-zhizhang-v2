@@ -9,6 +9,10 @@ export const WRITING_STAGE_IDS = {
   techniqueExtract: "novel.technique.extract",
   settingExtract: "novel.setting.propose",
   summaryDraft: "novel.summary.draft",
+  factSync: "novel.memory.sync",
+  chapterReview: "novel.chapter.review",
+  arcPlan: "novel.arc.plan",
+  selectionRewrite: "draft.selection.rewrite",
 } as const;
 
 export type WritingPhase = keyof typeof WRITING_STAGE_IDS;
@@ -19,6 +23,9 @@ const JSON_STAGE_PHASES: ReadonlySet<WritingPhase> = new Set([
   "techniqueExtract",
   "settingExtract",
   "summaryDraft",
+  "factSync",
+  "chapterReview",
+  "arcPlan",
 ]);
 
 export function isJsonStagePhase(phase: WritingPhase): boolean {
@@ -31,6 +38,7 @@ export interface SingleShotCallRequest {
   readonly prompt: string;
   readonly maxOutputTokens?: number;
   readonly cachePrefix?: string;
+  readonly disableThinking?: boolean;
 }
 
 export interface SingleShotLlmCaller {
@@ -106,6 +114,89 @@ function isValidSummaryDraftPayload(output: unknown): boolean {
   );
 }
 
+function isValidFactSyncPayload(output: unknown): boolean {
+  if (!isRecord(output)) return false;
+  const hasAny =
+    output.newFacts !== undefined ||
+    output.knownFromUpdates !== undefined ||
+    output.foreshadowUpdates !== undefined ||
+    output.summaryDraft !== undefined;
+  if (!hasAny) return false;
+  if (output.newFacts !== undefined && !(Array.isArray(output.newFacts) && output.newFacts.every(isRecord))) {
+    return false;
+  }
+  if (
+    output.knownFromUpdates !== undefined &&
+    !(
+      Array.isArray(output.knownFromUpdates) &&
+      output.knownFromUpdates.every(
+        (item) =>
+          isRecord(item) &&
+          typeof item.factId === "string" &&
+          item.factId.trim().length > 0 &&
+          typeof item.character === "string" &&
+          item.character.trim().length > 0,
+      )
+    )
+  ) {
+    return false;
+  }
+  if (
+    output.foreshadowUpdates !== undefined &&
+    !(
+      Array.isArray(output.foreshadowUpdates) &&
+      output.foreshadowUpdates.every(
+        (item) =>
+          isRecord(item) &&
+          ((typeof item.title === "string" && item.title.trim().length > 0) ||
+            (typeof item.id === "string" && item.id.trim().length > 0)),
+      )
+    )
+  ) {
+    return false;
+  }
+  if (
+    output.summaryDraft !== undefined &&
+    (typeof output.summaryDraft !== "string" || output.summaryDraft.length > 1500)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+const VALID_OBSERVATION_DIMENSIONS: ReadonlySet<string> = new Set([
+  "continuity",
+  "ooc",
+  "pacing",
+  "foreshadow",
+  "style",
+  "ai_slop",
+]);
+
+function isValidChapterReviewPayload(output: unknown): boolean {
+  if (!isRecord(output) || !Array.isArray(output.observations)) return false;
+  return output.observations.every(
+    (item) =>
+      isRecord(item) &&
+      typeof item.dimension === "string" &&
+      VALID_OBSERVATION_DIMENSIONS.has(item.dimension) &&
+      typeof item.quote === "string" &&
+      typeof item.suggestion === "string" &&
+      item.suggestion.trim().length > 0,
+  );
+}
+
+function isValidArcPlanPayload(output: unknown): boolean {
+  if (!isRecord(output)) return false;
+  const textKeys = ["actSummary", "nextActTitle", "nextActGoal", "nextActSummary", "currentFocus"];
+  const hasTextField = textKeys.some((k) => typeof output[k] === "string" && output[k].trim().length > 0);
+  const hasBeats =
+    Array.isArray(output.chapterBeats) &&
+    output.chapterBeats.length > 0 &&
+    output.chapterBeats.every((b) => isRecord(b) && typeof b.title === "string" && b.title.trim().length > 0);
+  return hasTextField || hasBeats;
+}
+
 /**
  * Creates a StageRegistry pre-populated with the author-workbench model stages.
  * Every stage id satisfies the frozen `domain.entity.action@version` contract
@@ -154,6 +245,30 @@ export function createWritingStageRegistry(): StageRegistry {
     version: 1,
     execution: "model",
     validateOutput: isValidSummaryDraftPayload,
+  });
+  registerStage(registry, {
+    id: WRITING_STAGE_IDS.factSync,
+    version: 1,
+    execution: "model",
+    validateOutput: isValidFactSyncPayload,
+  });
+  registerStage(registry, {
+    id: WRITING_STAGE_IDS.chapterReview,
+    version: 1,
+    execution: "model",
+    validateOutput: isValidChapterReviewPayload,
+  });
+  registerStage(registry, {
+    id: WRITING_STAGE_IDS.arcPlan,
+    version: 1,
+    execution: "model",
+    validateOutput: isValidArcPlanPayload,
+  });
+  registerStage(registry, {
+    id: WRITING_STAGE_IDS.selectionRewrite,
+    version: 1,
+    execution: "model",
+    validateOutput: isValidCandidateText,
   });
   return registry;
 }

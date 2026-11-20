@@ -22,17 +22,21 @@ export interface PromptOptions {
  * and `window.prompt` calls (which break inside strict DsH / iframe sandboxes).
  */
 export function createModalController(dialog: HTMLDialogElement) {
-  let pendingClose: ((value: unknown) => void) | null = null;
+  let pendingCancel: (() => void) | null = null;
 
   function resetDialog(): void {
     dialog.replaceChildren();
     dialog.oncancel = null;
   }
 
-  function openAndAwait<T>(build: (finish: (value: T) => void) => void, cancelValue: T): Promise<T> {
-    if (pendingClose) {
-      pendingClose(cancelValue);
-      pendingClose = null;
+  function openAndAwait<T>(
+    build: (finish: (value: T) => void) => HTMLElement | null,
+    cancelValue: T,
+  ): Promise<T> {
+    if (pendingCancel) {
+      const cancelPrevious = pendingCancel;
+      pendingCancel = null;
+      cancelPrevious();
     }
     if (dialog.open) dialog.close();
     resetDialog();
@@ -42,17 +46,18 @@ export function createModalController(dialog: HTMLDialogElement) {
       const finish = (value: T) => {
         if (settled) return;
         settled = true;
-        pendingClose = null;
+        pendingCancel = null;
         if (dialog.open) dialog.close();
         resolve(value);
       };
-      pendingClose = finish as (value: unknown) => void;
+      pendingCancel = () => finish(cancelValue);
       dialog.oncancel = (event) => {
         event.preventDefault();
         finish(cancelValue);
       };
-      build(finish);
+      const focusTarget = build(finish);
       dialog.showModal();
+      focusTarget?.focus();
     });
   }
 
@@ -99,7 +104,7 @@ export function createModalController(dialog: HTMLDialogElement) {
       actions.append(cancelBtn, okBtn);
       box.append(actions);
       dialog.append(box);
-      okBtn.focus();
+      return okBtn;
     }, false);
   }
 
@@ -148,7 +153,7 @@ export function createModalController(dialog: HTMLDialogElement) {
         finish(textarea.value);
       };
       dialog.append(form);
-      textarea.focus();
+      return textarea;
     }, null);
   }
 

@@ -25,6 +25,7 @@ import {
   type WorkspaceContext,
 } from "../../context.ts";
 import { approvedFacts, assertChapterInProject, assertFanqieProject, reorderRelations } from "./shared.ts";
+import { refreshEntityMentionsForFact } from "./memory-sync.ts";
 
 function settingAnchor(input: Input, field: string, order: readonly string[]): Anchor {
   const value = input[field];
@@ -136,6 +137,13 @@ export function materializeApprovedLore(
     note: params.fact.note,
     source: params.fact.source,
   });
+  refreshEntityMentionsForFact(
+    ctx,
+    params.projectId,
+    params.factId,
+    params.entityName,
+    normalizedCategory,
+  );
 }
 
 export function handleContinuity(action: string, ctx: WorkspaceContext, input: Input) {
@@ -255,11 +263,29 @@ export function handleContinuity(action: string, ctx: WorkspaceContext, input: I
   });
 }
 
+function parseLoreCursor(raw: string): { readonly decidedSeq: number; readonly factId: string } {
+  const colon = raw.indexOf(":");
+  if (colon <= 0 || colon >= raw.length - 1) invalid("cursor", "invalid-lore-cursor");
+  const seqStr = raw.slice(0, colon);
+  const factId = raw.slice(colon + 1);
+  if (!/^\d+$/u.test(seqStr)) invalid("cursor", "invalid-lore-cursor");
+  const decidedSeq = Number(seqStr);
+  if (!Number.isSafeInteger(decidedSeq)) invalid("cursor", "invalid-lore-cursor");
+  return { decidedSeq, factId };
+}
+
 export function queryLore(
   ctx: WorkspaceContext,
   projectId: string,
-  options: { readonly category?: string; readonly entityName?: string; readonly lockedOnly?: boolean } = {},
-): { readonly entries: LoreEntryDto[]; readonly cursor: null } {
+  options: {
+    readonly category?: string;
+    readonly entityName?: string;
+    readonly lockedOnly?: boolean;
+    readonly limit?: number;
+    readonly cursor?: string;
+    readonly all?: boolean;
+  } = {},
+): { readonly entries: LoreEntryDto[]; readonly cursor: string | null } {
   const clauses = ["project_id = ?"];
   const params: (string | number)[] = [projectId];
   if (options.category) {
@@ -273,13 +299,22 @@ export function queryLore(
   if (options.lockedOnly) {
     clauses.push("locked = 1");
   }
+  if (options.cursor && !options.all) {
+    const parsed = parseLoreCursor(options.cursor);
+    clauses.push("(decided_seq < ? OR (decided_seq = ? AND fact_id < ?))");
+    params.push(parsed.decidedSeq, parsed.decidedSeq, parsed.factId);
+  }
+
+  const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
+  const limitSql = options.all ? "" : " LIMIT ?";
+  if (!options.all) params.push(limit + 1);
+
   const rows = stmt(ctx.db, `
     SELECT fact_id AS factId, category, entity_name AS entityName,
       latest_setting_id AS latestSettingId, locked, value, decided_seq AS decidedSeq
     FROM author_lore_current
     WHERE ${clauses.join(" AND ")}
-    ORDER BY decided_seq DESC
-    LIMIT 200;
+    ORDER BY decided_seq DESC, fact_id DESC${limitSql};
   `).all(...params) as readonly {
     factId: string;
     category: string;
@@ -289,8 +324,12 @@ export function queryLore(
     value: string;
     decidedSeq: number;
   }[];
+
+  const hasMore = !options.all && rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const lastRow = pageRows[pageRows.length - 1];
   return {
-    entries: rows.map((row) => ({
+    entries: pageRows.map((row) => ({
       factId: row.factId,
       category: normalizeLoreCategory(row.category, "fact"),
       entityName: row.entityName,
@@ -299,11 +338,14 @@ export function queryLore(
       fact: JSON.parse(row.value),
       decidedSeq: row.decidedSeq,
     })),
-    cursor: null,
+    cursor: hasMore && lastRow ? `${lastRow.decidedSeq}:${lastRow.factId}` : null,
   };
 }
 
-export function listLore(ctx: WorkspaceContext, input: Input): { readonly entries: LoreEntryDto[]; readonly cursor: null } {
+export function listLore(
+  ctx: WorkspaceContext,
+  input: Input,
+): { readonly entries: LoreEntryDto[]; readonly cursor: string | null } {
   const projectId = text(input, "projectId");
   assertFanqieProject(ctx, projectId);
   const category = optionalText(input, "category");
@@ -312,7 +354,11 @@ export function listLore(ctx: WorkspaceContext, input: Input): { readonly entrie
   }
   const entityName = optionalText(input, "entityName");
   const lockedOnly = input.lockedOnly === true;
-  return ctx.read(() => queryLore(ctx, projectId, { category, entityName, lockedOnly }));
+  const limit = input.limit !== undefined ? count(input, "limit") : undefined;
+  if (limit === 0) invalid("limit", "positive-integer-required");
+  const cursor = optionalText(input, "cursor");
+  if (cursor) parseLoreCursor(cursor);
+  return ctx.read(() => queryLore(ctx, projectId, { category, entityName, lockedOnly, limit, cursor }));
 }
 
 export function queryForeshadows(ctx: WorkspaceContext, projectId: string, status?: string): ForeshadowDto[] {

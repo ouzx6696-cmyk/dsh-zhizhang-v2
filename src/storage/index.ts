@@ -28,6 +28,7 @@ export { createStore, createStoreIn, openStore, readSchemaId } from "./store.ts"
 export {
   createCommandSchema,
   runAuthorWrite,
+  pruneCommandJournal,
   canonicalJson,
   payloadEquals,
   createDocument,
@@ -42,6 +43,7 @@ export {
   type AuthorWriteRequest,
   type CommandOutcome,
   type CommandRequest,
+  type JournalPruneOptions,
 } from "./command.ts";
 
 export {
@@ -71,6 +73,7 @@ export {
 
 export {
   createBackup,
+  createHotBackup,
   verifyBackup,
   isBackupValid,
   restoreBackup,
@@ -108,14 +111,24 @@ export {
 
 export { stmt, configureStorePragmas } from "./stmt-pool.ts";
 
+export { withReadTx, withWriteTx, inTransaction } from "./tx.ts";
+
+export {
+  runMigrations,
+  appliedMigrations,
+  type SchemaMigration,
+} from "./migrations.ts";
+
 export {
   createFtsSchema,
   deleteLibraryFts,
   rebuildProjectFts,
+  searchRelatedChaptersByFts,
   searchWorkspaceFts,
   syncChapterFts,
   syncLibraryFts,
   syncLoreFts,
+  verifyFtsIntegrity,
   type FtsSearchHit,
   type FtsSearchScope,
 } from "./fts.ts";

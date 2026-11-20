@@ -18,6 +18,7 @@
 import { createHash } from "node:crypto";
 import type { SqliteDatabase } from "./driver.ts";
 import { StorageError } from "./errors.ts";
+import { withWriteTx } from "./tx.ts";
 
 /** The closed export-state set. */
 export const EXPORT_STATES = ["pending", "exported", "failed"] as const;
@@ -89,14 +90,9 @@ export function insertDeliveryRow(db: SqliteDatabase, delivery: Delivery): void 
 
 /** Commits a delivery inside one transaction. The export starts `pending`. */
 export function commitDelivery(db: SqliteDatabase, delivery: Delivery): void {
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  withWriteTx(db, () => {
     insertDeliveryRow(db, delivery);
-    db.exec("COMMIT");
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
-  }
+  });
 }
 
 /** The bytes an external write receives for one delivery. */

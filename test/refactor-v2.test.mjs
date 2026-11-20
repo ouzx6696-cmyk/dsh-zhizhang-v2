@@ -216,10 +216,21 @@ test("architecture boundaries enforce domain isolation and zero native browser d
     const source = readFileSync(file, "utf8");
     assert.doesNotMatch(source, /from\s+["'][^"']*(domain\/toutiao|products\/toutiao)/);
   }
-  const toutiaoModule = readFileSync(new URL("../src/application/products/toutiao.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(toutiaoModule, /from\s+["'][^"']*(domain\/fanqie|products\/fanqie)/);
+  const toutiaoFiles = [
+    fileURLToPath(new URL("../src/application/products/toutiao.ts", import.meta.url)),
+    ...walkTsFiles("../src/application/products/toutiao/"),
+  ];
+  for (const file of toutiaoFiles) {
+    const source = readFileSync(file, "utf8");
+    assert.doesNotMatch(source, /from\s+["'][^"']*(domain\/fanqie|products\/fanqie)/);
+  }
 
-  const hostFiles = ["../src/host/writing.ts", "../src/host/plugin.ts"];
+  const hostFiles = [
+    "../src/host/writing.ts",
+    "../src/host/plugin.ts",
+    "../src/host/tools.ts",
+    "../src/host/settings.ts",
+  ];
   for (const relativePath of hostFiles) {
     const source = readFileSync(new URL(relativePath, import.meta.url), "utf8");
     assert.doesNotMatch(source, /from\s+["'][^"']*domain\//);
@@ -235,6 +246,10 @@ test("architecture boundaries enforce domain isolation and zero native browser d
   for (const relativePath of basePlatformFiles) {
     const source = readFileSync(new URL(relativePath, import.meta.url), "utf8");
     assert.doesNotMatch(source, /from\s+["'][^"']*(domain\/fanqie|domain\/toutiao|products\/fanqie|products\/toutiao)/);
+  }
+  for (const decoupledFile of ["../src/application/snapshot-service.ts", "../src/application/proposal-service.ts"]) {
+    const source = readFileSync(new URL(decoupledFile, import.meta.url), "utf8");
+    assert.doesNotMatch(source, /\b(author_volumes|author_acts|author_candidate_qa|author_lore_current)\b/);
   }
 
   const shellSource = readFileSync(new URL("../src/client/workbench/shell.ts", import.meta.url), "utf8");

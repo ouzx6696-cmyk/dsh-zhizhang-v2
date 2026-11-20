@@ -1,5 +1,10 @@
 import type { SqliteDatabase } from "../storage/index.ts";
-import type { DocumentStatusWord, Product } from "../contracts/workspace-dto.ts";
+import type {
+  AiProposalKind,
+  DocumentStatusWord,
+  Product,
+  SelectionRewriteMode,
+} from "../contracts/workspace-dto.ts";
 import type { AuthorReadUnitFactory } from "../workflow/author-reads.ts";
 import type { SingleShotLlmCaller } from "../workflow/writing-stages.ts";
 import type { DocumentRow, Input, WorkspaceContext } from "./context.ts";
@@ -63,6 +68,33 @@ export interface ProductLineModule {
   reserveRefinement?(ctx: WorkspaceContext, runId: string): void;
 
   readonly actions: Readonly<Record<string, ActionDefinition>>;
+  buildActiveContext?(ctx: WorkspaceContext, active: DocumentRow): Record<string, unknown> | null;
+  enrichRunSummaries?(
+    ctx: WorkspaceContext,
+    active: DocumentRow,
+    runs: readonly Record<string, unknown>[],
+  ): readonly Record<string, unknown>[];
+  buildProposalContext?(
+    ctx: WorkspaceContext,
+    params: {
+      readonly kind: AiProposalKind;
+      readonly projectId: string | null;
+      readonly documentId: string | null;
+      readonly input: Input;
+    },
+  ): {
+    readonly sourceText?: string;
+    readonly sourceRef?: string;
+    readonly extra?: Readonly<Record<string, unknown>>;
+  };
+  buildSelectionContext?(
+    ctx: WorkspaceContext,
+    row: DocumentRow,
+    mode: SelectionRewriteMode,
+  ): {
+    readonly cachePrefix?: string;
+    readonly extra?: Readonly<Record<string, unknown>>;
+  };
   contributeSnapshot(
     ctx: WorkspaceContext,
     projectId: string,

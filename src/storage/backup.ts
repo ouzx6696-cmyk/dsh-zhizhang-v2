@@ -21,7 +21,7 @@ import { copyFile, lstat, mkdir, readFile, readdir, rm, writeFile } from "node:f
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { StorageError } from "./errors.ts";
-import { openDatabase } from "./driver.ts";
+import { openDatabase, type SqliteDatabase } from "./driver.ts";
 import { openStore, readSchemaId } from "./store.ts";
 
 /** One file inside a backup, with the hash its bytes must still produce. */
@@ -51,10 +51,59 @@ export interface RetentionPlan {
 
 const MANIFEST_NAME = "manifest.json";
 const STORE_NAME = "work.db";
+const WAL_SIDECARS = ["work.db-wal", "work.db-shm", "workspace.sqlite-wal", "workspace.sqlite-shm"] as const;
 
 async function sha256OfFile(path: string): Promise<string> {
   const bytes = await readFile(path);
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+async function copyDeliveriesToBackup(
+  backupDir: string,
+  deliveriesDirectory: string | undefined,
+  entries: BackupEntry[],
+  ignoreMissingDir = false,
+): Promise<void> {
+  if (!deliveriesDirectory) return;
+  let items;
+  try {
+    items = await readdir(deliveriesDirectory, { withFileTypes: true });
+  } catch (error) {
+    if (ignoreMissingDir) return;
+    throw error;
+  }
+  for (const item of items) {
+    if (!item.isFile() || !/^[a-f0-9-]{36}\.md$/iu.test(item.name)) continue;
+    const path = `deliveries/${item.name}`;
+    const target = join(backupDir, path);
+    await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+    await copyFile(join(deliveriesDirectory, item.name), target);
+    entries.push({ path, sha256: await sha256OfFile(target) });
+  }
+}
+
+async function removeWalSidecars(targetDir: string): Promise<void> {
+  for (const sidecar of WAL_SIDECARS) {
+    await rm(join(targetDir, sidecar), { force: true });
+  }
+}
+
+/** Creates an online consistent snapshot from a live WAL connection via `VACUUM INTO`. */
+export async function createHotBackup(
+  db: SqliteDatabase,
+  backupDir: string,
+  deliveriesDirectory?: string,
+): Promise<BackupManifest> {
+  await mkdir(backupDir, { recursive: true });
+  const targetDb = join(backupDir, STORE_NAME);
+  await rm(targetDb, { force: true });
+  db.prepare("VACUUM INTO ?;").run(targetDb);
+  const schema = readSchemaId(db);
+  const entries: BackupEntry[] = [{ path: STORE_NAME, sha256: await sha256OfFile(targetDb) }];
+  await copyDeliveriesToBackup(backupDir, deliveriesDirectory, entries, true);
+  const manifest: BackupManifest = { schema, entries };
+  await writeFile(join(backupDir, MANIFEST_NAME), JSON.stringify(manifest));
+  return manifest;
 }
 
 /** Copies a closed store into `backupDir` and writes its manifest. */
@@ -75,18 +124,8 @@ export async function createBackup(
   } finally {
     copied.close();
   }
-  const entries = [{ path: STORE_NAME, sha256: await sha256OfFile(join(backupDir, STORE_NAME)) }];
-  if (deliveriesDirectory) {
-    const items = await readdir(deliveriesDirectory, { withFileTypes: true });
-    for (const item of items) {
-      if (!item.isFile() || !/^[a-f0-9-]{36}\.md$/iu.test(item.name)) continue;
-      const path = `deliveries/${item.name}`;
-      const target = join(backupDir, path);
-      await mkdir(dirname(target), { recursive: true, mode: 0o700 });
-      await copyFile(join(deliveriesDirectory, item.name), target);
-      entries.push({ path, sha256: await sha256OfFile(target) });
-    }
-  }
+  const entries: BackupEntry[] = [{ path: STORE_NAME, sha256: await sha256OfFile(join(backupDir, STORE_NAME)) }];
+  await copyDeliveriesToBackup(backupDir, deliveriesDirectory, entries, false);
   const manifest: BackupManifest = { schema, entries };
   await writeFile(join(backupDir, MANIFEST_NAME), JSON.stringify(manifest));
   return manifest;
@@ -165,6 +204,9 @@ export async function restoreBackup(
     throw new StorageError("input.invalid", { reason: "restore-target-not-empty" });
   }
   await mkdir(targetDir, { recursive: true });
+  if (overwrite) {
+    await removeWalSidecars(targetDir);
+  }
   for (const entry of manifest.entries) {
     const target = join(targetDir, entry.path);
     await mkdir(dirname(target), { recursive: true, mode: 0o700 });
@@ -183,7 +225,7 @@ export async function backupWorkspace(directory: string, target: string) {
 /** Restore a verified snapshot into a new host data directory. */
 export async function restoreWorkspace(backup: string, target: string) {
   const manifest = await verifyBackup(backup);
-  const source = openStore(join(backup, STORE_NAME));
+  const source = openStore(join(backup, STORE_NAME), { readOnly: true });
   try {
     const integrity = source.prepare("PRAGMA quick_check;").get() as { quick_check?: string } | undefined;
     if (integrity?.quick_check !== "ok" || readSchemaId(source) !== manifest.schema) {
@@ -194,6 +236,7 @@ export async function restoreWorkspace(backup: string, target: string) {
   }
   await mkdir(target, { mode: 0o700 });
   await mkdir(join(target, "deliveries"), { mode: 0o700 });
+  await removeWalSidecars(target);
   for (const { path } of manifest.entries) {
     await copyFile(join(backup, path), join(target, path === STORE_NAME ? "workspace.sqlite" : path));
   }

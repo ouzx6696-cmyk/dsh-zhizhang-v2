@@ -124,10 +124,18 @@ export function planTreeChapterMove(
       ? { ...ch, volumeId: resolvedVolumeId, actId: spec.targetActId }
       : ch,
   );
+  const beforePos = new Map<string, number>();
+  beforeOrder.forEach((id, index) => {
+    if (!beforePos.has(id)) beforePos.set(id, index);
+  });
   const withoutMoved = beforeOrder.filter((id) => id !== spec.chapterId);
   const matchingSiblings = updatedChapters
     .filter((ch) => ch.id !== spec.chapterId && ch.volumeId === resolvedVolumeId && ch.actId === spec.targetActId)
-    .map((ch) => ch.id);
+    .map((ch) => ch.id)
+    .sort(
+      (left, right) =>
+        (beforePos.get(left) ?? Number.MAX_SAFE_INTEGER) - (beforePos.get(right) ?? Number.MAX_SAFE_INTEGER),
+    );
 
   let insertPos = withoutMoved.length;
   if (spec.beforeChapterId) {

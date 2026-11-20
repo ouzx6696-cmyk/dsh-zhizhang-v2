@@ -103,7 +103,11 @@ export interface ResolvedAnchor {
  * resolves to the last paragraph rather than failing.
  */
 export function resolveAnchor(at: Anchor, chapter: ChapterParagraphs): ResolvedAnchor {
-  const index = Math.min(Math.max(at.point - 1, 0), chapter.paragraphs.length - 1);
+  if (chapter.paragraphs.length === 0) {
+    return { paragraphIndex: 0, start: 0, text: "" };
+  }
+  const safePoint = Number.isFinite(at.point) ? Math.trunc(at.point) : 1;
+  const index = Math.min(Math.max(safePoint - 1, 0), chapter.paragraphs.length - 1);
   let start = 0;
   for (let i = 0; i < index; i += 1) start += chapter.paragraphs[i].length + 1;
   return { paragraphIndex: index, start, text: chapter.paragraphs[index] };

@@ -1,5 +1,6 @@
 import type { SqliteDatabase } from "./driver.ts";
 import { stmt } from "./stmt-pool.ts";
+import { withWriteTx } from "./tx.ts";
 
 export interface OpenGenerationAttempt {
   readonly runId: string;
@@ -78,32 +79,36 @@ export function createGenerationLedger(db: SqliteDatabase) {
     },
 
     beginCall(attemptId: string, callId: string, phase: string, inputReserve: number, maxOutput: number): boolean {
-      const marked = stmt(db, `
-        UPDATE author_generation_attempts SET state = 'inflight', stage = ?
-        WHERE id = ? AND state IN ('prepared','received');
-      `).run(phase, attemptId);
-      if (!marked.changes) return false;
-      stmt(db, `
-        INSERT INTO author_generation_calls (id, attempt_id, phase, input_reserve, max_output)
-        VALUES (?, ?, ?, ?, ?);
-      `).run(callId, attemptId, phase, inputReserve, maxOutput);
-      return true;
+      return withWriteTx(db, () => {
+        const marked = stmt(db, `
+          UPDATE author_generation_attempts SET state = 'inflight', stage = ?
+          WHERE id = ? AND state IN ('prepared','received');
+        `).run(phase, attemptId);
+        if (!marked.changes) return false;
+        stmt(db, `
+          INSERT INTO author_generation_calls (id, attempt_id, phase, input_reserve, max_output)
+          VALUES (?, ?, ?, ?, ?);
+        `).run(callId, attemptId, phase, inputReserve, maxOutput);
+        return true;
+      });
     },
 
     receiveCall(attemptId: string, callId: string, usage: readonly number[]): boolean {
-      const call = stmt(db, `
-        UPDATE author_generation_calls SET usage = ?
-        WHERE id = ? AND attempt_id = ? AND usage IS NULL
-          AND EXISTS (SELECT 1 FROM author_generation_attempts WHERE id = ? AND state = 'inflight')
-        RETURNING phase;
-      `).get(JSON.stringify(usage), callId, attemptId, attemptId) as { phase: string } | undefined;
-      if (!call) return false;
-      stmt(db, `
-        UPDATE author_generation_attempts
-        SET state = 'received', usage = json_insert(usage, '$[#]', json(?))
-        WHERE id = ?;
-      `).run(JSON.stringify({ callId, phase: call.phase, usage }), attemptId);
-      return true;
+      return withWriteTx(db, () => {
+        const call = stmt(db, `
+          UPDATE author_generation_calls SET usage = ?
+          WHERE id = ? AND attempt_id = ? AND usage IS NULL
+            AND EXISTS (SELECT 1 FROM author_generation_attempts WHERE id = ? AND state = 'inflight')
+          RETURNING phase;
+        `).get(JSON.stringify(usage), callId, attemptId, attemptId) as { phase: string } | undefined;
+        if (!call) return false;
+        stmt(db, `
+          UPDATE author_generation_attempts
+          SET state = 'received', usage = json_insert(usage, '$[#]', json(?))
+          WHERE id = ?;
+        `).run(JSON.stringify({ callId, phase: call.phase, usage }), attemptId);
+        return true;
+      });
     },
 
     openAttempt(id: string): OpenGenerationAttempt | undefined {

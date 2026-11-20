@@ -206,8 +206,20 @@ try {
   await click("deliver");
   await expectText("export-status", "已写入交稿文件");
   assert.match(deliveries[0], /^# 新标题/u);
+
+  for (const vp of [
+    { width: 1440, height: 900 },
+    { width: 1280, height: 800 },
+    { width: 1024, height: 900 },
+    { width: 768, height: 900 },
+  ]) {
+    await page.setViewportSize(vp);
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    assert.ok(overflow <= 1, `Horizontal overflow ${overflow}px at viewport ${vp.width}x${vp.height}`);
+  }
+
   assert.deepEqual(errors, []);
-  console.log("通过保存与恢复、番茄设定到定稿、头条改题到交稿三条浏览器流程");
+  console.log("通过保存与恢复、番茄设定到定稿、头条改题到交稿与 4 视口几何验收");
 } finally {
   await browser.close();
   db.close();

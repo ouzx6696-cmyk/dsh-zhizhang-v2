@@ -41,7 +41,7 @@ export function exportProjectBundle(
     const project = stmt(ctx.db, "SELECT id, name, product FROM author_projects WHERE id = ?;")
       .get(projectId) as { id: string; name: string; product: string };
     const tree = queryTree(ctx, projectId);
-    const lore = queryLore(ctx, projectId).entries;
+    const lore = queryLore(ctx, projectId, { all: true }).entries;
     const foreshadows = queryForeshadows(ctx, projectId);
     const mounts = queryLibraryMounts(ctx, projectId);
 
@@ -96,11 +96,7 @@ export function exportProjectBundle(
         body,
       );
       files.push({ path, content, sha256: sha256(content) });
-      return {
-        ...ch,
-        path,
-        planning,
-      };
+      return { ...ch, path, planning };
     });
 
     const settingsMd = [
@@ -162,21 +158,18 @@ export function exportProjectBundle(
     );
     files.unshift({ path: "zhizhang-project.json", content: manifestJson, sha256: sha256(manifestJson) });
 
-    return {
-      projectId: project.id,
-      projectName: project.name,
-      exportedAt,
-      files,
-    };
+    return { projectId: project.id, projectName: project.name, exportedAt, files };
   });
 
   const writtenDirectory =
     input.writeToDisk === true && writeToDiskFn ? writeToDiskFn(projectId, built.files) : null;
 
-  return {
-    ...built,
-    writtenDirectory,
-  };
+  return { ...built, writtenDirectory };
+}
+
+interface ManifestAnchor {
+  readonly chapterId?: string;
+  readonly point?: number;
 }
 
 interface ParsedManifest {
@@ -196,10 +189,54 @@ interface ParsedManifest {
     factId: string;
     category?: string;
     entityName?: string;
-    fact?: { note?: string; source?: string; locked?: boolean; kind?: string };
+    fact?: {
+      note?: string;
+      source?: string;
+      locked?: boolean;
+      kind?: string;
+      effectiveFrom?: ManifestAnchor;
+      effectiveTo?: ManifestAnchor;
+      knownFrom?: Readonly<Record<string, ManifestAnchor>>;
+    };
+  }[];
+  readonly foreshadows?: readonly {
+    id?: string;
+    factId?: string | null;
+    title?: string;
+    plantedChapterId?: string | null;
+    plantedPoint?: number;
+    targetChapterId?: string | null;
+    resolvedChapterId?: string | null;
+    status?: string;
+    note?: string;
   }[];
   readonly deconstructions?: readonly Record<string, unknown>[];
   readonly techniques?: readonly Record<string, unknown>[];
+  readonly mounts?: readonly {
+    targetType?: string;
+    targetId?: string;
+    itemKind?: string;
+    itemId?: string;
+    mode?: string;
+    weight?: number;
+    note?: string;
+  }[];
+}
+
+const VALID_FS_STATUSES = new Set(["proposed", "planted", "hinted", "resolved", "abandoned"]);
+
+function remapAnchor(
+  raw: ManifestAnchor | undefined,
+  chapterIdMap: Map<string, string>,
+  validChapterIds: Set<string>,
+  fallbackChapterId: string,
+): { readonly chapterId: string; readonly point: number } {
+  const srcId = raw?.chapterId;
+  const mappedId = srcId
+    ? (chapterIdMap.get(srcId) ?? (validChapterIds.has(srcId) ? srcId : fallbackChapterId))
+    : fallbackChapterId;
+  const pt = typeof raw?.point === "number" && Number.isSafeInteger(raw.point) && raw.point >= 1 ? raw.point : 1;
+  return { chapterId: mappedId, point: pt };
 }
 
 export function importProjectBundle(ctx: WorkspaceContext, input: Input): ProjectImportSummaryDto {
@@ -216,13 +253,12 @@ export function importProjectBundle(ctx: WorkspaceContext, input: Input): Projec
     if (typeof record.path !== "string" || typeof record.content !== "string") {
       invalid("files", `invalid-file-fields-${idx}`);
     }
-    return {
-      path: assertSafeRelativePath(record.path),
-      content: record.content,
-    };
+    return { path: assertSafeRelativePath(record.path), content: record.content };
   });
 
-  const manifestEntry = normalizedFiles.find((f) => f.path === "zhizhang-project.json" || f.path.endsWith("/zhizhang-project.json"));
+  const manifestEntry = normalizedFiles.find(
+    (f) => f.path === "zhizhang-project.json" || f.path.endsWith("/zhizhang-project.json"),
+  );
   let manifest: ParsedManifest | null = null;
   if (manifestEntry) {
     try {
@@ -313,6 +349,7 @@ export function importProjectBundle(ctx: WorkspaceContext, input: Input): Projec
         INSERT INTO author_acts (id, project_id, volume_id, title, goal, summary, sort_order, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?);
       `).run(id, projectId, volumeId, title, goal, summary, order, now);
+      ctx.event(projectId!, "chapter", "act.created", { actId: id, volumeId, title, sortOrder: order });
       actIdMap.set(id, id);
       if (sourceId) actIdMap.set(sourceId, id);
       actKeyMap.set(key, id);
@@ -324,6 +361,26 @@ export function importProjectBundle(ctx: WorkspaceContext, input: Input): Projec
       const mappedVol = volumeIdMap.get(act.volumeId);
       if (mappedVol) ensureAct(mappedVol, act.title, act.id, act.goal ?? "", act.summary ?? "", act.sortOrder);
     }
+
+    const existingDocs = stmt(ctx.db, `
+      SELECT id, title, state, volume_id AS volumeId, act_id AS actId
+      FROM author_documents WHERE project_id = ? ORDER BY rowid ASC;
+    `).all(projectId) as readonly {
+      id: string;
+      title: string;
+      state: string;
+      volumeId: string | null;
+      actId: string | null;
+    }[];
+    const existingDocById = new Map(existingDocs.map((d) => [d.id, d]));
+    const existingDocsByKey = new Map<string, typeof existingDocs[number]>();
+    for (const d of existingDocs) {
+      const key = `${d.volumeId ?? ""}\0${d.actId ?? ""}\0${d.title}`;
+      if (!existingDocsByKey.has(key)) existingDocsByKey.set(key, d);
+    }
+    const validDocIdsInProject = new Set(existingDocs.map((d) => d.id));
+    const claimedDocIds = new Set<string>();
+    const chapterIdMap = new Map<string, string>();
 
     const manifestChapterByPath = new Map(
       (manifest?.chapters ?? []).filter((c) => c.path).map((c) => [c.path!, c]),
@@ -370,30 +427,43 @@ export function importProjectBundle(ctx: WorkspaceContext, input: Input): Projec
       }
 
       const candidateId = meta.chapterId ?? manifestCh?.id;
-      const existingDoc = candidateId
-        ? (stmt(ctx.db, "SELECT id, project_id AS projectId, state FROM author_documents WHERE id = ?;")
-            .get(candidateId) as { id: string; projectId: string; state: string } | undefined)
-        : undefined;
+      const matchedById = candidateId ? existingDocById.get(candidateId) : undefined;
+      const fallbackByKey = existingDocsByKey.get(`${volumeId ?? ""}\0${actId ?? ""}\0${title}`);
+      const existingDoc = matchedById ?? (fallbackByKey && !claimedDocIds.has(fallbackByKey.id) ? fallbackByKey : undefined);
 
       let targetDocId: string;
-      if (existingDoc && existingDoc.projectId === projectId) {
+      if (existingDoc) {
         targetDocId = existingDoc.id;
+        claimedDocIds.add(targetDocId);
+        if (meta.chapterId) chapterIdMap.set(meta.chapterId, targetDocId);
+        if (manifestCh?.id) chapterIdMap.set(manifestCh.id, targetDocId);
+
         if (existingDoc.state === "final") {
           chaptersSkippedLocked.push(targetDocId);
           importedChapterOrder.push(targetDocId);
           continue;
         }
         const row = ctx.document(targetDocId);
-        stmt(ctx.db, "UPDATE author_documents SET title = ?, volume_id = ?, act_id = ?, summary = ?, updated_at = ? WHERE id = ?;")
-          .run(title, volumeId, actId, meta.summary ?? manifestCh?.summary ?? row.summary, now, targetDocId);
-        if (body !== (row.body ?? "")) {
+        const nextSummary = meta.summary ?? manifestCh?.summary ?? row.summary;
+        const metaChanged =
+          title !== row.title || volumeId !== row.volumeId || actId !== row.actId || nextSummary !== row.summary;
+        const bodyChanged = body !== (row.body ?? "");
+
+        if (metaChanged) {
+          stmt(ctx.db, "UPDATE author_documents SET title = ?, volume_id = ?, act_id = ?, summary = ?, updated_at = ? WHERE id = ?;")
+            .run(title, volumeId, actId, nextSummary, now, targetDocId);
+          ctx.event(projectId, "chapter", "chapter.updated", { documentId: targetDocId });
+        }
+        if (bodyChanged) {
           ctx.appendDraftRevision(ctx.document(targetDocId), body, (saved) => {
             const nextState = saved.state === "planned" || saved.state === "drafting" ? "drafting" : "drafted";
             stmt(ctx.db, "UPDATE author_documents SET state = ? WHERE id = ?;").run(nextState, saved.id);
             ctx.event(projectId!, "chapter", "document.state", { documentId: saved.id, state: nextState });
           });
         }
-        chaptersUpdated += 1;
+        if (metaChanged || bodyChanged) {
+          chaptersUpdated += 1;
+        }
       } else {
         targetDocId = randomUUID();
         createDocument(ctx.db, targetDocId);
@@ -403,11 +473,7 @@ export function importProjectBundle(ctx: WorkspaceContext, input: Input): Projec
           VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?);
         `).run(targetDocId, projectId, title, initialState, volumeId, actId, meta.summary ?? manifestCh?.summary ?? "", now);
         ctx.event(projectId, "chapter", "document.created", {
-          documentId: targetDocId,
-          title,
-          mode: null,
-          line: null,
-          state: initialState,
+          documentId: targetDocId, title, mode: null, line: null, state: initialState,
         });
         if (body.length > 0) {
           ctx.appendDraftRevision(ctx.document(targetDocId), body, () => {});
@@ -415,6 +481,9 @@ export function importProjectBundle(ctx: WorkspaceContext, input: Input): Projec
         if (manifestCh?.planning) {
           ctx.savePlanning(ctx.document(targetDocId), manifestCh.planning);
         }
+        if (meta.chapterId) chapterIdMap.set(meta.chapterId, targetDocId);
+        if (manifestCh?.id) chapterIdMap.set(manifestCh.id, targetDocId);
+        validDocIdsInProject.add(targetDocId);
         chaptersCreated += 1;
       }
       importedChapterOrder.push(targetDocId);
@@ -423,107 +492,341 @@ export function importProjectBundle(ctx: WorkspaceContext, input: Input): Projec
     if (importedChapterOrder.length > 0) {
       const merged = ctx.chapterOrder(projectId);
       const finalOrder = [...new Set([...merged, ...importedChapterOrder])];
-      stmt(ctx.db, `
-        INSERT INTO author_chapter_order (project_id, chapter_ids) VALUES (?, ?)
-        ON CONFLICT (project_id) DO UPDATE SET chapter_ids = excluded.chapter_ids;
-      `).run(projectId, JSON.stringify(finalOrder));
+      if (JSON.stringify(merged) !== JSON.stringify(finalOrder)) {
+        stmt(ctx.db, `
+          INSERT INTO author_chapter_order (project_id, chapter_ids) VALUES (?, ?)
+          ON CONFLICT (project_id) DO UPDATE SET chapter_ids = excluded.chapter_ids;
+        `).run(projectId, JSON.stringify(finalOrder));
+      }
     }
 
-    // Propose lore items from manifest as author-pending proposals (never overwriting locked settings).
+    // Idempotent lore proposal import (skips locked settings & identical existing approved/pending entries)
     let loreProposed = 0;
     const defaultChapterId = importedChapterOrder[0] ?? ctx.chapterOrder(projectId)[0];
     for (const item of manifest?.lore ?? []) {
       if (!item.factId || !item.fact?.note) continue;
-      const lockedExisting = stmt(ctx.db, `
-        SELECT locked FROM author_lore_current WHERE project_id = ? AND fact_id = ?;
-      `).get(projectId, item.factId) as { locked?: number } | undefined;
-      if (lockedExisting?.locked === 1) continue;
       if (!defaultChapterId) continue;
 
-      const proposalId = randomUUID();
+      const effectiveFrom = remapAnchor(item.fact.effectiveFrom, chapterIdMap, validDocIdsInProject, defaultChapterId);
+      const effectiveTo = item.fact.effectiveTo
+        ? remapAnchor(item.fact.effectiveTo, chapterIdMap, validDocIdsInProject, defaultChapterId)
+        : undefined;
+      const knownFrom: Record<string, { chapterId: string; point: number }> = {};
+      if (item.fact.knownFrom && typeof item.fact.knownFrom === "object") {
+        for (const [charName, anc] of Object.entries(item.fact.knownFrom)) {
+          knownFrom[charName] = remapAnchor(anc, chapterIdMap, validDocIdsInProject, defaultChapterId);
+        }
+      }
+      const category = item.category ?? "world_rule";
+      const entityName = item.entityName ?? "";
       const factValue = {
         id: item.factId,
         note: item.fact.note,
         source: item.fact.source ?? "本地资产包导入提案",
         kind: item.fact.kind === "agreement" ? "agreement" : "fact",
         locked: item.fact.locked === true,
-        effectiveFrom: { chapterId: defaultChapterId, point: 1 },
-        knownFrom: {},
+        effectiveFrom,
+        ...(effectiveTo ? { effectiveTo } : {}),
+        knownFrom,
       };
+      const factJson = JSON.stringify(factValue);
+
+      const approvedRow = stmt(ctx.db, `
+        SELECT locked, value FROM author_lore_current WHERE project_id = ? AND fact_id = ?;
+      `).get(projectId, item.factId) as { locked?: number; value?: string } | undefined;
+      if (approvedRow?.locked === 1 || approvedRow?.value === factJson) continue;
+
+      const existingPending = stmt(ctx.db, `
+        SELECT 1 FROM author_settings
+        WHERE project_id = ? AND fact_id = ? AND decision = 'pending' AND value = ?
+        LIMIT 1;
+      `).get(projectId, item.factId, factJson);
+      if (existingPending) continue;
+
+      const proposalId = randomUUID();
       stmt(ctx.db, `
         INSERT INTO author_settings (id, project_id, fact_id, category, entity_name, value, decision)
         VALUES (?, ?, ?, ?, ?, ?, 'pending');
-      `).run(
-        proposalId,
-        projectId,
-        item.factId,
-        item.category ?? "world_rule",
-        item.entityName ?? "",
-        JSON.stringify(factValue),
-      );
+      `).run(proposalId, projectId, item.factId, category, entityName, factJson);
       ctx.event(projectId, "setting", "setting.proposed", { id: proposalId, factId: item.factId });
       loreProposed += 1;
     }
 
+    // Restore foreshadows idempotently
+    let foreshadowsImported = 0;
+    const remapOptionalCh = (src: string | null | undefined): string | null => {
+      if (!src) return null;
+      return chapterIdMap.get(src) ?? (validDocIdsInProject.has(src) ? src : null);
+    };
+    const existingFsRows = stmt(ctx.db, `
+      SELECT id, fact_id AS factId, title, planted_chapter_id AS plantedChapterId, planted_point AS plantedPoint,
+        target_chapter_id AS targetChapterId, resolved_chapter_id AS resolvedChapterId, status, note
+      FROM author_foreshadows WHERE project_id = ?;
+    `).all(projectId) as readonly {
+      id: string;
+      factId: string | null;
+      title: string;
+      plantedChapterId: string | null;
+      plantedPoint: number;
+      targetChapterId: string | null;
+      resolvedChapterId: string | null;
+      status: string;
+      note: string;
+    }[];
+    const fsById = new Map(existingFsRows.map((f) => [f.id, f]));
+    const fsByKey = new Map(existingFsRows.map((f) => [`${f.title}\0${f.factId ?? ""}`, f]));
+
+    for (const fs of manifest?.foreshadows ?? []) {
+      const title = typeof fs.title === "string" ? fs.title.trim() : "";
+      if (!title) continue;
+      const factId = typeof fs.factId === "string" && fs.factId.trim() ? fs.factId.trim() : null;
+      const status = typeof fs.status === "string" && VALID_FS_STATUSES.has(fs.status) ? fs.status : "planted";
+      const plantedChapterId = remapOptionalCh(fs.plantedChapterId);
+      const targetChapterId = remapOptionalCh(fs.targetChapterId);
+      const resolvedChapterId = remapOptionalCh(fs.resolvedChapterId);
+      const plantedPoint = typeof fs.plantedPoint === "number" && Number.isSafeInteger(fs.plantedPoint) && fs.plantedPoint >= 1
+        ? fs.plantedPoint
+        : 1;
+      const note = typeof fs.note === "string" ? fs.note.trim() : "";
+
+      const match = (fs.id ? fsById.get(fs.id) : undefined) ?? fsByKey.get(`${title}\0${factId ?? ""}`);
+      if (match) {
+        const same =
+          match.factId === factId &&
+          match.plantedChapterId === plantedChapterId &&
+          match.plantedPoint === plantedPoint &&
+          match.targetChapterId === targetChapterId &&
+          match.resolvedChapterId === resolvedChapterId &&
+          match.status === status &&
+          match.note === note;
+        if (same) continue;
+        stmt(ctx.db, `
+          UPDATE author_foreshadows
+          SET fact_id = ?, planted_chapter_id = ?, planted_point = ?,
+              target_chapter_id = ?, resolved_chapter_id = ?, status = ?, note = ?, updated_at = ?
+          WHERE id = ?;
+        `).run(factId, plantedChapterId, plantedPoint, targetChapterId, resolvedChapterId, status, note, now, match.id);
+        ctx.event(projectId, "setting", "foreshadow.updated", { id: match.id, status });
+        foreshadowsImported += 1;
+      } else {
+        const newFsId = randomUUID();
+        stmt(ctx.db, `
+          INSERT INTO author_foreshadows (
+            id, project_id, fact_id, title, planted_chapter_id, planted_point,
+            target_chapter_id, resolved_chapter_id, status, note, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        `).run(newFsId, projectId, factId, title, plantedChapterId, plantedPoint, targetChapterId, resolvedChapterId, status, note, now);
+        ctx.event(projectId, "setting", "foreshadow.updated", { id: newFsId, status });
+        const inserted = {
+          id: newFsId, factId, title, plantedChapterId, plantedPoint, targetChapterId, resolvedChapterId, status, note,
+        };
+        fsById.set(newFsId, inserted);
+        fsByKey.set(`${title}\0${factId ?? ""}`, inserted);
+        foreshadowsImported += 1;
+      }
+    }
+
+    // Idempotent library deconstruction & technique import
     let libraryImported = 0;
+    const deconstructIdMap = new Map<string, string>();
+    const existingDecs = stmt(ctx.db, `
+      SELECT id, scope, project_id AS projectId, title, source_book AS sourceBook, genre, pacing,
+        tags_json AS tagsJson, excerpt, hook_analysis AS hookAnalysis, conflict_beats AS conflictBeats,
+        payoff_rhythm AS payoffRhythm, prose_notes AS proseNotes
+      FROM library_deconstructions WHERE scope = 'global' OR project_id = ?;
+    `).all(projectId) as readonly {
+      id: string; scope: string; projectId: string | null; title: string; sourceBook: string;
+      genre: string; pacing: string; tagsJson: string; excerpt: string; hookAnalysis: string;
+      conflictBeats: string; payoffRhythm: string; proseNotes: string;
+    }[];
+    const decById = new Map(existingDecs.map((d) => [d.id, d]));
+    const decByProjectKey = new Map(
+      existingDecs.filter((d) => d.projectId === projectId).map((d) => [`${d.title}\0${d.sourceBook}`, d]),
+    );
+
     for (const dec of manifest?.deconstructions ?? []) {
       if (typeof dec.title !== "string" || typeof dec.excerpt !== "string") continue;
-      const decId = randomUUID();
-      stmt(ctx.db, `
-        INSERT INTO library_deconstructions (
-          id, scope, project_id, title, source_book, genre, pacing, tags_json, excerpt,
-          hook_analysis, conflict_beats, payoff_rhythm, prose_notes, status, source_kind, created_at, updated_at
-        ) VALUES (?, 'project', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', 'import', ?, ?);
-      `).run(
-        decId,
-        projectId,
-        dec.title,
-        typeof dec.sourceBook === "string" ? dec.sourceBook : "",
-        typeof dec.genre === "string" ? dec.genre : "",
-        typeof dec.pacing === "string" ? dec.pacing : "",
-        JSON.stringify(Array.isArray(dec.tags) ? dec.tags : []),
-        dec.excerpt,
-        typeof dec.hookAnalysis === "string" ? dec.hookAnalysis : "",
-        typeof dec.conflictBeats === "string" ? dec.conflictBeats : "",
-        typeof dec.payoffRhythm === "string" ? dec.payoffRhythm : "",
-        typeof dec.proseNotes === "string" ? dec.proseNotes : "",
-        now,
-        now,
-      );
-      libraryImported += 1;
+      const srcId = typeof dec.id === "string" ? dec.id : undefined;
+      const sourceBook = typeof dec.sourceBook === "string" ? dec.sourceBook : "";
+      const genre = typeof dec.genre === "string" ? dec.genre : "";
+      const pacing = typeof dec.pacing === "string" ? dec.pacing : "";
+      const tagsJson = JSON.stringify(Array.isArray(dec.tags) ? dec.tags : []);
+      const hookAnalysis = typeof dec.hookAnalysis === "string" ? dec.hookAnalysis : "";
+      const conflictBeats = typeof dec.conflictBeats === "string" ? dec.conflictBeats : "";
+      const payoffRhythm = typeof dec.payoffRhythm === "string" ? dec.payoffRhythm : "";
+      const proseNotes = typeof dec.proseNotes === "string" ? dec.proseNotes : "";
+      const incomingHash = sha256(JSON.stringify([
+        dec.title, sourceBook, genre, pacing, tagsJson, dec.excerpt, hookAnalysis, conflictBeats, payoffRhythm, proseNotes,
+      ]));
+
+      const idMatch = srcId ? decById.get(srcId) : undefined;
+      if (idMatch && idMatch.scope === "global") {
+        deconstructIdMap.set(srcId!, idMatch.id);
+        continue;
+      }
+      const existing = (idMatch && idMatch.projectId === projectId ? idMatch : undefined) ??
+        decByProjectKey.get(`${dec.title}\0${sourceBook}`);
+      if (existing) {
+        if (srcId) deconstructIdMap.set(srcId, existing.id);
+        const existingHash = sha256(JSON.stringify([
+          existing.title, existing.sourceBook, existing.genre, existing.pacing, existing.tagsJson,
+          existing.excerpt, existing.hookAnalysis, existing.conflictBeats, existing.payoffRhythm, existing.proseNotes,
+        ]));
+        if (existingHash === incomingHash) continue;
+        stmt(ctx.db, `
+          UPDATE library_deconstructions
+          SET genre = ?, pacing = ?, tags_json = ?, excerpt = ?, hook_analysis = ?,
+              conflict_beats = ?, payoff_rhythm = ?, prose_notes = ?, updated_at = ?
+          WHERE id = ?;
+        `).run(genre, pacing, tagsJson, dec.excerpt, hookAnalysis, conflictBeats, payoffRhythm, proseNotes, now, existing.id);
+        libraryImported += 1;
+      } else {
+        const decId = randomUUID();
+        stmt(ctx.db, `
+          INSERT INTO library_deconstructions (
+            id, scope, project_id, title, source_book, genre, pacing, tags_json, excerpt,
+            hook_analysis, conflict_beats, payoff_rhythm, prose_notes, status, source_kind, created_at, updated_at
+          ) VALUES (?, 'project', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', 'import', ?, ?);
+        `).run(
+          decId, projectId, dec.title, sourceBook, genre, pacing, tagsJson,
+          dec.excerpt, hookAnalysis, conflictBeats, payoffRhythm, proseNotes, now, now,
+        );
+        if (srcId) deconstructIdMap.set(srcId, decId);
+        libraryImported += 1;
+      }
     }
+
+    const techniqueIdMap = new Map<string, string>();
+    const existingTechs = stmt(ctx.db, `
+      SELECT id, scope, project_id AS projectId, title, category, pacing, scene_tags_json AS sceneTagsJson,
+        trigger_when AS triggerWhen, execution_steps AS executionSteps, constraints, anti_patterns AS antiPatterns,
+        example_excerpt AS exampleExcerpt, priority
+      FROM library_technique_cards WHERE scope = 'global' OR project_id = ?;
+    `).all(projectId) as readonly {
+      id: string; scope: string; projectId: string | null; title: string; category: string; pacing: string;
+      sceneTagsJson: string; triggerWhen: string; executionSteps: string; constraints: string;
+      antiPatterns: string; exampleExcerpt: string; priority: number;
+    }[];
+    const techById = new Map(existingTechs.map((t) => [t.id, t]));
+    const techByProjectKey = new Map(
+      existingTechs.filter((t) => t.projectId === projectId).map((t) => [`${t.title}\0${t.category}`, t]),
+    );
 
     for (const card of manifest?.techniques ?? []) {
       if (typeof card.title !== "string" || typeof card.executionSteps !== "string") continue;
-      const cardId = randomUUID();
+      const srcId = typeof card.id === "string" ? card.id : undefined;
+      const category = typeof card.category === "string" ? card.category : "narrative";
+      const pacing = typeof card.pacing === "string" ? card.pacing : "";
+      const sceneTagsJson = JSON.stringify(Array.isArray(card.sceneTags) ? card.sceneTags : []);
+      const triggerWhen = typeof card.triggerWhen === "string" ? card.triggerWhen : "";
+      const constraints = typeof card.constraints === "string" ? card.constraints : "";
+      const antiPatterns = typeof card.antiPatterns === "string" ? card.antiPatterns : "";
+      const exampleExcerpt = typeof card.exampleExcerpt === "string" ? card.exampleExcerpt : "";
+      const priority = typeof card.priority === "number" ? card.priority : 50;
+      const incomingHash = sha256(JSON.stringify([
+        card.title, category, pacing, sceneTagsJson, triggerWhen, card.executionSteps, constraints, antiPatterns, exampleExcerpt, priority,
+      ]));
+
+      const idMatch = srcId ? techById.get(srcId) : undefined;
+      if (idMatch && idMatch.scope === "global") {
+        techniqueIdMap.set(srcId!, idMatch.id);
+        continue;
+      }
+      const existing = (idMatch && idMatch.projectId === projectId ? idMatch : undefined) ??
+        techByProjectKey.get(`${card.title}\0${category}`);
+      if (existing) {
+        if (srcId) techniqueIdMap.set(srcId, existing.id);
+        const existingHash = sha256(JSON.stringify([
+          existing.title, existing.category, existing.pacing, existing.sceneTagsJson, existing.triggerWhen,
+          existing.executionSteps, existing.constraints, existing.antiPatterns, existing.exampleExcerpt, existing.priority,
+        ]));
+        if (existingHash === incomingHash) continue;
+        stmt(ctx.db, `
+          UPDATE library_technique_cards
+          SET pacing = ?, scene_tags_json = ?, trigger_when = ?, execution_steps = ?,
+              constraints = ?, anti_patterns = ?, example_excerpt = ?, priority = ?, updated_at = ?
+          WHERE id = ?;
+        `).run(pacing, sceneTagsJson, triggerWhen, card.executionSteps, constraints, antiPatterns, exampleExcerpt, priority, now, existing.id);
+        libraryImported += 1;
+      } else {
+        const cardId = randomUUID();
+        stmt(ctx.db, `
+          INSERT INTO library_technique_cards (
+            id, scope, project_id, title, category, pacing, scene_tags_json,
+            trigger_when, execution_steps, constraints, anti_patterns, example_excerpt,
+            priority, status, source_kind, created_at, updated_at
+          ) VALUES (?, 'project', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', 'import', ?, ?);
+        `).run(
+          cardId, projectId, card.title, category, pacing, sceneTagsJson, triggerWhen,
+          card.executionSteps, constraints, antiPatterns, exampleExcerpt, priority, now, now,
+        );
+        if (srcId) techniqueIdMap.set(srcId, cardId);
+        libraryImported += 1;
+      }
+    }
+
+    // Restore author_library_mounts with ID remapping & deduplication
+    let mountsRestored = 0;
+    const existingMounts = stmt(ctx.db, `
+      SELECT target_type AS targetType, target_id AS targetId, item_kind AS itemKind, item_id AS itemId, mode, weight, note
+      FROM author_library_mounts WHERE project_id = ?;
+    `).all(projectId) as readonly {
+      targetType: string; targetId: string; itemKind: string; itemId: string; mode: string; weight: number; note: string;
+    }[];
+    const mountMap = new Map(
+      existingMounts.map((m) => [`${m.targetType}\0${m.targetId}\0${m.itemKind}\0${m.itemId}`, m]),
+    );
+
+    for (const m of manifest?.mounts ?? []) {
+      const targetType = m.targetType;
+      const itemKind = m.itemKind;
+      if (
+        (targetType !== "project" && targetType !== "volume" && targetType !== "act" && targetType !== "chapter") ||
+        (itemKind !== "deconstruction" && itemKind !== "technique") ||
+        typeof m.targetId !== "string" ||
+        typeof m.itemId !== "string"
+      ) {
+        continue;
+      }
+      const targetId = targetType === "project"
+        ? projectId
+        : targetType === "volume"
+          ? volumeIdMap.get(m.targetId)
+          : targetType === "act"
+            ? actIdMap.get(m.targetId)
+            : (chapterIdMap.get(m.targetId) ?? (validDocIdsInProject.has(m.targetId) ? m.targetId : undefined));
+      if (!targetId) continue;
+
+      const itemId = itemKind === "deconstruction"
+        ? (deconstructIdMap.get(m.itemId) ?? m.itemId)
+        : (techniqueIdMap.get(m.itemId) ?? m.itemId);
+      const libTable = itemKind === "deconstruction" ? "library_deconstructions" : "library_technique_cards";
+      const itemExists = stmt(ctx.db, `SELECT 1 FROM ${libTable} WHERE id = ? AND (scope = 'global' OR project_id = ?);`)
+        .get(itemId, projectId);
+      if (!itemExists) continue;
+
+      const mode = m.mode === "exclude" || m.mode === "pin" ? m.mode : "include";
+      const weight = typeof m.weight === "number" && Number.isSafeInteger(m.weight) && m.weight >= 0 ? m.weight : 100;
+      const note = typeof m.note === "string" ? m.note.trim() : "";
+
+      const mountKey = `${targetType}\0${targetId}\0${itemKind}\0${itemId}`;
+      const existing = mountMap.get(mountKey);
+      if (existing && existing.mode === mode && existing.weight === weight && existing.note === note) {
+        continue;
+      }
       stmt(ctx.db, `
-        INSERT INTO library_technique_cards (
-          id, scope, project_id, title, category, pacing, scene_tags_json,
-          trigger_when, execution_steps, constraints, anti_patterns, example_excerpt,
-          priority, status, source_kind, created_at, updated_at
-        ) VALUES (?, 'project', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', 'import', ?, ?);
-      `).run(
-        cardId,
-        projectId,
-        card.title,
-        typeof card.category === "string" ? card.category : "narrative",
-        typeof card.pacing === "string" ? card.pacing : "",
-        JSON.stringify(Array.isArray(card.sceneTags) ? card.sceneTags : []),
-        typeof card.triggerWhen === "string" ? card.triggerWhen : "",
-        card.executionSteps,
-        typeof card.constraints === "string" ? card.constraints : "",
-        typeof card.antiPatterns === "string" ? card.antiPatterns : "",
-        typeof card.exampleExcerpt === "string" ? card.exampleExcerpt : "",
-        typeof card.priority === "number" ? card.priority : 50,
-        now,
-        now,
-      );
-      libraryImported += 1;
+        INSERT INTO author_library_mounts (id, project_id, target_type, target_id, item_kind, item_id, mode, weight, note)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (project_id, target_type, target_id, item_kind, item_id) DO UPDATE SET
+          mode = excluded.mode, weight = excluded.weight, note = excluded.note;
+      `).run(randomUUID(), projectId, targetType, targetId, itemKind, itemId, mode, weight, note);
+      mountMap.set(mountKey, { targetType, targetId, itemKind, itemId, mode, weight, note });
+      ctx.event(projectId, "setting", "library.mounted", { targetType, targetId, itemKind, itemId, mode });
+      mountsRestored += 1;
     }
 
     rebuildProjectFts(ctx.db, projectId);
-    if (chaptersSkippedLocked.length > 0 && requestedProjectId && chaptersCreated === 0 && chaptersUpdated === 0 && loreProposed === 0 && libraryImported === 0) {
-      // Allow returning summary cleanly even when only locked chapters matched.
+    if (chaptersSkippedLocked.length > 0 && requestedProjectId && chaptersCreated === 0 && chaptersUpdated === 0 && loreProposed === 0 && libraryImported === 0 && foreshadowsImported === 0 && mountsRestored === 0) {
       void refuse;
     }
 
@@ -536,6 +839,8 @@ export function importProjectBundle(ctx: WorkspaceContext, input: Input): Projec
       chaptersSkippedLocked,
       loreProposed,
       libraryImported,
+      foreshadowsImported,
+      mountsRestored,
     };
   });
 }

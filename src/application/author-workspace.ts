@@ -39,7 +39,7 @@ export function openAuthorWorkspace(
 
   const runs = createRunService(ctx, registry, saveDraftForRow);
   const snapshots = createSnapshotService(ctx, registry);
-  const proposals = createProposalService(ctx);
+  const proposals = createProposalService(ctx, registry);
 
   function mutation(action: string, input: Input) {
     switch (action) {
@@ -127,6 +127,7 @@ export function openAuthorWorkspace(
   }
 
   function recoverStartup(): void {
+    runs.recoverGenerations();
     proposals.recoverProposals();
     for (const mod of registry.all()) {
       mod.onStartupRecover?.(ctx);
@@ -146,9 +147,11 @@ export function openAuthorWorkspace(
     recoverGenerations: runs.recoverGenerations,
     reserveRefinement: runs.reserveRefinement,
     failGeneration: runs.failGeneration,
+    buildSelectionRewriteInput: runs.buildSelectionRewriteInput,
     beginProposalGeneration: proposals.beginProposalGeneration,
     recordProposalReceipt: proposals.recordProposalReceipt,
     finishProposalGeneration: proposals.finishProposalGeneration,
+    cancelProposalGeneration: proposals.cancelProposalGeneration,
     recoverProposals: proposals.recoverProposals,
     recoverStartup,
     resumeExports: () => toutiaoModule.onStartupRecover?.(ctx),

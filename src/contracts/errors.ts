@@ -47,6 +47,7 @@ function isFrozenCode(code: string): code is ErrorCode {
 export class ContractError extends Error {
   readonly code: ErrorCode;
   readonly details: ErrorDetails;
+  readonly diagnosticId: string;
 
   constructor(code: ErrorCode, details: ErrorDetails = {}) {
     if (!isFrozenCode(code)) {
@@ -56,11 +57,12 @@ export class ContractError extends Error {
     this.name = "ContractError";
     this.code = code;
     this.details = details;
+    this.diagnosticId = randomUUID();
   }
 
-  /** The frozen envelope. A fresh diagnostic id is minted per envelope. */
+  /** The frozen envelope carrying the instance's diagnostic correlation id. */
   toEnvelope(): ErrorEnvelope {
-    return { code: this.code, details: this.details, diagnosticId: randomUUID() };
+    return { code: this.code, details: this.details, diagnosticId: this.diagnosticId };
   }
 }
 

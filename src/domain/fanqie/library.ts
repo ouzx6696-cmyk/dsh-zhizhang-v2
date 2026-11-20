@@ -14,6 +14,9 @@ export const TECHNIQUE_CATEGORIES = [
 ] as const;
 export type TechniqueCategory = (typeof TECHNIQUE_CATEGORIES)[number];
 
+export const WRITING_STAGE_BINDINGS = ["plan", "write", "review", "refine", "deslop"] as const;
+export type WritingStageBinding = (typeof WRITING_STAGE_BINDINGS)[number];
+
 export interface TechniqueCardForRank {
   readonly id: string;
   readonly scope: "global" | "project";
@@ -28,6 +31,8 @@ export interface TechniqueCardForRank {
   readonly antiPatterns: string;
   readonly priority: number;
   readonly status: "proposed" | "approved" | "archived";
+  readonly assetKind?: "technique" | "skill";
+  readonly stageBindings?: readonly WritingStageBinding[];
 }
 
 export interface LibraryMountRule {
@@ -66,6 +71,31 @@ export function normalizeTags(raw: unknown): string[] {
   throw new ContractError("input.invalid", { field: "tags", reason: "expected-string-or-list" });
 }
 
+/** Validates and normalizes stage bindings, defaulting empty inputs to `["write"]`. */
+export function normalizeStageBindings(raw: unknown): WritingStageBinding[] {
+  if (raw === undefined || raw === null || raw === "") return ["write"];
+  let tokens: string[];
+  if (Array.isArray(raw)) {
+    tokens = raw.map((item) => String(item).trim().toLowerCase()).filter(Boolean);
+  } else if (typeof raw === "string") {
+    tokens = raw.split(/[,，\n、\s]+/u).map((item) => item.trim().toLowerCase()).filter(Boolean);
+  } else {
+    throw new ContractError("input.invalid", { field: "stageBindings", reason: "expected-string-or-list" });
+  }
+  if (tokens.length === 0) return ["write"];
+  const valid = new Set<string>(WRITING_STAGE_BINDINGS);
+  const result: WritingStageBinding[] = [];
+  for (const token of tokens) {
+    if (!valid.has(token)) {
+      throw new ContractError("input.invalid", { field: "stageBindings", reason: "unknown-stage-binding" });
+    }
+    if (!result.includes(token as WritingStageBinding)) {
+      result.push(token as WritingStageBinding);
+    }
+  }
+  return result;
+}
+
 /** Validates optional pacing tier against Fanqie `PACING` vocabulary. */
 export function validatePacingLabel(pacing: unknown): string {
   if (pacing === undefined || pacing === null || pacing === "") return "";
@@ -94,7 +124,7 @@ export function resolveScopedItems<
 
 /**
  * Resolves the highest-precedence mount rule (`chapter > act > volume > project`)
- * for a library item in the current writing context.
+ * for a library item (or its overridden base card ID) in the current writing context.
  */
 export function resolveEffectiveMount(
   mounts: readonly LibraryMountRule[],
@@ -106,18 +136,27 @@ export function resolveEffectiveMount(
     readonly actId: string | null;
     readonly chapterId: string;
   },
+  fallbackItemId: string | null = null,
 ): LibraryMountRule | null {
   let best: LibraryMountRule | null = null;
+  let bestPrecedence = -1;
+  let bestDirect = false;
   for (const mount of mounts) {
-    if (mount.itemKind !== itemKind || mount.itemId !== itemId) continue;
+    if (mount.itemKind !== itemKind) continue;
+    const isDirect = mount.itemId === itemId;
+    const isFallback = Boolean(fallbackItemId && mount.itemId === fallbackItemId);
+    if (!isDirect && !isFallback) continue;
     const matches =
       (mount.targetType === "chapter" && mount.targetId === contextIds.chapterId) ||
       (mount.targetType === "act" && contextIds.actId !== null && mount.targetId === contextIds.actId) ||
       (mount.targetType === "volume" && contextIds.volumeId !== null && mount.targetId === contextIds.volumeId) ||
       (mount.targetType === "project" && mount.targetId === contextIds.projectId);
     if (!matches) continue;
-    if (!best || TARGET_PRECEDENCE[mount.targetType] > TARGET_PRECEDENCE[best.targetType]) {
+    const precedence = TARGET_PRECEDENCE[mount.targetType];
+    if (precedence > bestPrecedence || (precedence === bestPrecedence && isDirect && !bestDirect)) {
       best = mount;
+      bestPrecedence = precedence;
+      bestDirect = isDirect;
     }
   }
   return best;
@@ -125,8 +164,9 @@ export function resolveEffectiveMount(
 
 /**
  * Deterministic zero-token technique recommender for Fanqie chapters.
- * Scores approved cards by explicit mount precedence, pacing alignment,
- * golden-three-chapter boost, and keyword/tag overlap with outline/instruction.
+ * Scores approved cards by explicit mount precedence (including inherited
+ * override mounts), stage binding, pacing alignment, golden-three boost,
+ * and keyword/tag overlap with outline/instruction.
  */
 export function rankTechniquesForChapter(params: {
   readonly cards: readonly TechniqueCardForRank[];
@@ -140,14 +180,26 @@ export function rankTechniquesForChapter(params: {
   readonly pacing?: string;
   readonly outlineText?: string;
   readonly chapterIndex?: number;
+  readonly stage?: WritingStageBinding;
 }): TechniqueMatchResult[] {
-  const effectiveCards = resolveScopedItems(params.cards).filter((card) => card.status === "approved");
+  const effectiveCards = resolveScopedItems(params.cards).filter((card) => {
+    if (card.status !== "approved") return false;
+    if (!params.stage) return true;
+    const bindings = card.stageBindings && card.stageBindings.length > 0 ? card.stageBindings : ["write"];
+    return bindings.includes(params.stage);
+  });
   const textCorpus = (params.outlineText ?? "").toLowerCase();
   const isGoldenOpening = params.chapterIndex !== undefined && params.chapterIndex < 3;
   const results: TechniqueMatchResult[] = [];
 
   for (const card of effectiveCards) {
-    const mount = resolveEffectiveMount(params.mounts, "technique", card.id, params.contextIds);
+    const mount = resolveEffectiveMount(
+      params.mounts,
+      "technique",
+      card.id,
+      params.contextIds,
+      card.overrideOfId,
+    );
     if (mount?.mode === "exclude") continue;
 
     let score = card.priority;

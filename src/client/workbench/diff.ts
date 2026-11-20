@@ -16,6 +16,11 @@ export interface ParagraphDiffSummary {
   readonly unchanged: number;
 }
 
+export interface InlineDiffSegment {
+  readonly kind: "equal" | "removed" | "added";
+  readonly text: string;
+}
+
 /** Counts Unicode code points (matches backend TITLE_MAX semantics). */
 export function countUnicodeCodePoints(value: string): number {
   return [...value.trim()].length;
@@ -24,6 +29,97 @@ export function countUnicodeCodePoints(value: string): number {
 /** Counts non-whitespace Unicode characters (matches chapter/article length semantics). */
 export function countNonWhitespaceChars(value: string): number {
   return [...value.replace(/\s/gu, "")].length;
+}
+
+/** Tokenizes CJK text per code point while keeping ASCII words & whitespace runs intact. */
+export function tokenizeForInlineDiff(text: string): string[] {
+  if (!text) return [];
+  return text.match(/[A-Za-z0-9_]+|\s+|[\u{10000}-\u{10FFFF}]|./gu) ?? [];
+}
+
+/**
+ * Computes character/word-level inline LCS diff segments inside a changed
+ * paragraph or selected rewrite fragment, merging contiguous same-kind segments.
+ */
+export function computeInlineDiff(before: string, after: string): InlineDiffSegment[] {
+  const left = tokenizeForInlineDiff(before);
+  const right = tokenizeForInlineDiff(after);
+  const m = left.length;
+  const n = right.length;
+  const raw: InlineDiffSegment[] = [];
+
+  if (m * n > 80_000) {
+    let prefix = 0;
+    while (prefix < m && prefix < n && left[prefix] === right[prefix]) prefix++;
+    let suffix = 0;
+    while (suffix < m - prefix && suffix < n - prefix && left[m - 1 - suffix] === right[n - 1 - suffix]) suffix++;
+    if (prefix > 0) raw.push({ kind: "equal", text: left.slice(0, prefix).join("") });
+    if (prefix + suffix < m) raw.push({ kind: "removed", text: left.slice(prefix, m - suffix).join("") });
+    if (prefix + suffix < n) raw.push({ kind: "added", text: right.slice(prefix, n - suffix).join("") });
+    if (suffix > 0) raw.push({ kind: "equal", text: left.slice(m - suffix).join("") });
+    return raw;
+  }
+
+  const dp: Uint32Array[] = Array.from({ length: m + 1 }, () => new Uint32Array(n + 1));
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      if (left[i] === right[j]) dp[i][j] = dp[i + 1][j + 1] + 1;
+      else dp[i][j] = dp[i + 1][j] >= dp[i][j + 1] ? dp[i + 1][j] : dp[i][j + 1];
+    }
+  }
+
+  let i = 0;
+  let j = 0;
+  const pushSeg = (kind: InlineDiffSegment["kind"], text: string) => {
+    const last = raw[raw.length - 1];
+    if (last && last.kind === kind) raw[raw.length - 1] = { kind, text: last.text + text };
+    else raw.push({ kind, text });
+  };
+  while (i < m && j < n) {
+    if (left[i] === right[j]) {
+      pushSeg("equal", left[i]);
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      pushSeg("removed", left[i]);
+      i++;
+    } else {
+      pushSeg("added", right[j]);
+      j++;
+    }
+  }
+  while (i < m) {
+    pushSeg("removed", left[i]);
+    i++;
+  }
+  while (j < n) {
+    pushSeg("added", right[j]);
+    j++;
+  }
+  return raw;
+}
+
+/**
+ * Produces the merged chapter body by keeping selected `changed`/`added`/`removed`
+ * hunk row indices (`0`-based in `diff.rows`) and rejecting unselected hunks.
+ */
+export function mergeParagraphSelections(
+  diff: ParagraphDiffSummary,
+  adoptedRowIndices: ReadonlySet<number>,
+): string {
+  const output: string[] = [];
+  diff.rows.forEach((row, idx) => {
+    if (row.kind === "equal") {
+      output.push(row.leftText);
+    } else if (row.kind === "changed") {
+      output.push(adoptedRowIndices.has(idx) ? row.rightText : row.leftText);
+    } else if (row.kind === "added") {
+      if (adoptedRowIndices.has(idx)) output.push(row.rightText);
+    } else if (row.kind === "removed") {
+      if (!adoptedRowIndices.has(idx)) output.push(row.leftText);
+    }
+  });
+  return output.join("\n");
 }
 
 function splitParagraphs(text: string): string[] {

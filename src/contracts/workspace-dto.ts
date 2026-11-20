@@ -95,6 +95,23 @@ export interface CandidateQaReport {
   readonly hardGates: readonly string[];
 }
 
+export type RecoveryHintKind = "output_truncated" | "thinking_exhausted" | "budget_exhausted";
+
+export interface RecoveryHintDto {
+  readonly kind: RecoveryHintKind;
+  readonly action: "increase_output_limit" | "disable_thinking" | "increase_budget";
+  readonly message: string;
+}
+
+export interface RunBillingSummaryDto {
+  readonly totalInput: number;
+  readonly totalOutput: number;
+  readonly totalCacheRead: number;
+  readonly totalCacheWrite: number;
+  readonly effectiveBilledTokens: number | null;
+  readonly cacheHitRate: number | null;
+}
+
 export interface RunSummary {
   readonly id: string;
   readonly state: string;
@@ -107,6 +124,7 @@ export interface RunSummary {
   readonly refinementRounds: number | null;
   readonly generationState: string | null;
   readonly generationError: string | null;
+  readonly recoveryHints?: readonly RecoveryHintDto[];
 }
 export type RunSummaryView = RunSummary;
 
@@ -151,6 +169,9 @@ export interface RunDetailDto {
   readonly candidate: { readonly body: string } | null;
   readonly attempts: readonly GenerationAttemptDto[];
   readonly calls: readonly GenerationCallDto[];
+  readonly billing?: RunBillingSummaryDto;
+  readonly contextTrace?: ContextAssemblyReportDto | null;
+  readonly recoveryHints?: readonly RecoveryHintDto[];
 }
 export type RunDetailView = RunDetailDto;
 
@@ -221,7 +242,22 @@ export type LibraryItemKind = "deconstruction" | "technique";
 export type LibraryMountTarget = "project" | "volume" | "act" | "chapter";
 export type LibraryMountMode = "include" | "exclude" | "pin";
 export type ContextSlotPriority = "critical" | "high" | "medium" | "optional";
-export type AiProposalKind = "deconstruct" | "technique" | "setting" | "summary";
+export type AiProposalKind =
+  | "deconstruct"
+  | "technique"
+  | "setting"
+  | "summary"
+  | "fact_sync"
+  | "chapter_review"
+  | "arc_plan";
+export type MemorySyncStatus = "clean" | "dirty";
+export type LibraryAssetKind = "technique" | "skill";
+export type WritingStageBinding = "plan" | "write" | "review" | "refine" | "deslop";
+
+export interface SkillReferenceDocDto {
+  readonly path: string;
+  readonly content: string;
+}
 
 export interface VolumeDto {
   readonly id: string;
@@ -240,8 +276,18 @@ export interface ActDto {
   readonly title: string;
   readonly goal: string;
   readonly summary: string;
+  readonly arcGoal?: string;
+  readonly arcSummary?: string;
+  readonly pacingTemplate?: string;
   readonly sortOrder: number;
   readonly createdAt: number;
+}
+
+export interface ProjectControlsDto {
+  readonly projectId: string;
+  readonly authorIntent: string;
+  readonly currentFocus: string;
+  readonly updatedAt: number;
 }
 
 export interface ChapterTreeItemDto {
@@ -254,6 +300,7 @@ export interface ChapterTreeItemDto {
   readonly summary: string;
   readonly targetLength: number | null;
   readonly viewpoint: string | null;
+  readonly syncStatus?: MemorySyncStatus;
   readonly order: number;
   readonly updatedAt: number;
 }
@@ -274,6 +321,7 @@ export interface ActiveContextCrumbDto {
   readonly actTitle: string | null;
   readonly charCount: number;
   readonly summary: string;
+  readonly syncStatus?: MemorySyncStatus;
 }
 
 export interface LoreEntryDto {
@@ -301,7 +349,13 @@ export interface ForeshadowDto {
 }
 
 export interface LoreConflictDto {
-  readonly kind: "expiry-before-known" | "outline-fact-mismatch" | "stale-foreshadow" | "foreshadow-order-flip";
+  readonly kind:
+    | "expiry-before-known"
+    | "inverted-validity-interval"
+    | "known-before-effective"
+    | "outline-fact-mismatch"
+    | "stale-foreshadow"
+    | "foreshadow-order-flip";
   readonly severity: "warning" | "error";
   readonly targetId: string;
   readonly chapterId?: string;
@@ -346,8 +400,100 @@ export interface TechniqueCardDto {
   readonly priority: number;
   readonly status: LibraryStatus;
   readonly sourceKind: string;
+  readonly assetKind?: LibraryAssetKind;
+  readonly stageBindings?: readonly WritingStageBinding[];
+  readonly references?: readonly SkillReferenceDocDto[];
   readonly createdAt: number;
   readonly updatedAt: number;
+}
+
+export interface SkillImportPreviewDto {
+  readonly title: string;
+  readonly triggerWhen: string;
+  readonly category: string;
+  readonly pacing: string;
+  readonly sceneTags: readonly string[];
+  readonly stageBindings: readonly WritingStageBinding[];
+  readonly executionSteps: string;
+  readonly constraints: string;
+  readonly antiPatterns: string;
+  readonly references: readonly SkillReferenceDocDto[];
+  readonly strippedCapabilities: readonly string[];
+  readonly rejectedFiles: readonly string[];
+  readonly warnings: readonly string[];
+  readonly rawPreview: string;
+}
+
+export interface GoldenThreeDimensionDto {
+  readonly id: string;
+  readonly label: string;
+  readonly score: number;
+  readonly status: "pass" | "warn";
+  readonly summary: string;
+  readonly problemParagraphs: readonly number[];
+}
+
+export interface GoldenThreeReportDto {
+  readonly isGoldenThreeChapter: boolean;
+  readonly overallScore: number;
+  readonly dimensions: readonly GoldenThreeDimensionDto[];
+  readonly warnings: readonly string[];
+}
+
+export interface SlopHitDto {
+  readonly phrase: string;
+  readonly category: string;
+  readonly paragraphIndex: number;
+  readonly start: number;
+  readonly end: number;
+  readonly excerpt: string;
+}
+
+export interface AiSlopReportDto {
+  readonly charCount: number;
+  readonly totalHits: number;
+  readonly densityPer1000Chars: number;
+  readonly severity: "clean" | "warn" | "high";
+  readonly topPhrases: readonly { readonly phrase: string; readonly category: string; readonly count: number }[];
+  readonly hits: readonly SlopHitDto[];
+}
+
+export interface ChapterDiagnosticsReportDto {
+  readonly documentId: string;
+  readonly goldenThree: GoldenThreeReportDto;
+  readonly aiSlop: AiSlopReportDto;
+}
+
+export interface SlopConfigDto {
+  readonly projectId: string;
+  readonly customBanned: readonly string[];
+  readonly whitelist: readonly string[];
+}
+
+export type ObservationDimension = "continuity" | "ooc" | "pacing" | "foreshadow" | "style" | "ai_slop";
+export type ObservationStatus = "open" | "addressed" | "dismissed";
+
+export interface ChapterObservationDto {
+  readonly id: string;
+  readonly projectId: string;
+  readonly documentId: string;
+  readonly revisionId: string | null;
+  readonly dimension: ObservationDimension;
+  readonly severity: "info" | "warning" | "error";
+  readonly quote: string;
+  readonly suggestion: string;
+  readonly status: ObservationStatus;
+  readonly source: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export type SelectionRewriteMode = "polish" | "expand" | "dialogue" | "continue" | "custom";
+
+export interface SelectionRewriteResultDto {
+  readonly rewrittenText: string;
+  readonly tokens: number;
+  readonly mode: SelectionRewriteMode;
 }
 
 export interface LibraryMountDto {
@@ -385,6 +531,8 @@ export interface ContextAssemblyReportDto {
   readonly totalEstimatedTokens: number;
   readonly prefixTokens: number;
   readonly dynamicTokens: number;
+  readonly framingTokens?: number;
+  readonly overBudget?: boolean;
   readonly slots: readonly ContextSlotReportDto[];
   readonly activeTechniqueIds: readonly string[];
   readonly activeDeconstructionIds: readonly string[];
@@ -435,6 +583,20 @@ export interface ProjectExportBundleDto {
   readonly files: readonly LocalBundleFileDto[];
 }
 
+export interface RelatedChapterScoreDto {
+  readonly chapterId: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly score: number;
+  readonly breakdown: {
+    readonly foreshadow: number;
+    readonly character: number;
+    readonly knownFrom: number;
+    readonly cooccurrenceAndSemantic: number;
+  };
+  readonly reasons: readonly string[];
+}
+
 export interface ProjectImportSummaryDto {
   readonly projectId: string;
   readonly volumesCreated: number;
@@ -444,10 +606,12 @@ export interface ProjectImportSummaryDto {
   readonly chaptersSkippedLocked: readonly string[];
   readonly loreProposed: number;
   readonly libraryImported: number;
+  readonly foreshadowsImported?: number;
+  readonly mountsRestored?: number;
 }
 
 export interface WorkspaceSnapshot {
-  readonly unchanged?: boolean;
+  readonly unchanged?: false;
   readonly projects?: readonly ProjectSummary[];
   readonly documents?: readonly DocumentSummary[];
   readonly active?: ActiveDocument;
@@ -568,6 +732,17 @@ export type WorkspaceAction =
   | "proposal.list"
   | "proposal.decide"
   | "proposal.generate"
+  | "proposal.cancel"
   | "workspace.search"
   | "project.export_bundle"
-  | "project.import_bundle";
+  | "project.import_bundle"
+  | "skill.import"
+  | "chapter.diagnose"
+  | "slop.config.get"
+  | "slop.config.save"
+  | "observation.list"
+  | "observation.create"
+  | "observation.update"
+  | "selection.rewrite"
+  | "controls.get"
+  | "controls.save";
