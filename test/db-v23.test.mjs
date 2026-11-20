@@ -786,11 +786,24 @@ test("DB-07/08/14/20/27 pragmas, stmt LRU<=256, late_usage preservation, Windows
     // Simulate attempt interrupted/closed as uncertain before late receipt arrives
     ledger.close("att-1", "uncertain", "interrupted");
     assert.equal(ledger.receiveCall("att-1", "call-1", [300, 150, 700, 0]), false);
+    // Duplicate/retried late receipt and unknown callId must NOT duplicate late_usage
+    assert.equal(ledger.receiveCall("att-1", "call-1", [300, 150, 700, 0]), false);
+    assert.equal(ledger.receiveCall("att-1", "unknown-call", [999, 999, 0, 0]), false);
     const hist = ledger.history("r1");
     const lateParsed = JSON.parse(hist[0].lateUsage);
     assert.equal(lateParsed.length, 1);
     assert.deepEqual(lateParsed[0].usage, [300, 150, 700, 0]);
     assert.equal(ledger.attemptUsageFromCalls("att-1"), 1150);
+    assert.deepEqual(ledger.verifyUsageConsistency(), []);
+
+    // Duplicate receipt after an on-time receive must also leave late_usage empty
+    ledger.create("att-2", "r1", "deepseek", "deepseek-chat");
+    assert.equal(ledger.beginCall("att-2", "call-2", "write", 500, 1000), true);
+    assert.equal(ledger.receiveCall("att-2", "call-2", [200, 100, 300, 0]), true);
+    assert.equal(ledger.receiveCall("att-2", "call-2", [200, 100, 300, 0]), false);
+    const att2Hist = ledger.history("r1").find((h) => h.id === "att-2");
+    assert.deepEqual(JSON.parse(att2Hist.lateUsage), []);
+    assert.equal(ledger.attemptUsageFromCalls("att-2"), 600);
     assert.deepEqual(ledger.verifyUsageConsistency(), []);
 
     // 5. DB-20 Windows reserved filenames & EPERM/EBUSY 3x rename retry

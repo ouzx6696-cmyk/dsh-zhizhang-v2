@@ -138,28 +138,27 @@ export function createGenerationLedger(db: SqliteDatabase) {
           RETURNING phase;
         `).get(JSON.stringify(usage), callId, attemptId, attemptId) as { phase: string } | undefined;
         if (!call) {
-          // DB-14: Preserve late receipts for reconciliation instead of silent drop.
-          const callMeta = stmt(db, `
-            SELECT phase, usage FROM author_generation_calls
-            WHERE id = ? AND attempt_id = ?;
-          `).get(callId, attemptId) as { phase?: string; usage?: string | null } | undefined;
-          if (callMeta && callMeta.usage === null) {
+          // DB-14: Preserve late receipts for reconciliation instead of silent drop,
+          // strictly once per unreceived call so retries, duplicates, and unknown
+          // callIds never double-count usage or break verifyUsageConsistency().
+          const lateCall = stmt(db, `
+            UPDATE author_generation_calls SET usage = ?
+            WHERE id = ? AND attempt_id = ? AND usage IS NULL
+            RETURNING phase;
+          `).get(JSON.stringify(usage), callId, attemptId) as { phase: string } | undefined;
+          if (lateCall) {
+            const lateEntry = JSON.stringify({
+              callId,
+              phase: lateCall.phase,
+              usage,
+              recordedAt: Date.now(),
+            });
             stmt(db, `
-              UPDATE author_generation_calls SET usage = ?
-              WHERE id = ? AND attempt_id = ? AND usage IS NULL;
-            `).run(JSON.stringify(usage), callId, attemptId);
+              UPDATE author_generation_attempts
+              SET late_usage = json_insert(COALESCE(NULLIF(late_usage, ''), '[]'), '$[#]', json(?))
+              WHERE id = ?;
+            `).run(lateEntry, attemptId);
           }
-          const lateEntry = JSON.stringify({
-            callId,
-            phase: callMeta?.phase ?? "unknown",
-            usage,
-            recordedAt: Date.now(),
-          });
-          stmt(db, `
-            UPDATE author_generation_attempts
-            SET late_usage = json_insert(COALESCE(NULLIF(late_usage, ''), '[]'), '$[#]', json(?))
-            WHERE id = ?;
-          `).run(lateEntry, attemptId);
           return false;
         }
         stmt(db, `
