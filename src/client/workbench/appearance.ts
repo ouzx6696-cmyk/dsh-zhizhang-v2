@@ -86,6 +86,38 @@ function readStoredTypography(): EditorTypographyPrefs {
   }
 }
 
+function nodeContains(container: HTMLElement | null, target: unknown): boolean {
+  if (!container || !target || typeof target !== "object") return false;
+  if (container === target) return true;
+  if (typeof container.contains === "function") {
+    try {
+      return container.contains(target as Node);
+    } catch {
+      // Fall back to parentElement walking for minimal fake DOM nodes.
+    }
+  }
+  let cur = (target as { parentElement?: HTMLElement | null }).parentElement ?? null;
+  while (cur) {
+    if (cur === container) return true;
+    cur = cur.parentElement ?? null;
+  }
+  return false;
+}
+
+function parseHostThemeMessage(data: unknown): "light" | "dark" | "auto" | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const payload = data as Record<string, unknown>;
+  const type = typeof payload.type === "string" ? payload.type : "";
+  if (type !== "dsh:theme" && type !== "zhizhang:host-theme" && type !== "theme-change") {
+    return null;
+  }
+  const raw = payload.theme ?? payload.colorScheme ?? payload.mode;
+  if (raw === "dark" || raw === "night") return "dark";
+  if (raw === "light" || raw === "ink-paper" || raw === "bamboo") return "light";
+  if (raw === "auto" || raw === "system" || raw === null) return "auto";
+  return null;
+}
+
 /**
  * Upgrades `#theme-toggle` into a 3-paper-theme + host-auto + reader-typography
  * control without inventing extra top-bar `#id` attributes.
@@ -95,8 +127,10 @@ export function createAppearancePopover(button: HTMLButtonElement) {
   let theme: PaperTheme = readStoredTheme();
   let typography: EditorTypographyPrefs = readStoredTypography();
   let popover: HTMLElement | null = null;
+  let hostThemeOverride: "light" | "dark" | null = null;
 
-  const isHostDark = () => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
+  const mql = window.matchMedia?.("(prefers-color-scheme: dark)") ?? null;
+  const isHostDark = () => (hostThemeOverride !== null ? hostThemeOverride === "dark" : (mql?.matches ?? false));
 
   function sync(): void {
     applyAppearancePreferences(root, theme, typography, isHostDark());
@@ -110,10 +144,12 @@ export function createAppearancePopover(button: HTMLButtonElement) {
     }
   }
 
-  function closePopover(): void {
-    if (popover) {
-      popover.hidden = true;
-      button.setAttribute("aria-expanded", "false");
+  function closePopover(restoreFocus = false): void {
+    if (!popover || popover.hidden) return;
+    popover.hidden = true;
+    button.setAttribute("aria-expanded", "false");
+    if (restoreFocus) {
+      button.focus?.();
     }
   }
 
@@ -139,7 +175,8 @@ export function createAppearancePopover(button: HTMLButtonElement) {
         optBtn.type = "button";
         optBtn.textContent = text;
         if (val === activeValue) optBtn.className = "active";
-        optBtn.onclick = () => {
+        optBtn.onclick = (event?: MouseEvent) => {
+          event?.stopPropagation?.();
           onPick(val);
           sync();
           paintPopover();
@@ -186,6 +223,51 @@ export function createAppearancePopover(button: HTMLButtonElement) {
     );
   }
 
+  const onMediaChange = () => {
+    if (theme === "auto") sync();
+  };
+  if (typeof mql?.addEventListener === "function") {
+    mql.addEventListener("change", onMediaChange);
+  } else if (typeof (mql as { addListener?: (fn: () => void) => void } | null)?.addListener === "function") {
+    (mql as { addListener: (fn: () => void) => void }).addListener(onMediaChange);
+  }
+
+  const onHostMessage = (event: MessageEvent) => {
+    if (
+      typeof location !== "undefined" &&
+      typeof location.origin === "string" &&
+      location.origin &&
+      location.origin !== "null" &&
+      event.origin &&
+      event.origin !== location.origin
+    ) {
+      return;
+    }
+    const parsed = parseHostThemeMessage(event.data);
+    if (!parsed) return;
+    hostThemeOverride = parsed === "auto" ? null : parsed;
+    if (theme === "auto") sync();
+  };
+  window.addEventListener?.("message", onHostMessage);
+
+  const onDocumentKeyDown = (event: KeyboardEvent) => {
+    if (event.key === "Escape" && popover && !popover.hidden) {
+      event.preventDefault?.();
+      closePopover(true);
+    }
+  };
+  document.addEventListener?.("keydown", onDocumentKeyDown);
+
+  const onDocumentClick = (event: Event) => {
+    if (!popover || popover.hidden) return;
+    const target = event.target;
+    const composed = typeof event.composedPath === "function" ? event.composedPath() : null;
+    if (composed && (composed.includes(popover) || composed.includes(button))) return;
+    if (nodeContains(popover, target) || nodeContains(button, target)) return;
+    closePopover(true);
+  };
+  document.addEventListener?.("click", onDocumentClick);
+
   sync();
 
   button.setAttribute("aria-expanded", "false");
@@ -193,7 +275,10 @@ export function createAppearancePopover(button: HTMLButtonElement) {
     if (!popover) {
       popover = document.createElement("div");
       popover.className = "appearance-popover";
+      popover.setAttribute("role", "dialog");
+      popover.setAttribute("aria-label", "纸面主题与正文排版");
       popover.hidden = true;
+      popover.addEventListener?.("click", (event) => event.stopPropagation?.());
       (button.parentElement ?? document.body).append(popover);
     }
     const willOpen = popover.hidden;
@@ -201,10 +286,25 @@ export function createAppearancePopover(button: HTMLButtonElement) {
       paintPopover();
       popover.hidden = false;
       button.setAttribute("aria-expanded", "true");
+      const activeBtn = popover.querySelector<HTMLButtonElement>("button.active") ?? popover.querySelector<HTMLButtonElement>("button");
+      activeBtn?.focus?.();
     } else {
-      closePopover();
+      closePopover(true);
     }
   };
 
-  return { sync, close: closePopover };
+  function destroy(): void {
+    if (typeof mql?.removeEventListener === "function") {
+      mql.removeEventListener("change", onMediaChange);
+    } else if (typeof (mql as { removeListener?: (fn: () => void) => void } | null)?.removeListener === "function") {
+      (mql as { removeListener: (fn: () => void) => void }).removeListener(onMediaChange);
+    }
+    window.removeEventListener?.("message", onHostMessage);
+    document.removeEventListener?.("keydown", onDocumentKeyDown);
+    document.removeEventListener?.("click", onDocumentClick);
+    popover?.remove?.();
+    popover = null;
+  }
+
+  return { sync, close: closePopover, destroy };
 }

@@ -22,6 +22,7 @@ export interface DiffViewState {
 
 export interface DiffViewCallbacks {
   readonly onLocate?: (paragraphText: string, leftIndex: number | null) => void;
+  readonly computeParagraphDiffAsync?: (original: string, candidate: string) => Promise<ParagraphDiffSummary>;
 }
 
 export interface DiffAdoptionPlan {
@@ -32,6 +33,7 @@ export interface DiffAdoptionPlan {
 }
 
 const MAX_UNDO_STEPS = 30;
+const BLANK_SPACER_LABEL = "（空行分隔）";
 
 function isBlankSpacer(row: ParagraphDiffRow): boolean {
   return row.leftText.trim() === "" && row.rightText.trim() === "";
@@ -79,10 +81,15 @@ function buildHunkControls(
 export function createDiffView(container: HTMLElement, callbacks?: DiffViewCallbacks) {
   let mode: DiffDisplayMode = "split";
   let lastState: DiffViewState | null = null;
-  let lastContentSig: string | null = null;
+  let lastCandidateId: string | null = null;
+  let lastOriginalBody: string | null = null;
+  let lastCandidateBody: string | null = null;
   let diffSummary: ParagraphDiffSummary = computeParagraphDiff("", "");
   let hunkIndices: number[] = [];
+  let showBlankOnlyHunks = false;
   let adopted = new Set<number>();
+  let computeSeq = 0;
+  let activeHunkCursor = -1;
   const undoStack: Set<number>[] = [];
 
   const summaryEl = container.querySelector<HTMLElement>("#diff-summary")!;
@@ -97,10 +104,17 @@ export function createDiffView(container: HTMLElement, callbacks?: DiffViewCallb
     if (undoStack.length > MAX_UNDO_STEPS) undoStack.shift();
   }
 
+  function hasPartialSelection(): boolean {
+    return hunkIndices.length > 0 && adopted.size < hunkIndices.length;
+  }
+
   function currentMerged(): string {
-    return hunkIndices.length === 0 || adopted.size === hunkIndices.length
-      ? (lastState?.candidateBody ?? "")
-      : mergeParagraphSelections(diffSummary, adopted);
+    if (!lastState) return "";
+    if (hunkIndices.length === 0) return lastState.candidateBody;
+    if (adopted.size === hunkIndices.length) {
+      return lastState.candidateBody;
+    }
+    return mergeParagraphSelections(diffSummary, adopted);
   }
 
   function refreshMergePreviewHeader(mergeBar: HTMLElement): void {
@@ -114,6 +128,26 @@ export function createDiffView(container: HTMLElement, callbacks?: DiffViewCallb
     if (undoBtn) undoBtn.disabled = undoStack.length === 0;
     const pre = mergeBar.querySelector<HTMLElement>("[data-merge-preview]");
     if (pre) pre.textContent = mergedText;
+  }
+
+  function buildRawPartialBanner(): HTMLElement {
+    const banner = el("div", { className: "diff-raw-banner" });
+    banner.dataset.rawPartialBanner = "true";
+    banner.setAttribute("role", "status");
+    const msg = el("span", {
+      className: "diff-raw-banner-text tabular",
+      text: `当前勾选 ${adopted.size} / ${hunkIndices.length} 处变更，采纳仍将按勾选合稿（不会整篇覆盖）`,
+    });
+    const backBtn = el("button", { className: "diff-raw-back-btn", text: "返回并排对照" });
+    backBtn.type = "button";
+    backBtn.dataset.diffBackSplit = "true";
+    backBtn.onclick = () => {
+      mode = "split";
+      paintDiffSurfaceOnly();
+      paintMetadata();
+    };
+    banner.append(msg, backBtn);
+    return banner;
   }
 
   function buildMergeBar(): HTMLElement {
@@ -169,6 +203,11 @@ export function createDiffView(container: HTMLElement, callbacks?: DiffViewCallb
     if (bar) refreshMergePreviewHeader(bar);
   }
 
+  function shouldRenderRow(row: ParagraphDiffRow): boolean {
+    if (!isBlankSpacer(row)) return true;
+    return showBlankOnlyHunks && row.kind !== "equal";
+  }
+
   function renderSplitTable(): HTMLElement {
     const table = el("div", { className: "diff-split" });
     const head = el("div", { className: "diff-split-head" });
@@ -179,8 +218,10 @@ export function createDiffView(container: HTMLElement, callbacks?: DiffViewCallb
     table.append(head);
 
     diffSummary.rows.forEach((row, idx) => {
-      if (isBlankSpacer(row)) return;
+      if (!shouldRenderRow(row)) return;
+      const blank = isBlankSpacer(row);
       const line = el("div", { className: `diff-split-row diff-row-${row.kind}` });
+      if (row.kind !== "equal") line.dataset.hunkRow = String(idx);
 
       const leftCell = el("div", { className: "diff-cell diff-cell-left" });
       leftCell.append(
@@ -188,8 +229,13 @@ export function createDiffView(container: HTMLElement, callbacks?: DiffViewCallb
         el("span", { className: "diff-marker", text: row.kind === "removed" ? "−" : row.kind === "changed" ? "~" : "" }),
       );
       const leftText = el("div", { className: "diff-text" });
-      if (row.kind === "changed") renderInlineSpans(leftText, row.leftText, row.rightText, "left");
-      else leftText.textContent = row.leftText || (row.kind === "added" ? "" : " ");
+      if (blank) {
+        leftText.textContent = row.kind === "removed" ? BLANK_SPACER_LABEL : "";
+      } else if (row.kind === "changed") {
+        renderInlineSpans(leftText, row.leftText, row.rightText, "left");
+      } else {
+        leftText.textContent = row.leftText || (row.kind === "added" ? "" : " ");
+      }
       leftCell.append(leftText);
 
       const rightCell = el("div", { className: "diff-cell diff-cell-right" });
@@ -199,8 +245,13 @@ export function createDiffView(container: HTMLElement, callbacks?: DiffViewCallb
       );
       const rightCol = el("div", { className: "diff-right-wrap" });
       const rightText = el("div", { className: "diff-text" });
-      if (row.kind === "changed") renderInlineSpans(rightText, row.leftText, row.rightText, "right");
-      else rightText.textContent = row.rightText || (row.kind === "removed" ? "" : " ");
+      if (blank) {
+        rightText.textContent = row.kind === "added" ? BLANK_SPACER_LABEL : "";
+      } else if (row.kind === "changed") {
+        renderInlineSpans(rightText, row.leftText, row.rightText, "right");
+      } else {
+        rightText.textContent = row.rightText || (row.kind === "removed" ? "" : " ");
+      }
       rightCol.append(rightText);
       if (row.kind !== "equal") {
         rightCol.append(buildHunkControls(idx, row, adopted.has(idx), toggleHunk, callbacks?.onLocate));
@@ -216,7 +267,8 @@ export function createDiffView(container: HTMLElement, callbacks?: DiffViewCallb
   function renderInlineList(): HTMLElement {
     const list = el("div", { className: "diff-inline" });
     diffSummary.rows.forEach((row, idx) => {
-      if (isBlankSpacer(row)) return;
+      if (!shouldRenderRow(row)) return;
+      const blank = isBlankSpacer(row);
       if (row.kind === "equal") {
         const item = el("div", { className: "diff-inline-row diff-row-equal" });
         item.append(
@@ -229,6 +281,7 @@ export function createDiffView(container: HTMLElement, callbacks?: DiffViewCallb
       }
       if (row.kind === "changed") {
         const chg = el("div", { className: "diff-inline-row diff-row-changed" });
+        chg.dataset.hunkRow = String(idx);
         chg.append(
           el("span", { className: "diff-line-no", text: String(row.rightIndex ?? row.leftIndex ?? "") }),
           el("span", { className: "diff-marker", text: "~" }),
@@ -247,13 +300,17 @@ export function createDiffView(container: HTMLElement, callbacks?: DiffViewCallb
       }
       const cls = row.kind === "removed" ? "diff-row-removed" : "diff-row-added";
       const item = el("div", { className: `diff-inline-row ${cls}` });
+      item.dataset.hunkRow = String(idx);
       item.append(
         el("span", { className: "diff-line-no", text: String(row.kind === "removed" ? row.leftIndex ?? "" : row.rightIndex ?? "") }),
         el("span", { className: "diff-marker", text: row.kind === "removed" ? "−" : "+" }),
       );
       const content = el("div", { className: "diff-right-wrap" });
       content.append(
-        el("div", { className: "diff-text", text: (row.kind === "removed" ? row.leftText : row.rightText) || " " }),
+        el("div", {
+          className: "diff-text",
+          text: blank ? BLANK_SPACER_LABEL : (row.kind === "removed" ? row.leftText : row.rightText) || " ",
+        }),
         buildHunkControls(idx, row, adopted.has(idx), toggleHunk, callbacks?.onLocate),
       );
       item.append(content);
@@ -264,7 +321,17 @@ export function createDiffView(container: HTMLElement, callbacks?: DiffViewCallb
 
   function paintDiffSurfaceOnly(): void {
     rawEl.hidden = mode !== "raw";
-    bodyEl.hidden = mode === "raw";
+    if (mode === "raw") {
+      if (hasPartialSelection()) {
+        bodyEl.hidden = false;
+        bodyEl.replaceChildren(buildRawPartialBanner());
+      } else {
+        bodyEl.hidden = true;
+        bodyEl.replaceChildren();
+      }
+      return;
+    }
+    bodyEl.hidden = false;
     if (mode === "split") {
       bodyEl.replaceChildren(buildMergeBar(), renderSplitTable());
     } else if (mode === "inline") {
@@ -272,10 +339,27 @@ export function createDiffView(container: HTMLElement, callbacks?: DiffViewCallb
     }
   }
 
+  function applyComputedDiff(summary: ParagraphDiffSummary): void {
+    diffSummary = summary;
+    const nonBlankHunks: number[] = [];
+    const blankHunks: number[] = [];
+    diffSummary.rows.forEach((row, idx) => {
+      if (row.kind === "equal") return;
+      if (isBlankSpacer(row)) blankHunks.push(idx);
+      else nonBlankHunks.push(idx);
+    });
+    showBlankOnlyHunks = nonBlankHunks.length === 0 && blankHunks.length > 0;
+    hunkIndices = showBlankOnlyHunks ? blankHunks : nonBlankHunks;
+    adopted = new Set(hunkIndices);
+    undoStack.length = 0;
+    activeHunkCursor = -1;
+    paintDiffSurfaceOnly();
+  }
+
   function paintMetadata(): void {
     if (!lastState) return;
     const { candidateBody, candidateQa, refinementRounds, canAdopt } = lastState;
-    const visibleRows = diffSummary.rows.filter((row) => !isBlankSpacer(row));
+    const visibleRows = diffSummary.rows.filter((row) => shouldRenderRow(row));
     summaryEl.textContent = [
       `修改 ${visibleRows.filter((r) => r.kind === "changed").length} 段`,
       `新增 ${visibleRows.filter((r) => r.kind === "added").length} 段`,
@@ -313,26 +397,63 @@ export function createDiffView(container: HTMLElement, callbacks?: DiffViewCallb
     };
   }
 
+  // FE-19: keyboard hunk jump (Alt+ArrowDown / Alt+ArrowUp or J / K when not typing in textarea)
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (mode === "raw" || hunkIndices.length === 0) return;
+    const target = event.target as HTMLElement | null;
+    const tag = target?.tagName?.toUpperCase() ?? "";
+    if (tag === "TEXTAREA" || (tag === "INPUT" && (target as HTMLInputElement).type !== "checkbox")) return;
+
+    let delta = 0;
+    if ((event.altKey && event.key === "ArrowDown") || (!event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "j")) {
+      delta = 1;
+    } else if ((event.altKey && event.key === "ArrowUp") || (!event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "k")) {
+      delta = -1;
+    }
+    if (delta === 0) return;
+
+    event.preventDefault?.();
+    activeHunkCursor =
+      activeHunkCursor === -1
+        ? (delta > 0 ? 0 : hunkIndices.length - 1)
+        : (activeHunkCursor + delta + hunkIndices.length) % hunkIndices.length;
+    const targetRowIdx = String(hunkIndices[activeHunkCursor]);
+    const cb = bodyEl.querySelector<HTMLInputElement>(`input[data-hunk-index="${targetRowIdx}"]`);
+    cb?.focus?.();
+  };
+  container.addEventListener?.("keydown", onKeyDown);
+
   return {
     update(state: DiffViewState | null): void {
       lastState = state;
       container.hidden = state === null;
       if (!state) {
-        lastContentSig = null;
+        lastCandidateId = null;
+        lastOriginalBody = null;
+        lastCandidateBody = null;
+        computeSeq++;
         return;
       }
-      const nextSig = JSON.stringify([state.candidateId ?? "", state.originalBody, state.candidateBody]);
-      const contentChanged = nextSig !== lastContentSig;
+      const nextCandidateId = state.candidateId ?? "";
+      const contentChanged =
+        nextCandidateId !== lastCandidateId ||
+        state.originalBody !== lastOriginalBody ||
+        state.candidateBody !== lastCandidateBody;
       if (contentChanged) {
-        lastContentSig = nextSig;
-        diffSummary = computeParagraphDiff(state.originalBody, state.candidateBody);
-        hunkIndices = [];
-        diffSummary.rows.forEach((row, idx) => {
-          if (!isBlankSpacer(row) && row.kind !== "equal") hunkIndices.push(idx);
-        });
-        adopted = new Set(hunkIndices);
-        undoStack.length = 0;
-        paintDiffSurfaceOnly();
+        lastCandidateId = nextCandidateId;
+        lastOriginalBody = state.originalBody;
+        lastCandidateBody = state.candidateBody;
+        const seq = ++computeSeq;
+        if (callbacks?.computeParagraphDiffAsync) {
+          summaryEl.textContent = "计算差异中…";
+          void callbacks.computeParagraphDiffAsync(state.originalBody, state.candidateBody).then((summary) => {
+            if (seq !== computeSeq || !lastState) return;
+            applyComputedDiff(summary);
+            paintMetadata();
+          });
+        } else {
+          applyComputedDiff(computeParagraphDiff(state.originalBody, state.candidateBody));
+        }
       }
       paintMetadata();
     },
@@ -340,7 +461,7 @@ export function createDiffView(container: HTMLElement, callbacks?: DiffViewCallb
     getAdoptionPayload(): DiffAdoptionPlan | null {
       if (!lastState) return null;
       const totalHunks = hunkIndices.length;
-      const isFull = mode === "raw" || totalHunks === 0 || adopted.size === totalHunks;
+      const isFull = totalHunks === 0 || adopted.size === totalHunks;
       return {
         mergedBody: isFull ? lastState.candidateBody : currentMerged(),
         adoptionMode: isFull ? "full" : "partial",
