@@ -83,6 +83,84 @@ export function isEffective(
   return afterStart && beforeEnd;
 }
 
+/** One non-empty paragraph span inside a chapter body, with exact UTF-16 offsets. */
+export interface ParagraphSpan {
+  /** 1-based non-empty paragraph ordinal (`point`). */
+  readonly index: number;
+  /** Raw line text for the paragraph (excluding line breaks), matching `body.slice(start, end)`. */
+  readonly text: string;
+  /** Inclusive UTF-16 start offset inside the original chapter `body`. */
+  readonly start: number;
+  /** Exclusive UTF-16 end offset inside the original chapter `body`. */
+  readonly end: number;
+}
+
+/**
+ * Single paragraph source of truth (Res#12 / FQ-02):
+ * splits a chapter body into 1-based non-empty paragraph spans while handling
+ * `\r\n`, `\n`, and `\r` safely and preserving exact UTF-16 `start` / `end`
+ * offsets into the original `body`.
+ */
+export function splitChapterParagraphs(body: string): ParagraphSpan[] {
+  if (!body) return [];
+  const spans: ParagraphSpan[] = [];
+  const len = body.length;
+  let lineStart = 0;
+  let i = 0;
+  while (i <= len) {
+    const isEnd = i === len;
+    const code = isEnd ? -1 : body.charCodeAt(i);
+    if (isEnd || code === 10 || code === 13) {
+      const lineEnd = i;
+      if (lineEnd > lineStart) {
+        const text = body.slice(lineStart, lineEnd);
+        if (text.trim().length > 0) {
+          spans.push({
+            index: spans.length + 1,
+            text,
+            start: lineStart,
+            end: lineEnd,
+          });
+        }
+      }
+      if (isEnd) break;
+      if (code === 13 && i + 1 < len && body.charCodeAt(i + 1) === 10) {
+        i += 2;
+      } else {
+        i += 1;
+      }
+      lineStart = i;
+    } else {
+      i += 1;
+    }
+  }
+  return spans;
+}
+
+/**
+ * Returns the 1-based non-empty paragraph index (`point`) containing UTF-16
+ * `offset` inside `body`, clamped to `[1, max(1, paragraphs.length)]`.
+ */
+export function pointAtOffset(body: string, offset: number): number {
+  const paras = splitChapterParagraphs(body);
+  if (paras.length === 0) return 1;
+  if (!Number.isFinite(offset) || offset <= paras[0].start) return 1;
+  const clamped = Math.trunc(offset);
+  if (clamped >= paras[paras.length - 1].start) return paras.length;
+
+  let lo = 0;
+  let hi = paras.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (paras[mid].start <= clamped) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return paras[lo].index;
+}
+
 /** One paragraph of a chapter, as the offset resolution needs it. */
 export interface ChapterParagraphs {
   readonly paragraphs: readonly string[];
@@ -97,18 +175,41 @@ export interface ResolvedAnchor {
 }
 
 /**
- * Resolves an anchor to a paragraph and character offset.
+ * Resolves an anchor to a non-empty paragraph and its character offset.
  *
- * The point is clamped into the chapter's paragraphs, so a point past the end
- * resolves to the last paragraph rather than failing.
+ * The point is clamped into the chapter's non-empty paragraphs, so a point past
+ * the end resolves to the last non-empty paragraph rather than failing.
  */
-export function resolveAnchor(at: Anchor, chapter: ChapterParagraphs): ResolvedAnchor {
-  if (chapter.paragraphs.length === 0) {
+export function resolveAnchor(
+  at: Anchor,
+  chapter: ChapterParagraphs | { readonly body: string } | string,
+): ResolvedAnchor {
+  const spans: ParagraphSpan[] =
+    typeof chapter === "string"
+      ? splitChapterParagraphs(chapter)
+      : "body" in chapter
+        ? splitChapterParagraphs(chapter.body)
+        : (() => {
+            const collected: ParagraphSpan[] = [];
+            let offset = 0;
+            for (const raw of chapter.paragraphs) {
+              if (raw.trim().length > 0) {
+                collected.push({
+                  index: collected.length + 1,
+                  text: raw,
+                  start: offset,
+                  end: offset + raw.length,
+                });
+              }
+              offset += raw.length + 1;
+            }
+            return collected;
+          })();
+
+  if (spans.length === 0) {
     return { paragraphIndex: 0, start: 0, text: "" };
   }
   const safePoint = Number.isFinite(at.point) ? Math.trunc(at.point) : 1;
-  const index = Math.min(Math.max(safePoint - 1, 0), chapter.paragraphs.length - 1);
-  let start = 0;
-  for (let i = 0; i < index; i += 1) start += chapter.paragraphs[i].length + 1;
-  return { paragraphIndex: index, start, text: chapter.paragraphs[index] };
+  const index = Math.min(Math.max(safePoint - 1, 0), spans.length - 1);
+  return { paragraphIndex: index, start: spans[index].start, text: spans[index].text };
 }

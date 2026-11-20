@@ -13,6 +13,7 @@ export {
   resolveAnchor,
   type Anchor,
   type ChapterParagraphs,
+  type ParagraphSpan,
   type ResolvedAnchor,
   type ValidityInterval,
 } from "./anchors.ts";
