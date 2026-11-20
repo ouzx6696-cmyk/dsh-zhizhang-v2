@@ -56,6 +56,10 @@ function isStringArray(value: unknown): boolean {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 function isValidCandidateText(output: unknown): boolean {
   return typeof output === "string" && output.trim().length > 0 && output.length <= MAX_CANDIDATE_LENGTH;
 }
@@ -76,8 +80,7 @@ function isValidQaPayload(output: unknown): boolean {
 function isValidDeconstructPayload(output: unknown): boolean {
   if (!isRecord(output)) return false;
   return (
-    typeof output.title === "string" &&
-    output.title.trim().length > 0 &&
+    isNonEmptyString(output.title) &&
     typeof output.hookAnalysis === "string" &&
     typeof output.conflictBeats === "string" &&
     typeof output.payoffRhythm === "string" &&
@@ -89,10 +92,8 @@ function isValidDeconstructPayload(output: unknown): boolean {
 function isValidTechniquePayload(output: unknown): boolean {
   if (!isRecord(output)) return false;
   return (
-    typeof output.title === "string" &&
-    output.title.trim().length > 0 &&
-    typeof output.executionSteps === "string" &&
-    output.executionSteps.trim().length > 0 &&
+    isNonEmptyString(output.title) &&
+    isNonEmptyString(output.executionSteps) &&
     (output.sceneTags === undefined || isStringArray(output.sceneTags))
   );
 }
@@ -108,23 +109,74 @@ function isValidSettingExtractPayload(output: unknown): boolean {
 function isValidSummaryDraftPayload(output: unknown): boolean {
   if (!isRecord(output)) return false;
   return (
-    typeof output.summary === "string" &&
-    output.summary.trim().length > 0 &&
+    isNonEmptyString(output.summary) &&
     output.summary.length <= 1500
   );
 }
 
-function isValidFactSyncPayload(output: unknown): boolean {
+/**
+ * Validates V2.3 continuity memory-sync payloads (FQ-10 & FQ-20):
+ * - `newFacts` (optional `factId`, optional `aliases` string array);
+ * - `updates` (requires non-empty `factId` referencing existing lore);
+ * - `retiredFacts` (requires non-empty `factId` and `reason`, optional positive integer `point`);
+ * - `knownFromUpdates`, `foreshadowUpdates`, `summaryDraft`.
+ */
+export function isValidFactSyncPayload(output: unknown): boolean {
   if (!isRecord(output)) return false;
   const hasAny =
     output.newFacts !== undefined ||
+    output.updates !== undefined ||
+    output.retiredFacts !== undefined ||
     output.knownFromUpdates !== undefined ||
     output.foreshadowUpdates !== undefined ||
     output.summaryDraft !== undefined;
   if (!hasAny) return false;
-  if (output.newFacts !== undefined && !(Array.isArray(output.newFacts) && output.newFacts.every(isRecord))) {
+
+  if (
+    output.newFacts !== undefined &&
+    !(
+      Array.isArray(output.newFacts) &&
+      output.newFacts.every(
+        (item) =>
+          isRecord(item) &&
+          (item.aliases === undefined || isStringArray(item.aliases)),
+      )
+    )
+  ) {
     return false;
   }
+
+  if (
+    output.updates !== undefined &&
+    !(
+      Array.isArray(output.updates) &&
+      output.updates.every(
+        (item) =>
+          isRecord(item) &&
+          isNonEmptyString(item.factId) &&
+          (item.aliases === undefined || isStringArray(item.aliases)),
+      )
+    )
+  ) {
+    return false;
+  }
+
+  if (
+    output.retiredFacts !== undefined &&
+    !(
+      Array.isArray(output.retiredFacts) &&
+      output.retiredFacts.every(
+        (item) =>
+          isRecord(item) &&
+          isNonEmptyString(item.factId) &&
+          typeof item.reason === "string" &&
+          (item.point === undefined || (typeof item.point === "number" && Number.isSafeInteger(item.point) && item.point >= 1)),
+      )
+    )
+  ) {
+    return false;
+  }
+
   if (
     output.knownFromUpdates !== undefined &&
     !(
@@ -132,15 +184,14 @@ function isValidFactSyncPayload(output: unknown): boolean {
       output.knownFromUpdates.every(
         (item) =>
           isRecord(item) &&
-          typeof item.factId === "string" &&
-          item.factId.trim().length > 0 &&
-          typeof item.character === "string" &&
-          item.character.trim().length > 0,
+          isNonEmptyString(item.factId) &&
+          isNonEmptyString(item.character),
       )
     )
   ) {
     return false;
   }
+
   if (
     output.foreshadowUpdates !== undefined &&
     !(
@@ -148,19 +199,20 @@ function isValidFactSyncPayload(output: unknown): boolean {
       output.foreshadowUpdates.every(
         (item) =>
           isRecord(item) &&
-          ((typeof item.title === "string" && item.title.trim().length > 0) ||
-            (typeof item.id === "string" && item.id.trim().length > 0)),
+          (isNonEmptyString(item.title) || isNonEmptyString(item.id)),
       )
     )
   ) {
     return false;
   }
+
   if (
     output.summaryDraft !== undefined &&
     (typeof output.summaryDraft !== "string" || output.summaryDraft.length > 1500)
   ) {
     return false;
   }
+
   return true;
 }
 
@@ -186,14 +238,28 @@ function isValidChapterReviewPayload(output: unknown): boolean {
   );
 }
 
-function isValidArcPlanPayload(output: unknown): boolean {
+const ARC_PLAN_TEXT_KEYS = [
+  "actSummary",
+  "nextActTitle",
+  "nextActGoal",
+  "nextActSummary",
+  "pacingTemplate",
+  "currentFocus",
+] as const;
+
+/** Validates V2.3 rolling arc-plan payloads (FQ-23). */
+export function isValidArcPlanPayload(output: unknown): boolean {
   if (!isRecord(output)) return false;
-  const textKeys = ["actSummary", "nextActTitle", "nextActGoal", "nextActSummary", "currentFocus"];
-  const hasTextField = textKeys.some((k) => typeof output[k] === "string" && output[k].trim().length > 0);
+  for (const key of ARC_PLAN_TEXT_KEYS) {
+    if (output[key] !== undefined && typeof output[key] !== "string") {
+      return false;
+    }
+  }
+  const hasTextField = ARC_PLAN_TEXT_KEYS.some((k) => isNonEmptyString(output[k]));
   const hasBeats =
     Array.isArray(output.chapterBeats) &&
     output.chapterBeats.length > 0 &&
-    output.chapterBeats.every((b) => isRecord(b) && typeof b.title === "string" && b.title.trim().length > 0);
+    output.chapterBeats.every((b) => isRecord(b) && isNonEmptyString(b.title));
   return hasTextField || hasBeats;
 }
 

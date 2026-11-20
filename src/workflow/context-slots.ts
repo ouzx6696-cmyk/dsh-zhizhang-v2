@@ -11,7 +11,7 @@ export interface ContextSlotInput {
   readonly group: "prefix" | "dynamic";
   readonly priority: ContextSlotPriority;
   readonly content: string;
-  /** Maximum fraction of `maxInputTokens` this non-critical slot may occupy. */
+  /** Maximum fraction of the group's budget this non-critical slot may occupy. */
   readonly maxShare?: number;
   /** Keep start ("tail" trims end) or keep end ("head" trims start, ideal for prev chapter ending). */
   readonly trimMode?: "tail" | "head";
@@ -25,6 +25,7 @@ export interface AssembledContextResult {
 }
 
 const PRIORITY_DROP_ORDER: readonly ContextSlotPriority[] = ["optional", "medium", "high"];
+const DEFAULT_PREFIX_BUDGET_RATIO = 0.45;
 
 function truncateTextToTokenBudget(
   text: string,
@@ -66,11 +67,21 @@ function truncateTextToTokenBudget(
 /**
  * Pure deterministic context assembler that partitions slots into a
  * prefix-cache-friendly stable header (`prefix`) and per-chapter `dynamic`
- * tail, enforcing priority-based budget trimming with dynamic framing overhead.
+ * tail (FQ-04):
+ *
+ * - `prefixBudget = f(maxInputTokens)` depends ONLY on `maxInputTokens` (never
+ *   on dynamic slot content or count), so `stablePrefix` is mathematically
+ *   byte-for-byte invariant across different chapter bodies, instructions, or
+ *   dynamic slot lengths.
+ * - Phase 2 priority trimming operates EXCLUSIVELY on `dynamic` slots against
+ *   `dynamicBudget`; if `prefix` exceeds `prefixBudget`, `overBudget` is
+ *   reported without silently truncating Prefix slots.
  */
 export function assembleContextBundle(params: {
   readonly slots: readonly ContextSlotInput[];
   readonly maxInputTokens: number;
+  readonly prefixBudget?: number;
+  readonly prefixBudgetRatio?: number;
   readonly activeTechniqueIds?: readonly string[];
   readonly activeDeconstructionIds?: readonly string[];
   readonly estimateTokens?: (text: string) => number;
@@ -79,6 +90,18 @@ export function assembleContextBundle(params: {
   const maxInputTokens = Math.max(256, Math.floor(params.maxInputTokens));
   const joinTokens = estimateTokens("\n\n");
   const groupSepTokens = estimateTokens("\n\n---\n\n");
+
+  const prefixRatio =
+    typeof params.prefixBudgetRatio === "number" &&
+    Number.isFinite(params.prefixBudgetRatio) &&
+    params.prefixBudgetRatio > 0.05 &&
+    params.prefixBudgetRatio < 0.95
+      ? params.prefixBudgetRatio
+      : DEFAULT_PREFIX_BUDGET_RATIO;
+  const prefixBudget =
+    typeof params.prefixBudget === "number" && Number.isFinite(params.prefixBudget) && params.prefixBudget > 0
+      ? Math.min(maxInputTokens, Math.floor(params.prefixBudget))
+      : Math.max(128, Math.floor(maxInputTokens * prefixRatio));
 
   const states = params.slots.map((slot) => {
     const rawContent = slot.content.trim();
@@ -94,17 +117,19 @@ export function assembleContextBundle(params: {
     };
   });
 
-  const nonEmptyCount = states.filter((item) => item.status !== "empty").length;
-  const nonEmptyFraming =
-    states.reduce((sum, item) => sum + (item.status !== "empty" ? item.headerTokens : 0), 0) +
-    Math.max(0, nonEmptyCount - 1) * joinTokens +
-    groupSepTokens;
-  const availableForShares = Math.max(64, maxInputTokens - Math.min(maxInputTokens - 64, nonEmptyFraming));
+  const prefixStates = states.filter((item) => item.slot.group === "prefix");
+  const dynamicStates = states.filter((item) => item.slot.group === "dynamic");
 
-  // 1. Apply soft per-slot share caps on non-critical slots first.
-  for (const item of states) {
+  // 1A. Process Prefix slots strictly against `prefixBudget` (zero dependence on dynamic slots!).
+  const nonEmptyPrefix = prefixStates.filter((item) => item.status !== "empty");
+  const prefixFraming =
+    nonEmptyPrefix.reduce((sum, item) => sum + item.headerTokens, 0) +
+    Math.max(0, nonEmptyPrefix.length - 1) * joinTokens;
+  const availableForPrefixShares = Math.max(64, prefixBudget - Math.min(prefixBudget - 64, prefixFraming));
+
+  for (const item of prefixStates) {
     if (item.status === "empty" || item.slot.priority === "critical" || !item.slot.maxShare) continue;
-    const capTokens = Math.max(64, Math.floor(availableForShares * item.slot.maxShare));
+    const capTokens = Math.max(64, Math.floor(availableForPrefixShares * item.slot.maxShare));
     if (item.includedTokens > capTokens) {
       const nextText = truncateTextToTokenBudget(
         item.text,
@@ -118,31 +143,60 @@ export function assembleContextBundle(params: {
     }
   }
 
-  const currentTotal = () => {
-    let prefixCount = 0;
+  let actualPrefixTotal = 0;
+  let actualPrefixCount = 0;
+  for (const item of prefixStates) {
+    if (item.includedTokens <= 0) continue;
+    actualPrefixTotal += item.headerTokens + item.includedTokens;
+    if (actualPrefixCount > 0) actualPrefixTotal += joinTokens;
+    actualPrefixCount += 1;
+  }
+
+  // 1B. Compute remaining dynamicBudget and apply soft share caps on dynamic slots.
+  const separatorCost = actualPrefixCount > 0 ? groupSepTokens : 0;
+  const dynamicBudget = Math.max(64, maxInputTokens - actualPrefixTotal - separatorCost);
+
+  const nonEmptyDynamic = dynamicStates.filter((item) => item.status !== "empty");
+  const dynamicFraming =
+    nonEmptyDynamic.reduce((sum, item) => sum + item.headerTokens, 0) +
+    Math.max(0, nonEmptyDynamic.length - 1) * joinTokens;
+  const availableForDynamicShares = Math.max(64, dynamicBudget - Math.min(dynamicBudget - 64, dynamicFraming));
+
+  for (const item of dynamicStates) {
+    if (item.status === "empty" || item.slot.priority === "critical" || !item.slot.maxShare) continue;
+    const capTokens = Math.max(64, Math.floor(availableForDynamicShares * item.slot.maxShare));
+    if (item.includedTokens > capTokens) {
+      const nextText = truncateTextToTokenBudget(
+        item.text,
+        capTokens,
+        item.slot.trimMode ?? "tail",
+        estimateTokens,
+      );
+      item.text = nextText;
+      item.includedTokens = nextText ? estimateTokens(nextText) : 0;
+      item.status = item.includedTokens > 0 ? "truncated" : "dropped";
+    }
+  }
+
+  const currentDynamicTotal = () => {
     let dynamicCount = 0;
     let total = 0;
-    for (const item of states) {
+    for (const item of dynamicStates) {
       if (item.includedTokens <= 0) continue;
       total += item.headerTokens + item.includedTokens;
-      if (item.slot.group === "prefix") {
-        if (prefixCount > 0) total += joinTokens;
-        prefixCount += 1;
-      } else {
-        if (dynamicCount > 0) total += joinTokens;
-        dynamicCount += 1;
-      }
+      if (dynamicCount > 0) total += joinTokens;
+      dynamicCount += 1;
     }
-    if (prefixCount > 0 && dynamicCount > 0) total += groupSepTokens;
     return total;
   };
 
-  // 2. Iteratively trim or drop lower-priority slots until within maxInputTokens.
+  // 2. Iteratively trim or drop ONLY dynamic lower-priority slots to fit dynamicBudget.
+  //    Prefix slots are NEVER truncated or dropped by dynamic tail pressure (FQ-04).
   for (const tier of PRIORITY_DROP_ORDER) {
-    if (currentTotal() <= maxInputTokens) break;
-    const candidates = states.filter((item) => item.slot.priority === tier && item.includedTokens > 0).reverse();
+    if (currentDynamicTotal() <= dynamicBudget) break;
+    const candidates = dynamicStates.filter((item) => item.slot.priority === tier && item.includedTokens > 0).reverse();
     for (const item of candidates) {
-      const excess = currentTotal() - maxInputTokens;
+      const excess = currentDynamicTotal() - dynamicBudget;
       if (excess <= 0) break;
       const target = item.includedTokens - excess;
       if (target < 48) {
@@ -185,7 +239,7 @@ export function assembleContextBundle(params: {
   const dynamicTokens = dynamicTail ? estimateTokens(dynamicTail) : 0;
   const totalEstimatedTokens = promptText ? estimateTokens(promptText) : 0;
   const framingTokens = Math.max(0, totalEstimatedTokens - sumIncludedSlotTokens);
-  const overBudget = totalEstimatedTokens > maxInputTokens;
+  const overBudget = prefixTokens > prefixBudget || totalEstimatedTokens > maxInputTokens;
 
   const slotReports: ContextSlotReportDto[] = states.map((item) => ({
     id: item.slot.id,
@@ -206,6 +260,8 @@ export function assembleContextBundle(params: {
       totalEstimatedTokens,
       prefixTokens,
       dynamicTokens,
+      prefixBudget,
+      dynamicBudget,
       framingTokens,
       overBudget,
       slots: slotReports,

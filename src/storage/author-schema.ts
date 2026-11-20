@@ -1,5 +1,112 @@
+import { randomUUID } from "node:crypto";
 import type { SqliteDatabase } from "./driver.ts";
 import { runMigrations, type SchemaMigration } from "./migrations.ts";
+import { SCHEMA_ID, SCHEMA_USER_VERSION } from "./schema.ts";
+
+/** Default fractional-index gap between adjacent chapters (`author_documents.sort_key`). */
+export const SORT_KEY_STEP = 1024;
+
+/**
+ * Computes a fractional `sort_key` strictly between `before` and `after` so
+ * moving a chapter updates only 1 row in `author_documents` (DB-11).
+ */
+export function computeSortKeyBetween(before: number | null, after: number | null): number {
+  if (before === null && after === null) return SORT_KEY_STEP;
+  if (before === null) return (after as number) - SORT_KEY_STEP;
+  if (after === null) return before + SORT_KEY_STEP;
+  return (before + after) / 2;
+}
+
+const VALID_CONCERNS = new Set([
+  "chapter",
+  "revision",
+  "candidate",
+  "setting",
+  "evidence",
+  "run",
+  "approval",
+]);
+
+/** Infers the frozen read-model concern from a committed event's `kind` (DB-19). */
+export function inferEventConcern(kind: string): string | null {
+  if (
+    kind.startsWith("project.") ||
+    kind.startsWith("document.") ||
+    kind.startsWith("chapter.") ||
+    kind.startsWith("volume.") ||
+    kind.startsWith("act.") ||
+    kind.startsWith("library.") ||
+    kind.startsWith("foreshadow.") ||
+    kind.startsWith("controls.")
+  ) {
+    return "chapter";
+  }
+  if (kind.startsWith("revision.")) return "revision";
+  if (kind.startsWith("candidate.")) return "candidate";
+  if (kind.startsWith("setting.") || kind.startsWith("proposal.") || kind.startsWith("lore.")) {
+    return "setting";
+  }
+  if (kind.startsWith("evidence.") || kind.startsWith("article.") || kind.startsWith("observation.")) {
+    return "evidence";
+  }
+  if (kind.startsWith("run.") || kind.startsWith("generation.")) return "run";
+  if (kind.startsWith("approval.") || kind.startsWith("delivery.")) return "approval";
+  return null;
+}
+
+export interface EventLogConcernAudit {
+  readonly total: number;
+  readonly valid: number;
+  readonly missingConcern: number;
+  readonly invalidConcern: number;
+  readonly quarantined: number;
+}
+
+/** Read-only startup/diagnostics audit of `event_log` concern integrity (DB-19). */
+export function auditEventLogConcerns(db: SqliteDatabase): EventLogConcernAudit {
+  if (!hasObject(db, "table", "event_log")) {
+    return { total: 0, valid: 0, missingConcern: 0, invalidConcern: 0, quarantined: 0 };
+  }
+  const rows = db.prepare("SELECT payload FROM event_log;").all() as readonly { payload?: unknown }[];
+  let valid = 0;
+  let missingConcern = 0;
+  let invalidConcern = 0;
+  for (const row of rows) {
+    if (typeof row.payload !== "string") {
+      invalidConcern += 1;
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(row.payload) as Record<string, unknown> | null;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        invalidConcern += 1;
+        continue;
+      }
+      const concern = parsed.concern;
+      if (concern === undefined || concern === null || concern === "") {
+        missingConcern += 1;
+      } else if (typeof concern === "string" && VALID_CONCERNS.has(concern)) {
+        valid += 1;
+      } else {
+        invalidConcern += 1;
+      }
+    } catch {
+      invalidConcern += 1;
+    }
+  }
+  let quarantined = 0;
+  if (hasObject(db, "table", "event_log_quarantine")) {
+    const q = db.prepare("SELECT COUNT(*) AS count FROM event_log_quarantine;").get() as { count?: number } | undefined;
+    quarantined = q?.count ?? 0;
+  }
+  return {
+    total: rows.length,
+    valid,
+    missingConcern,
+    invalidConcern,
+    quarantined,
+  };
+}
 
 function tableColumns(db: SqliteDatabase, table: string): Set<string> {
   const rows = db.prepare(`PRAGMA table_info(${table});`).all() as readonly { name?: unknown }[];
@@ -445,8 +552,8 @@ const AUTHOR_MIGRATIONS: readonly SchemaMigration[] = [
         );
         CREATE INDEX IF NOT EXISTS author_chapter_entities_by_fact
           ON author_chapter_entities(project_id, fact_id);
-      CREATE INDEX IF NOT EXISTS author_chapter_entities_by_doc
-        ON author_chapter_entities(project_id, document_id);
+        CREATE INDEX IF NOT EXISTS author_chapter_entities_by_doc
+          ON author_chapter_entities(project_id, document_id);
       `);
     },
   },
@@ -512,11 +619,317 @@ const AUTHOR_MIGRATIONS: readonly SchemaMigration[] = [
       }
     },
   },
+  {
+    id: "2.3.0-proposals-micro-generation-origin",
+    up(db) {
+      const propCols = tableColumns(db, "author_ai_proposals");
+      if (!propCols.has("base_revision_id")) {
+        db.exec("ALTER TABLE author_ai_proposals ADD COLUMN base_revision_id TEXT;");
+      }
+      if (!propCols.has("source_sha256")) {
+        db.exec("ALTER TABLE author_ai_proposals ADD COLUMN source_sha256 TEXT NOT NULL DEFAULT '';");
+      }
+      if (!propCols.has("origin")) {
+        db.exec("ALTER TABLE author_ai_proposals ADD COLUMN origin TEXT NOT NULL DEFAULT 'ai-generate';");
+      }
+      if (!propCols.has("origin_ref")) {
+        db.exec("ALTER TABLE author_ai_proposals ADD COLUMN origin_ref TEXT NOT NULL DEFAULT '';");
+      }
+      if (!propCols.has("error_detail")) {
+        db.exec("ALTER TABLE author_ai_proposals ADD COLUMN error_detail TEXT;");
+      }
+
+      // Close any legacy duplicate inflight proposals before installing the DB-level mutex index.
+      db.exec(`
+        UPDATE author_ai_proposals
+        SET status = 'failed', error = 'dedup-inflight-migration'
+        WHERE status = 'inflight'
+          AND rowid NOT IN (
+            SELECT MAX(rowid)
+            FROM author_ai_proposals
+            WHERE status = 'inflight'
+            GROUP BY kind, COALESCE(document_id, project_id, 'global')
+          );
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_proposal_inflight
+          ON author_ai_proposals(kind, COALESCE(document_id, project_id, 'global'))
+          WHERE status = 'inflight';
+      `);
+
+      const settingCols = tableColumns(db, "author_settings");
+      if (!settingCols.has("origin")) {
+        db.exec("ALTER TABLE author_settings ADD COLUMN origin TEXT NOT NULL DEFAULT 'author-ui';");
+      }
+      if (!settingCols.has("origin_ref")) {
+        db.exec("ALTER TABLE author_settings ADD COLUMN origin_ref TEXT NOT NULL DEFAULT '';");
+      }
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS author_micro_calls (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES author_projects(id),
+          document_id TEXT NOT NULL REFERENCES author_documents(id),
+          mode TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          model TEXT NOT NULL,
+          reserved INTEGER NOT NULL DEFAULT 0,
+          settled INTEGER NOT NULL DEFAULT 0,
+          usage TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(usage)),
+          status TEXT NOT NULL DEFAULT 'inflight' CHECK (status IN ('inflight', 'completed', 'failed', 'uncertain')),
+          created_at INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL DEFAULT 0
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS author_micro_calls_by_project
+          ON author_micro_calls(project_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS author_micro_calls_by_doc
+          ON author_micro_calls(document_id, status);
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_micro_call_inflight
+          ON author_micro_calls(document_id)
+          WHERE status = 'inflight';
+      `);
+
+      // Bring generation ledger DDL into versioned migrations + DB-14 late_usage column.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS author_generation_attempts (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES author_runs(id),
+          provider TEXT NOT NULL,
+          model TEXT NOT NULL,
+          state TEXT NOT NULL,
+          stage TEXT,
+          usage TEXT NOT NULL,
+          late_usage TEXT NOT NULL DEFAULT '[]',
+          error TEXT
+        );
+        CREATE INDEX IF NOT EXISTS author_generation_by_run ON author_generation_attempts(run_id);
+        CREATE TABLE IF NOT EXISTS author_generation_calls (
+          id TEXT PRIMARY KEY,
+          attempt_id TEXT NOT NULL REFERENCES author_generation_attempts(id),
+          phase TEXT NOT NULL,
+          input_reserve INTEGER NOT NULL,
+          max_output INTEGER NOT NULL,
+          usage TEXT
+        );
+        CREATE INDEX IF NOT EXISTS author_calls_by_attempt ON author_generation_calls(attempt_id);
+      `);
+      const attemptCols = tableColumns(db, "author_generation_attempts");
+      if (!attemptCols.has("late_usage")) {
+        db.exec("ALTER TABLE author_generation_attempts ADD COLUMN late_usage TEXT NOT NULL DEFAULT '[]';");
+      }
+
+      const cpCols = tableColumns(db, "author_read_checkpoints");
+      if (!cpCols.has("last_used_at")) {
+        db.exec("ALTER TABLE author_read_checkpoints ADD COLUMN last_used_at INTEGER NOT NULL DEFAULT 0;");
+      }
+    },
+  },
+  {
+    id: "2.3.0-document-sort-key-and-backfill",
+    up(db) {
+      const docCols = tableColumns(db, "author_documents");
+      if (!docCols.has("sort_key")) {
+        db.exec("ALTER TABLE author_documents ADD COLUMN sort_key REAL NOT NULL DEFAULT 0;");
+      }
+
+      const projectRows = db.prepare("SELECT DISTINCT project_id FROM author_documents;").all() as readonly {
+        project_id: string;
+      }[];
+      const readOrderStmt = db.prepare("SELECT chapter_ids FROM author_chapter_order WHERE project_id = ?;");
+      const readDocsStmt = db.prepare(
+        "SELECT id, sort_key FROM author_documents WHERE project_id = ? ORDER BY rowid ASC;",
+      );
+      const updateSortStmt = db.prepare("UPDATE author_documents SET sort_key = ? WHERE id = ?;");
+
+      for (const { project_id: projectId } of projectRows) {
+        const docs = readDocsStmt.all(projectId) as readonly { id: string; sort_key: number }[];
+        if (docs.length === 0) continue;
+        // Skip if already backfilled with non-zero sort keys.
+        if (docs.every((doc) => doc.sort_key > 0)) continue;
+
+        const docIdSet = new Set(docs.map((doc) => doc.id));
+        const orderRow = readOrderStmt.get(projectId) as { chapter_ids?: string } | undefined;
+        let orderedIds: string[] = [];
+        if (orderRow?.chapter_ids) {
+          try {
+            const parsed = JSON.parse(orderRow.chapter_ids) as unknown;
+            if (Array.isArray(parsed)) {
+              orderedIds = parsed.filter((id): id is string => typeof id === "string" && docIdSet.has(id));
+            }
+          } catch {
+            orderedIds = [];
+          }
+        }
+        const seen = new Set(orderedIds);
+        for (const doc of docs) {
+          if (!seen.has(doc.id)) {
+            seen.add(doc.id);
+            orderedIds.push(doc.id);
+          }
+        }
+        for (let i = 0; i < orderedIds.length; i += 1) {
+          updateSortStmt.run((i + 1) * SORT_KEY_STEP, orderedIds[i]);
+        }
+      }
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS author_documents_by_tree_sort
+          ON author_documents(project_id, volume_id, act_id, sort_key);
+      `);
+    },
+  },
+  {
+    id: "2.3.0-controls-foreshadows-observations-memory",
+    up(db) {
+      const ctrlCols = tableColumns(db, "author_project_controls");
+      if (!ctrlCols.has("pacing_tier")) {
+        db.exec("ALTER TABLE author_project_controls ADD COLUMN pacing_tier TEXT NOT NULL DEFAULT '';");
+      }
+      if (!ctrlCols.has("genre_tags_json")) {
+        db.exec("ALTER TABLE author_project_controls ADD COLUMN genre_tags_json TEXT NOT NULL DEFAULT '[]';");
+      }
+      if (!ctrlCols.has("agent_tools_enabled")) {
+        db.exec("ALTER TABLE author_project_controls ADD COLUMN agent_tools_enabled INTEGER NOT NULL DEFAULT 0;");
+      }
+      if (!ctrlCols.has("daily_target")) {
+        db.exec("ALTER TABLE author_project_controls ADD COLUMN daily_target INTEGER NOT NULL DEFAULT 0;");
+      }
+      if (!ctrlCols.has("stale_foreshadow_gap")) {
+        db.exec("ALTER TABLE author_project_controls ADD COLUMN stale_foreshadow_gap INTEGER NOT NULL DEFAULT 20;");
+      }
+      if (!ctrlCols.has("token_calibration_json")) {
+        db.exec("ALTER TABLE author_project_controls ADD COLUMN token_calibration_json TEXT NOT NULL DEFAULT '{}';");
+      }
+
+      const fsCols = tableColumns(db, "author_foreshadows");
+      if (!fsCols.has("hinted_chapter_ids_json")) {
+        db.exec("ALTER TABLE author_foreshadows ADD COLUMN hinted_chapter_ids_json TEXT NOT NULL DEFAULT '[]';");
+      }
+
+      const obsCols = tableColumns(db, "author_chapter_observations");
+      if (!obsCols.has("verified")) {
+        db.exec("ALTER TABLE author_chapter_observations ADD COLUMN verified INTEGER NOT NULL DEFAULT 1;");
+      }
+
+      const memCols = tableColumns(db, "author_chapter_memory_sync");
+      if (!memCols.has("synced_revision_id")) {
+        db.exec("ALTER TABLE author_chapter_memory_sync ADD COLUMN synced_revision_id TEXT;");
+      }
+    },
+  },
+  {
+    id: "2.3.0-event-log-timestamps-and-quarantine",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS event_log_quarantine (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id TEXT NOT NULL,
+          seq INTEGER NOT NULL,
+          event_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          payload TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          quarantined_at INTEGER NOT NULL DEFAULT 0
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS event_log_quarantine_by_project
+          ON event_log_quarantine(project_id, seq);
+      `);
+
+      if (!hasObject(db, "table", "event_log")) return;
+      const evCols = tableColumns(db, "event_log");
+      if (!evCols.has("created_at")) {
+        db.exec("ALTER TABLE event_log ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;");
+      }
+
+      // Backfill missing/invalid concerns by event kind; quarantine uninferable rows without creating seq gaps.
+      const rows = db.prepare("SELECT project_id, seq, event_id, kind, payload FROM event_log;").all() as readonly {
+        project_id: string;
+        seq: number;
+        event_id: string;
+        kind: string;
+        payload: string;
+      }[];
+      const updatePayload = db.prepare("UPDATE event_log SET payload = ? WHERE project_id = ? AND seq = ?;");
+      const insertQuarantine = db.prepare(`
+        INSERT INTO event_log_quarantine (project_id, seq, event_id, kind, payload, reason, quarantined_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+      `);
+      const now = Date.now();
+      for (const row of rows) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(row.payload);
+        } catch {
+          insertQuarantine.run(row.project_id, row.seq, row.event_id, row.kind, row.payload, "invalid-json", now);
+          continue;
+        }
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          insertQuarantine.run(row.project_id, row.seq, row.event_id, row.kind, row.payload, "non-object-payload", now);
+          continue;
+        }
+        const record = parsed as Record<string, unknown>;
+        const existingConcern = record.concern;
+        if (typeof existingConcern === "string" && VALID_CONCERNS.has(existingConcern)) continue;
+        const inferred = inferEventConcern(row.kind);
+        if (inferred) {
+          updatePayload.run(JSON.stringify({ ...record, concern: inferred }), row.project_id, row.seq);
+        } else {
+          insertQuarantine.run(
+            row.project_id,
+            row.seq,
+            row.event_id,
+            row.kind,
+            row.payload,
+            existingConcern ? `unknown-concern:${String(existingConcern)}` : "missing-concern",
+            now,
+          );
+        }
+      }
+    },
+  },
+  {
+    id: "2.3.0-hot-indexes",
+    up(db) {
+      if (hasObject(db, "table", "revisions")) {
+        db.exec("CREATE INDEX IF NOT EXISTS revisions_by_document_created ON revisions(document_id, created_at);");
+      }
+      if (hasObject(db, "table", "candidates")) {
+        db.exec("CREATE INDEX IF NOT EXISTS candidates_by_document ON candidates(document_id);");
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS author_generation_attempts_open
+          ON author_generation_attempts(state)
+          WHERE state IN ('prepared', 'inflight', 'received');
+        CREATE INDEX IF NOT EXISTS author_ai_proposals_by_doc
+          ON author_ai_proposals(document_id);
+        CREATE INDEX IF NOT EXISTS author_runs_by_doc_state
+          ON author_runs(document_id, state);
+        CREATE INDEX IF NOT EXISTS author_settings_by_project_fact
+          ON author_settings(project_id, fact_id);
+        CREATE INDEX IF NOT EXISTS author_foreshadows_by_target
+          ON author_foreshadows(project_id, target_chapter_id);
+        CREATE INDEX IF NOT EXISTS author_chapter_entities_by_name
+          ON author_chapter_entities(project_id, entity_name);
+        CREATE INDEX IF NOT EXISTS author_read_checkpoints_lru
+          ON author_read_checkpoints(last_used_at ASC);
+      `);
+    },
+  },
+  {
+    id: "2.3.0-meta-version-and-uuid",
+    up(db) {
+      db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);");
+      db.prepare(`
+        INSERT INTO meta (key, value) VALUES ('schema', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+      `).run(SCHEMA_ID);
+      db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('db_uuid', ?);").run(randomUUID());
+      db.exec(`PRAGMA user_version = ${SCHEMA_USER_VERSION};`);
+    },
+  },
 ];
 
 /**
  * V2 author-workspace schema with atomic, versioned migrations covering
- * `2.0.0` -> `2.1.0` -> `2.2.0` idempotently.
+ * `2.0.0` -> `2.1.0` -> `2.2.0` -> `2.3.0` idempotently.
  */
 export function createAuthorSchema(db: SqliteDatabase): void {
   runMigrations(db, AUTHOR_MIGRATIONS);

@@ -116,7 +116,11 @@ export function createCommandSchema(db: SqliteDatabase): void {
   if (!cols.has("created_at")) {
     db.exec("ALTER TABLE command_journal ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;");
   }
-  db.exec("CREATE INDEX IF NOT EXISTS command_journal_created_at ON command_journal(created_at);");
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS command_journal_created_at ON command_journal(created_at);
+    CREATE INDEX IF NOT EXISTS revisions_by_document_created ON revisions(document_id, created_at);
+    CREATE INDEX IF NOT EXISTS candidates_by_document ON candidates(document_id);
+  `);
 }
 
 /**
@@ -135,6 +139,38 @@ export function canonicalJson(value: unknown): string {
 /** Structural equality through canonical JSON. */
 export function payloadEquals(left: unknown, right: unknown): boolean {
   return canonicalJson(left) === canonicalJson(right);
+}
+
+const LARGE_JOURNAL_FIELDS: ReadonlySet<string> = new Set([
+  "body",
+  "mergedBody",
+  "sourceText",
+  "files",
+]);
+
+/**
+ * Replaces huge text/file fields with a compact SHA-256 + length digest so
+ * `command_journal` never suffers body write amplification (DB-02).
+ */
+function stripLargePayloadFields(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  const source = payload as Record<string, unknown>;
+  let stripped = false;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value === undefined) continue;
+    if (LARGE_JOURNAL_FIELDS.has(key) && value !== null) {
+      const serialized = typeof value === "string" ? value : canonicalJson(value);
+      out[key] = {
+        $sha256: createHash("sha256").update(serialized).digest("hex"),
+        $len: serialized.length,
+      };
+      stripped = true;
+    } else {
+      out[key] = value;
+    }
+  }
+  return stripped ? out : payload;
 }
 
 function readCurrentRevisionId(db: SqliteDatabase, documentId: string): string | null {
@@ -190,33 +226,50 @@ function readJournalRow(
  * commands inherit. A command whose frozen entry declares no base check
  * (`run.start`, `setting.decide`) passes false, so a request is never refused
  * for a base revision the command does not validate.
+ *
+ * `options.auditOnly` (DB-02 / Res#11): for non-idempotent commands that get a
+ * fresh UUID key per request and can never replay, writes only lightweight
+ * audit metadata (`request_payload = ''`, `request_hash = sha256`, compact
+ * result summary) to eliminate body write amplification.
  */
 export function runAuthorWrite<T>(
   db: SqliteDatabase,
   request: AuthorWriteRequest,
   apply: () => T,
-  options?: { readonly baseCheck?: boolean },
+  options?: { readonly baseCheck?: boolean; readonly auditOnly?: boolean },
 ): AuthorWriteOutcome<T> {
   const withBaseCheck = options?.baseCheck ?? true;
+  const auditOnly = options?.auditOnly ?? false;
   const payloadJson = canonicalJson(request.payload);
   const requestHash = hashCanonicalPayload(payloadJson);
+  const leanPayload = auditOnly ? null : stripLargePayloadFields(request.payload);
 
   return withWriteTx(db, () => {
     // 1. Idempotency first: a replay never reaches the base check.
-    const prior = readJournalRow(db, request);
-    if (prior) {
-      const hashMismatch = prior.request_hash.length > 0 && prior.request_hash !== requestHash;
-      const payloadMismatch = prior.request_payload.length > 0
-        ? !payloadEquals(JSON.parse(prior.request_payload) as unknown, request.payload)
-        : prior.request_hash !== requestHash;
-      if (hashMismatch || payloadMismatch) {
-        throw new StorageError("idempotency.mismatch", {
-          command: request.commandId,
-          target: request.documentId,
-        });
+    if (!auditOnly) {
+      const prior = readJournalRow(db, request);
+      if (prior) {
+        const hashMismatch = prior.request_hash.length > 0 && prior.request_hash !== requestHash;
+        let payloadMismatch = false;
+        if (prior.request_hash.length === 0) {
+          payloadMismatch = prior.request_payload.length > 0
+            ? !payloadEquals(JSON.parse(prior.request_payload) as unknown, request.payload)
+            : true;
+        } else if (prior.request_payload.length > 0) {
+          const parsedPrior = JSON.parse(prior.request_payload) as unknown;
+          payloadMismatch =
+            !payloadEquals(parsedPrior, leanPayload) &&
+            !payloadEquals(parsedPrior, request.payload);
+        }
+        if (hashMismatch || payloadMismatch) {
+          throw new StorageError("idempotency.mismatch", {
+            command: request.commandId,
+            target: request.documentId,
+          });
+        }
+        const result = JSON.parse(prior.result_payload) as T;
+        return { replayed: true, result };
       }
-      const result = JSON.parse(prior.result_payload) as T;
-      return { replayed: true, result };
     }
 
     // 2. Base revision, before any business state changes.
@@ -234,7 +287,14 @@ export function runAuthorWrite<T>(
     // 3. The command's own work.
     const result = apply();
 
-    // 4. Record for replay.
+    // 4. Record for replay (lean payload for idempotent commands; audit-only metadata for non-idempotent).
+    const storedRequestPayload = auditOnly ? "" : canonicalJson(leanPayload);
+    const rawResultJson = canonicalJson(result);
+    const storedResultPayload =
+      auditOnly && rawResultJson.length > 512
+        ? canonicalJson({ $auditOnly: true, $sha256: hashCanonicalPayload(rawResultJson), $len: rawResultJson.length })
+        : rawResultJson;
+
     stmt(
       db,
       `INSERT INTO command_journal
@@ -245,9 +305,9 @@ export function runAuthorWrite<T>(
       request.commandId,
       request.documentId,
       request.idempotencyKey,
-      payloadJson,
+      storedRequestPayload,
       requestHash,
-      canonicalJson(result),
+      storedResultPayload,
       Date.now(),
     );
     return { replayed: false, result };
@@ -302,6 +362,143 @@ export function pruneCommandJournal(
     ).run(deleteCutoff, keepRecent).changes;
 
     return { compacted, deleted };
+  });
+}
+
+export interface RevisionCompactOptions {
+  readonly nowMs?: number;
+  readonly retainRawAfterMs?: number;
+  readonly projectId?: string;
+  readonly documentId?: string;
+  readonly dryRun?: boolean;
+}
+
+export interface RevisionCompactResult {
+  readonly examined: number;
+  readonly deleted: number;
+  readonly kept: number;
+  readonly dryRun: boolean;
+}
+
+function tableExists(db: SqliteDatabase, table: string): boolean {
+  return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?;").get(table));
+}
+
+/**
+ * Compacts redundant intra-day auto-save revisions older than 7 days (DB-18 / Res#10)
+ * while strictly preserving every current, finalized, adopted, approved, delivered,
+ * evidenced, run-base, proposal-base, memory-synced, recent (<7d), and daily-latest revision.
+ */
+export function compactAutoSaveRevisions(
+  db: SqliteDatabase,
+  options: RevisionCompactOptions = {},
+): RevisionCompactResult {
+  const nowMs = options.nowMs ?? Date.now();
+  const retainRawAfterMs = options.retainRawAfterMs ?? 7 * 86_400_000;
+  const cutoff = nowMs - retainRawAfterMs;
+  const dryRun = options.dryRun === true;
+
+  return withWriteTx(db, () => {
+    const protectedIds = new Set<string>();
+    const collect = (sql: string) => {
+      const rows = db.prepare(sql).all() as readonly { rev?: unknown }[];
+      for (const row of rows) {
+        if (typeof row.rev === "string" && row.rev.length > 0) protectedIds.add(row.rev);
+      }
+    };
+
+    collect("SELECT current_revision_id AS rev FROM documents WHERE current_revision_id IS NOT NULL;");
+    collect("SELECT base_revision_id AS rev FROM candidates WHERE base_revision_id IS NOT NULL;");
+    collect("SELECT revision_id AS rev FROM author_decisions WHERE revision_id IS NOT NULL;");
+    if (tableExists(db, "deliveries")) {
+      collect("SELECT final_revision_id AS rev FROM deliveries WHERE final_revision_id IS NOT NULL;");
+    }
+    if (tableExists(db, "author_documents")) {
+      collect("SELECT final_revision_id AS rev FROM author_documents WHERE final_revision_id IS NOT NULL;");
+    }
+    if (tableExists(db, "author_approvals")) {
+      collect("SELECT revision_id AS rev FROM author_approvals WHERE revision_id IS NOT NULL;");
+    }
+    if (tableExists(db, "author_evidence")) {
+      collect("SELECT revision_id AS rev FROM author_evidence WHERE revision_id IS NOT NULL;");
+    }
+    if (tableExists(db, "author_runs")) {
+      collect("SELECT base_revision_id AS rev FROM author_runs WHERE base_revision_id IS NOT NULL;");
+    }
+    if (tableExists(db, "author_chapter_memory_sync")) {
+      const cols = new Set(
+        (db.prepare("PRAGMA table_info(author_chapter_memory_sync);").all() as readonly { name?: unknown }[])
+          .map((row) => row.name)
+          .filter((name): name is string => typeof name === "string"),
+      );
+      if (cols.has("synced_revision_id")) {
+        collect("SELECT synced_revision_id AS rev FROM author_chapter_memory_sync WHERE synced_revision_id IS NOT NULL;");
+      }
+    }
+    if (tableExists(db, "author_ai_proposals")) {
+      const cols = new Set(
+        (db.prepare("PRAGMA table_info(author_ai_proposals);").all() as readonly { name?: unknown }[])
+          .map((row) => row.name)
+          .filter((name): name is string => typeof name === "string"),
+      );
+      if (cols.has("base_revision_id")) {
+        collect("SELECT base_revision_id AS rev FROM author_ai_proposals WHERE base_revision_id IS NOT NULL;");
+      }
+    }
+
+    let rows: readonly { revision_id: string; document_id: string; created_at: number }[];
+    if (options.documentId) {
+      rows = db.prepare(`
+        SELECT revision_id, document_id, created_at
+        FROM revisions
+        WHERE document_id = ?
+        ORDER BY document_id ASC, created_at DESC, rowid DESC;
+      `).all(options.documentId) as readonly { revision_id: string; document_id: string; created_at: number }[];
+    } else if (options.projectId && tableExists(db, "author_documents")) {
+      rows = db.prepare(`
+        SELECT r.revision_id, r.document_id, r.created_at
+        FROM revisions r
+        JOIN author_documents a ON a.id = r.document_id
+        WHERE a.project_id = ?
+        ORDER BY r.document_id ASC, r.created_at DESC, r.rowid DESC;
+      `).all(options.projectId) as readonly { revision_id: string; document_id: string; created_at: number }[];
+    } else {
+      rows = db.prepare(`
+        SELECT revision_id, document_id, created_at
+        FROM revisions
+        ORDER BY document_id ASC, created_at DESC, rowid DESC;
+      `).all() as readonly { revision_id: string; document_id: string; created_at: number }[];
+    }
+
+    const keptDailyKeys = new Set<string>();
+    const toDelete: string[] = [];
+
+    for (const row of rows) {
+      if (protectedIds.has(row.revision_id) || row.created_at >= cutoff) {
+        continue;
+      }
+      const dayBucket = Math.floor(row.created_at / 86_400_000);
+      const dailyKey = `${row.document_id}\0${dayBucket}`;
+      if (!keptDailyKeys.has(dailyKey)) {
+        keptDailyKeys.add(dailyKey);
+        continue;
+      }
+      toDelete.push(row.revision_id);
+    }
+
+    if (!dryRun && toDelete.length > 0) {
+      const delStmt = stmt(db, "DELETE FROM revisions WHERE revision_id = ?;");
+      for (const revisionId of toDelete) {
+        delStmt.run(revisionId);
+      }
+    }
+
+    return {
+      examined: rows.length,
+      deleted: toDelete.length,
+      kept: rows.length - toDelete.length,
+      dryRun,
+    };
   });
 }
 
@@ -459,8 +656,13 @@ export function adoptCandidate(
   return { replayed: outcome.replayed, revisionId: outcome.result.revisionId };
 }
 
+const VALID_TABLE_NAME = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+
 /** Row counts, for tests that assert nothing was half-committed. */
 export function rowCount(db: SqliteDatabase, table: string): number {
+  if (!VALID_TABLE_NAME.test(table)) {
+    throw new StorageError("input.invalid", { field: "table", reason: "invalid-table-name" });
+  }
   const row = db.prepare(`SELECT COUNT(*) AS count FROM ${table};`).get();
   const value = (row as { count?: unknown }).count;
   return typeof value === "number" ? value : 0;
@@ -484,6 +686,8 @@ export interface CommandRequest {
   readonly commandId: string;
   /** The subject the Host resolved, never a caller claim. */
   readonly actor: Subject;
+  /** Optional rich actor identifier for journal audit trail (DSH-04). */
+  readonly actorId?: string;
   /** The object the command targets. */
   readonly documentId: string;
   /** The caller's idempotency key, for the commands whose entry declares one. */
@@ -513,10 +717,8 @@ export interface CommandRequest {
  * no row behind. The entry's own `baseCheck` flag then decides whether the base
  * revision is validated at all.
  *
- * A command whose entry declares no idempotency key gets a generated one, so
- * each request is its own journal row: with no key there is nothing for a
- * replay to match, and a repeated request is a second write rather than a
- * replay.
+ * A command whose entry declares no idempotency key gets a generated one and
+ * records only lightweight audit metadata (DB-02 / Res#11).
  */
 export function executeCommand<T>(
   db: SqliteDatabase,
@@ -548,8 +750,10 @@ export function executeCommand<T>(
   }
 
   let idempotencyKey = request.idempotencyKey;
+  let auditOnly = false;
   if (!entry.idempotent) {
     idempotencyKey = randomUUID();
+    auditOnly = true;
   } else if (typeof idempotencyKey !== "string" || idempotencyKey.length === 0) {
     return {
       ok: false,
@@ -561,7 +765,7 @@ export function executeCommand<T>(
     const outcome = runAuthorWrite(
       db,
       {
-        actorId: request.actor,
+        actorId: request.actorId ?? request.actor,
         commandId: request.commandId,
         documentId: request.documentId,
         idempotencyKey,
@@ -569,7 +773,7 @@ export function executeCommand<T>(
         baseRevisionId: request.baseRevisionId,
       },
       apply,
-      { baseCheck: entry.baseCheck },
+      { baseCheck: entry.baseCheck, auditOnly },
     );
     return { ok: true, code: null, result: outcome.result, replayed: outcome.replayed };
   } catch (error) {

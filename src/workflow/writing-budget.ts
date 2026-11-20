@@ -1,44 +1,129 @@
 import type { RunBillingSummaryDto } from "../contracts/workspace-dto.ts";
-import { createBudgetGuard, totalTokens, type ActualUsage, type BudgetGuard } from "./budget.ts";
+import {
+  createBudgetGuard,
+  normalizeActualUsage,
+  normalizeUsage,
+  normalizeUsageToTuple,
+  totalTokens,
+  type ActualUsage,
+  type BudgetGuard,
+  type NormalizeUsageOptions,
+  type RawLlmUsage,
+  type TokenUsage,
+} from "./budget.ts";
 
-export const WRITER_SYSTEM =
-  "你是织章的候选稿写作者。根据给定的作者要求和冻结输入写作。只返回候选正文。维持人物知识边界与锁定设定，不执行外部操作。";
+export {
+  WRITER_SYSTEM,
+  FANQIE_SYSTEM_CONTINUE,
+  FANQIE_SYSTEM_REWRITE,
+  FANQIE_SYSTEM_TARGETED,
+  QA_SYSTEM,
+  DECONSTRUCT_EXTRACT_SYSTEM,
+  TECHNIQUE_EXTRACT_SYSTEM,
+  SETTING_EXTRACT_SYSTEM,
+  SUMMARY_DRAFT_SYSTEM,
+  FACT_SYNC_SYSTEM,
+  CHAPTER_REVIEW_SYSTEM,
+  ARC_PLAN_SYSTEM,
+  SELECTION_REWRITE_SYSTEM,
+} from "./prompts/index.ts";
 
-export const QA_SYSTEM =
-  "你是头条稿件质检编辑。核对事实需证据，检查结构、标题正文一致性与风险，不把未核实内容视为已核实。只返回 JSON，键为 overall（0–100整数）、passed（布尔）、fails（字符串数组）和 hardGates（字符串数组）。";
-
-export const DECONSTRUCT_EXTRACT_SYSTEM =
-  "你是织章长篇拆书分析助手。根据给定样章片段，提取结构化拆书字段，仅作为待作者确认的提案。只返回 JSON，键为 title、sourceBook、genre、pacing（快爽/稳推/慢燃或空）、tags（字符串数组）、hookAnalysis、conflictBeats、payoffRhythm、proseNotes。";
-
-export const TECHNIQUE_EXTRACT_SYSTEM =
-  "你是织章写作技法提炼助手。根据给定片段或拆书笔记提炼可复用的叙事技法卡片提案。只返回 JSON，键为 title、category（opening/hook/conflict/dialogue/atmosphere/foreshadow/pacing/cliffhanger/narrative）、pacing、sceneTags（字符串数组）、triggerWhen、executionSteps、constraints、antiPatterns。";
-
-export const SETTING_EXTRACT_SYSTEM =
-  "你是织章动态设定与伏笔提取助手。仅从给定章节正文与已有设定中提取新增或变更的人物/物品/地点/势力/规则与伏笔线索，全部作为待作者审阅的提案，不改动已锁定设定。只返回 JSON，键为 settings（数组，每项含 factId/category/entityName/note/point/people）与 foreshadows（数组，每项含 title/factId/status/note）。";
-
-export const SUMMARY_DRAFT_SYSTEM =
-  "你是织章章节摘要助手。将给定章节浓缩为 120–240 字的客观剧情滚动摘要，保留时间线、出场核心人物与关键状态变化。只返回 JSON，键为 summary（字符串）。";
-
-export const FACT_SYNC_SYSTEM =
-  "你是织章长篇连贯性记忆同步助手。仅根据给定章节的正文变更片段与已有设定/伏笔清单，提取新增或更新的设定事实、角色知情时间线更新、伏笔状态变化及章节摘要草案，全部作为待作者确认的提案，严禁修改已锁定设定。只返回 JSON，键为 newFacts（数组，每项含 factId/category/entityName/note/point/people/quote）、knownFromUpdates（数组，每项含 factId/character/point）、foreshadowUpdates（数组，每项含 id/title/factId/status/note）和 summaryDraft（可选字符串）。";
-
-export const CHAPTER_REVIEW_SYSTEM =
-  "你是织章长篇定性审稿编辑。请围绕连续性(continuity)、人物不OOC(ooc)、节奏(pacing)、伏笔(foreshadow)、文风(style)与AI味(ai_slop)六个维度审阅给定章节正文，仅提出附带原文精确摘句(quote)与具体修改建议(suggestion)的观察条目，不直接改写全文。只返回 JSON，键为 observations（数组，每项含 dimension/severity/quote/suggestion）。";
-
-export const ARC_PLAN_SYSTEM =
-  "你是织章长篇卷幕滚动规划助手。结合全书指南针(authorIntent)、当前写作焦点与已写章节摘要，为刚写完或进行中的幕生成客观摘要(actSummary)，并规划下一幕(nextActTitle、nextActGoal、nextActSummary、pacingTemplate)与更新后的近1-3章写作焦点(currentFocus)，不替作者擅自定稿。只返回 JSON。";
-
-export const SELECTION_REWRITE_SYSTEM =
-  "你是织章正文局部片段精修助手。严格遵守人物视角知情边界、已锁定设定与给定写作技法，结合前后文仅改写作者选中的正文片段。只返回改写后的该片段正文，不要重复前后文，不要添加引号或解释说明。";
+export {
+  normalizeUsage,
+  normalizeUsageToTuple,
+  normalizeActualUsage,
+  type RawLlmUsage,
+  type NormalizeUsageOptions,
+  type TokenUsage,
+};
 
 export const DEFAULT_MIN_RECOMMENDED_BUDGET = 8000;
 export const DEFAULT_MAX_STAGE_INPUT_TOKENS = 64_000;
 
 /**
+ * Per-provider conservative calibration multipliers (FQ-29 / Res#16).
+ * DeepSeek tokenizers encode CJK significantly more densely than our
+ * 1.4 tokens/char baseline; other providers stay at conservative 1.0 until
+ * empirically calibrated from real receipts.
+ */
+export const DEFAULT_PROVIDER_TOKEN_MULTIPLIERS: Readonly<Record<string, number>> = {
+  deepseek: 0.55,
+};
+
+export const MIN_TOKEN_CALIBRATION_MULTIPLIER = 0.35;
+export const MAX_TOKEN_CALIBRATION_MULTIPLIER = 1.5;
+export const TOKEN_CALIBRATION_SAFETY_MARGIN = 1.15;
+
+function clampMultiplier(multiplier: number): number {
+  if (!Number.isFinite(multiplier) || multiplier <= 0) return 1;
+  return Math.max(MIN_TOKEN_CALIBRATION_MULTIPLIER, Math.min(2.0, multiplier));
+}
+
+/**
+ * Resolves the effective token estimation multiplier for a `(provider, model)`
+ * pair from persisted project calibration data or provider defaults (FQ-29).
+ */
+export function resolveTokenMultiplier(
+  provider?: string | null,
+  model?: string | null,
+  calibrationMap?: Readonly<Record<string, number>> | null,
+): number {
+  const normProvider = (provider ?? "").trim().toLowerCase();
+  const normModel = (model ?? "").trim().toLowerCase();
+  if (calibrationMap) {
+    const exactKey = normProvider && normModel ? `${normProvider}:${normModel}` : "";
+    if (exactKey && typeof calibrationMap[exactKey] === "number" && calibrationMap[exactKey] > 0) {
+      return clampMultiplier(calibrationMap[exactKey]);
+    }
+    if (normProvider && typeof calibrationMap[normProvider] === "number" && calibrationMap[normProvider] > 0) {
+      return clampMultiplier(calibrationMap[normProvider]);
+    }
+  }
+  for (const [prefix, factor] of Object.entries(DEFAULT_PROVIDER_TOKEN_MULTIPLIERS)) {
+    if (normProvider.includes(prefix) || normModel.includes(prefix)) {
+      return factor;
+    }
+  }
+  return 1;
+}
+
+/**
+ * Updates per-provider/model exponential moving average calibration ratio from
+ * real prompt receipts (`actualInput / estimatedInput`) with a 0.35 floor and
+ * 15% safety margin (FQ-29).
+ */
+export function updateTokenCalibration(
+  previous: Readonly<Record<string, number>>,
+  key: string,
+  actualInput: number,
+  estimatedInput: number,
+  alpha = 0.3,
+): Record<string, number> {
+  const next: Record<string, number> = { ...previous };
+  const cleanKey = key.trim().toLowerCase();
+  if (!cleanKey || !Number.isFinite(actualInput) || actualInput <= 0 || !Number.isFinite(estimatedInput) || estimatedInput <= 0) {
+    return next;
+  }
+  const observed = Math.max(
+    MIN_TOKEN_CALIBRATION_MULTIPLIER,
+    Math.min(MAX_TOKEN_CALIBRATION_MULTIPLIER, (actualInput / estimatedInput) * TOKEN_CALIBRATION_SAFETY_MARGIN),
+  );
+  const prior = next[cleanKey];
+  const blended = typeof prior === "number" && Number.isFinite(prior) && prior > 0
+    ? prior * (1 - alpha) + observed * alpha
+    : observed;
+  next[cleanKey] = Math.round(
+    Math.max(MIN_TOKEN_CALIBRATION_MULTIPLIER, Math.min(MAX_TOKEN_CALIBRATION_MULTIPLIER, blended)) * 1000,
+  ) / 1000;
+  return next;
+}
+
+/**
  * Calibrated CJK/ASCII token estimator that protects Chinese manuscripts
  * against under-reservation without the ~2.3x over-inflation of raw UTF-8 bytes.
+ * Supports an optional provider calibration `multiplier` (FQ-29; default `1`).
  */
-export function estimateTokenCount(text: string): number {
+export function estimateTokenCount(text: string, multiplier = 1): number {
   let total = 0;
   for (const ch of text) {
     const code = ch.codePointAt(0)!;
@@ -55,15 +140,16 @@ export function estimateTokenCount(text: string): number {
       total += 1.8;
     }
   }
-  return Math.ceil(total);
+  const factor = multiplier === 1 ? 1 : clampMultiplier(multiplier);
+  return Math.ceil(total * factor);
 }
 
 /**
  * Calibrated conservative input reservation accounting for CJK density and
  * fixed protocol framing overhead.
  */
-export function estimateWritingInput(system: string, prompt: string): number {
-  return estimateTokenCount(system) + estimateTokenCount(prompt) + 128;
+export function estimateWritingInput(system: string, prompt: string, multiplier = 1): number {
+  return estimateTokenCount(system, multiplier) + estimateTokenCount(prompt, multiplier) + 128;
 }
 
 /**
@@ -95,12 +181,23 @@ export function sumUsageTuple(counts: readonly number[]): number {
   return totalTokens(usageTupleToActual(counts));
 }
 
+export interface ComputeRunBillingOptions {
+  /**
+   * When `true` (DB-01 normalized mode), tuples are strictly mutually exclusive
+   * `[uncachedInput, output, cacheRead, cacheWrite]` so `effectiveBilledTokens`
+   * equals `input + output` and `cacheHitRate` equals `cacheRead / (input + cacheRead)`.
+   * When omitted/false, preserves backward-compatible inference for legacy raw tuples.
+   */
+  readonly normalized?: boolean;
+}
+
 /**
  * Summarizes 4-category token usage across generation calls into effective
  * billed tokens and prompt cache hit rate without assuming unknown cache=0.
  */
 export function computeRunBilling(
   usageTuples: readonly (readonly number[] | null)[],
+  options: ComputeRunBillingOptions = {},
 ): RunBillingSummaryDto {
   let totalInput = 0;
   let totalOutput = 0;
@@ -108,6 +205,7 @@ export function computeRunBilling(
   let totalCacheWrite = 0;
   let effectiveBilledTokens = 0;
   let validCalls = 0;
+  const normalized = options.normalized === true;
 
   for (const tuple of usageTuples) {
     if (!tuple || tuple.length < 2) continue;
@@ -119,7 +217,11 @@ export function computeRunBilling(
     totalOutput += output;
     totalCacheRead += cacheRead;
     totalCacheWrite += cacheWrite;
-    effectiveBilledTokens += (cacheRead <= input ? input - cacheRead : input) + output;
+    if (normalized) {
+      effectiveBilledTokens += input + output;
+    } else {
+      effectiveBilledTokens += (cacheRead <= input ? input - cacheRead : input) + output;
+    }
     validCalls += 1;
   }
 
@@ -134,9 +236,15 @@ export function computeRunBilling(
     };
   }
 
-  const cacheHitRate = totalInput > 0
-    ? (totalCacheRead <= totalInput ? totalCacheRead / totalInput : totalCacheRead / (totalInput + totalCacheRead))
-    : null;
+  let cacheHitRate: number | null;
+  if (normalized) {
+    const totalPrompt = totalInput + totalCacheRead;
+    cacheHitRate = totalPrompt > 0 ? totalCacheRead / totalPrompt : null;
+  } else {
+    cacheHitRate = totalInput > 0
+      ? (totalCacheRead <= totalInput ? totalCacheRead / totalInput : totalCacheRead / (totalInput + totalCacheRead))
+      : null;
+  }
 
   return {
     totalInput,
@@ -145,6 +253,37 @@ export function computeRunBilling(
     totalCacheWrite,
     effectiveBilledTokens,
     cacheHitRate,
+  };
+}
+
+/** Optional cumulative budget summary across runs, proposals, and micro-calls (DB-26 / Res#11). */
+export interface CumulativeBudgetSummary {
+  readonly runTokens: number;
+  readonly proposalTokens: number;
+  readonly microCallTokens: number;
+  readonly totalTokens: number;
+  readonly softLimit: number | null;
+  readonly softLimitExceeded: boolean;
+}
+
+export function summarizeCumulativeUsage(input: {
+  readonly runTokens: number;
+  readonly proposalTokens: number;
+  readonly microCallTokens: number;
+  readonly softLimit?: number | null;
+}): CumulativeBudgetSummary {
+  const runTokens = Math.max(0, Math.floor(input.runTokens));
+  const proposalTokens = Math.max(0, Math.floor(input.proposalTokens));
+  const microCallTokens = Math.max(0, Math.floor(input.microCallTokens));
+  const total = runTokens + proposalTokens + microCallTokens;
+  const softLimit = typeof input.softLimit === "number" && input.softLimit > 0 ? Math.floor(input.softLimit) : null;
+  return {
+    runTokens,
+    proposalTokens,
+    microCallTokens,
+    totalTokens: total,
+    softLimit,
+    softLimitExceeded: softLimit !== null && total >= softLimit,
   };
 }
 

@@ -74,6 +74,7 @@ interface UnitEntry {
   readonly view: (state: unknown) => unknown;
   state: unknown;
   lastView: unknown;
+  viewDirty: boolean;
   seq: number;
 }
 
@@ -86,11 +87,25 @@ export function createProjectionSchema(db: SqliteDatabase): void {
 export interface ProjectionStore {
   readonly projectId: string;
   register<S>(key: string, unit: ProjectionUnit<S>): void;
+  /** Attaches an additional unit to a live per-project store (DB-03). */
+  attachUnit<S>(key: string, unit: ProjectionUnit<S>, initialState?: S, initialSeq?: number): void;
+  /** Removes a dynamically attached unit from memory (for LRU eviction). */
+  detachUnit(key: string): boolean;
+  /** Whether a unit with `key` is currently registered/attached. */
+  hasUnit(key: string): boolean;
+  /** Current sequence watermark of a specific unit, or undefined if absent. */
+  unitSeq(key: string): number | undefined;
+  /** Catches up one newly attached unit up to the store watermark without touching other units. */
+  catchUpUnit(key: string, events: readonly { readonly seq: number; readonly payload: unknown }[]): number;
+  /** Folds a contiguous batch of events across all units without per-event view overhead when no listeners exist. */
+  fold(events: readonly { readonly seq: number; readonly payload: unknown }[]): number;
   commit(event: { readonly id: string; readonly type: string; readonly [field: string]: unknown }, deliverSeq?: number): { seq: number; changes: ProjectionChange[] };
   snapshot(keys?: readonly string[]): ProjectionCut;
   seqOf(): number;
   stateRef(key: string): unknown;
   checkpoint(): CheckpointRow[];
+  /** Returns a single unit's durable checkpoint row without cloning unrelated units. */
+  unitCheckpoint(key: string): CheckpointRow | undefined;
   saveCheckpoint(): void;
   loadCheckpoint(): CheckpointRow[];
   restoreFloor(checkpoint: readonly CheckpointRow[]): number | undefined;
@@ -106,11 +121,23 @@ export function createProjectionStore(db: SqliteDatabase, projectId: string): Pr
   const eventChangedListeners = new Set<(changes: readonly ProjectionChange[]) => void>();
   let seq = 0;
 
+  function materializeView(unit: UnitEntry): unknown {
+    if (unit.viewDirty) {
+      unit.lastView = unit.view(unit.state);
+      unit.viewDirty = false;
+    }
+    return unit.lastView;
+  }
+
   function drive(event: unknown, eventSeq: number): ProjectionChange[] {
     const changes: ProjectionChange[] = [];
     let failure: { error: unknown } | null = null;
     for (const unit of units.values()) {
       if (unit.seq >= eventSeq) continue;
+      if (unit.viewDirty) {
+        unit.lastView = unit.view(unit.state);
+        unit.viewDirty = false;
+      }
       const before = unit.state;
       let after: unknown;
       let view: unknown;
@@ -155,8 +182,94 @@ export function createProjectionStore(db: SqliteDatabase, projectId: string): Pr
         view: unit.view as (state: unknown) => unknown,
         state: initial,
         lastView: unit.view(initial),
+        viewDirty: false,
         seq: 0,
       });
+    },
+
+    attachUnit(key, unit, initialState, initialSeq = 0) {
+      if (units.has(key)) {
+        throw new StorageError("input.invalid", { field: "key", reason: "projection-unit-exists" });
+      }
+      if (!Number.isSafeInteger(initialSeq) || initialSeq < 0) {
+        throw new StorageError("input.invalid", { field: "initialSeq", reason: "invalid-unit-seq" });
+      }
+      const state = initialState !== undefined ? structuredClone(initialState) : unit.init();
+      units.set(key, {
+        key,
+        version: unit.version,
+        init: unit.init as () => unknown,
+        apply: unit.apply as (state: unknown, event: unknown) => unknown,
+        view: unit.view as (state: unknown) => unknown,
+        state,
+        lastView: undefined,
+        viewDirty: true,
+        seq: initialSeq,
+      });
+      if (units.size === 1 && seq === 0 && initialSeq > 0) {
+        seq = initialSeq;
+      }
+    },
+
+    detachUnit(key) {
+      return units.delete(key);
+    },
+
+    hasUnit(key) {
+      return units.has(key);
+    },
+
+    unitSeq(key) {
+      return units.get(key)?.seq;
+    },
+
+    catchUpUnit(key, events) {
+      const unit = units.get(key);
+      if (!unit) throw new StorageError("input.not_found", { objectType: "projection-unit", objectId: key });
+      let folded = 0;
+      for (const item of events) {
+        if (item.seq <= unit.seq) continue;
+        if (item.seq !== unit.seq + 1) {
+          throw new StorageError("storage.format_unsupported", { reason: "event-log-gap" });
+        }
+        const before = unit.state;
+        const after = unit.apply(before, item.payload);
+        unit.state = after;
+        unit.seq = item.seq;
+        if (!Object.is(before, after)) unit.viewDirty = true;
+        folded += 1;
+      }
+      if (unit.seq > seq && units.size === 1) {
+        seq = unit.seq;
+      }
+      return folded;
+    },
+
+    fold(events) {
+      if (events.length === 0) return 0;
+      const hasListeners = changedListeners.size > 0 || eventChangedListeners.size > 0;
+      let folded = 0;
+      for (const item of events) {
+        if (item.seq <= seq) continue;
+        if (item.seq !== seq + 1) {
+          throw new StorageError("input.invalid", { field: "deliverSeq", reason: "projection-event-gap" });
+        }
+        if (hasListeners) {
+          drive(item.payload, item.seq);
+        } else {
+          for (const unit of units.values()) {
+            if (unit.seq >= item.seq) continue;
+            const before = unit.state;
+            const after = unit.apply(before, item.payload);
+            unit.state = after;
+            unit.seq = item.seq;
+            if (!Object.is(before, after)) unit.viewDirty = true;
+          }
+          seq = item.seq;
+        }
+        folded += 1;
+      }
+      return folded;
     },
 
     commit(event, deliverSeq) {
@@ -190,12 +303,24 @@ export function createProjectionStore(db: SqliteDatabase, projectId: string): Pr
 
     snapshot(keys) {
       const values: Record<string, unknown> = {};
+      if (keys) {
+        for (const key of keys) {
+          const unit = units.get(key);
+          if (!unit) continue;
+          if (unit.seq !== seq) {
+            throw new StorageError("stage.output_invalid", { stage: unit.key, missing: "complete-projection" });
+          }
+          values[unit.key] = unit.view(unit.state);
+          unit.lastView = values[unit.key];
+          unit.viewDirty = false;
+        }
+        return { asOfSeq: seq, values };
+      }
       for (const unit of units.values()) {
         if (unit.seq !== seq) {
           throw new StorageError("stage.output_invalid", { stage: unit.key, missing: "complete-projection" });
         }
-        if (keys && !keys.includes(unit.key)) continue;
-        values[unit.key] = unit.view(unit.state);
+        values[unit.key] = materializeView(unit);
       }
       return { asOfSeq: seq, values };
     },
@@ -217,6 +342,17 @@ export function createProjectionStore(db: SqliteDatabase, projectId: string): Pr
         seq: unit.seq,
         val: structuredClone(unit.state),
       }));
+    },
+
+    unitCheckpoint(key) {
+      const unit = units.get(key);
+      if (!unit) return undefined;
+      return {
+        key: unit.key,
+        ver: unit.version,
+        seq: unit.seq,
+        val: structuredClone(unit.state),
+      };
     },
 
     saveCheckpoint() {
@@ -298,6 +434,8 @@ export function createProjectionStore(db: SqliteDatabase, projectId: string): Pr
         restored.set(unit.key, {
           ...unit,
           state: row ? structuredClone(row.val) : unit.init(),
+          lastView: undefined,
+          viewDirty: true,
           seq: row?.seq ?? 0,
         });
       }
@@ -310,6 +448,7 @@ export function createProjectionStore(db: SqliteDatabase, projectId: string): Pr
       }
       const values = Object.fromEntries([...restored.values()].map((unit) => {
         unit.lastView = unit.view(unit.state);
+        unit.viewDirty = false;
         return [unit.key, unit.lastView];
       }));
       for (const unit of restored.values()) units.set(unit.key, unit);
