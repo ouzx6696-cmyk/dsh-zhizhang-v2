@@ -1,9 +1,11 @@
 import { ContractError } from "../../contracts/errors.ts";
 import { type Anchor, type ValidityInterval } from "../shared/anchors.ts";
 
-export const CHAPTER_STATES = ["planned", "drafting", "drafted", "reviewed", "final"] as const;
+import { CHAPTER_STATES, EDITORIAL_REJECTION_LIMIT } from "../../contracts/protected-rules.ts";
+
+// Protected values live in contracts/protected-rules.ts (single source of truth); re-exported unchanged.
+export { CHAPTER_STATES, EDITORIAL_REJECTION_LIMIT };
 export type ChapterState = (typeof CHAPTER_STATES)[number];
-export const EDITORIAL_REJECTION_LIMIT = 2;
 export const DEFAULT_CHAPTER_LENGTH = [2000, 2500] as const;
 export const CHAPTER_LENGTH_WARNING_BAND = [1500, 6000] as const;
 

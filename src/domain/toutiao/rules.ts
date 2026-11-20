@@ -1,9 +1,9 @@
 import { ContractError } from "../../contracts/errors.ts";
 
-export const TITLE_MAX = 34;
-export const QA_PASS_SCORE = 84;
-export const QA_REFINEMENT_LIMIT = 2;
-export const DELIVERY_ENDING = "——AI 到此止步。是否采用、何时发布由你决定。";
+import { DELIVERY_ENDING, QA_PASS_SCORE, QA_REFINEMENT_LIMIT, TITLE_MAX } from "../../contracts/protected-rules.ts";
+
+// Protected values live in contracts/protected-rules.ts (single source of truth); re-exported unchanged.
+export { DELIVERY_ENDING, QA_PASS_SCORE, QA_REFINEMENT_LIMIT, TITLE_MAX };
 
 export const ARTICLE_TRANSITIONS = {
   初稿待改: ["待验收"],
