@@ -45,13 +45,17 @@ import {
 } from "../src/domain/toutiao/index.ts";
 
 test("FQ-02: splitChapterParagraphs, pointAtOffset, and resolveAnchor share one non-empty paragraph source of truth", () => {
-  // Smoke surface invariant: shared/index.ts keeps its exact 5 frozen runtime keys.
+  // Smoke surface invariant: shared/index.ts exposes the anchor form plus the
+  // single paragraph splitter and offset resolver that every point consumer
+  // must use (FQ-02).
   assert.deepEqual(Object.keys(sharedDomain).sort(), [
     "anchor",
     "isEffective",
     "orderIndex",
+    "pointAtOffset",
     "precedes",
     "resolveAnchor",
+    "splitChapterParagraphs",
   ]);
 
   // Empty and whitespace-only inputs

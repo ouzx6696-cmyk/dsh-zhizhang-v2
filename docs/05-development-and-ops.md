@@ -83,14 +83,14 @@ npm run dev
 | --- | --- | :---: | :---: | --- |
 | `npm run test:contracts` | `*-d02`、`*-w02` | 14 | 147 | **冻结契约合规**：存储格式窗口、命令幂等账本、事件日志、冷启动恢复、运行状态机、预算守卫与交稿批准门 |
 | `npm run test:v2` | `*-v2`、`smoke` | 18 | 97 | **V2.2 应用与全栈测试**：工作区核心流程、Sprint 1–4 优化闭环（缓存/记忆/FTS5/SKILL 沙箱/体检/ diff/微改写/5000 章虚拟化/控制面/7+3 工具）、宿主插件 HTTP/SSE、灾备恢复与静态架构守卫 |
-| `npm run test:v23` | `*-v23` | 4 | 40 | **V2.3 底座测试**：段落切分/`mergeFactVersion`/伏笔与章节转换表、`normalizeUsage` 与 schema 迁移、热备/FTS 两段式、diff 与选段校验、虚拟列表行高 |
+| `npm run test:v23` | `*-v23` | 5 | 43 | **V2.3 底座测试**：段落切分/`mergeFactVersion`/伏笔与章节转换表、`normalizeUsage` 与 schema 迁移、热备/FTS 两段式、diff 与选段校验、虚拟列表行高 |
 | `npm run test:host` | `host-plugin-v2`、`generation-v2`、`backup-v2` | 3 | 16 | **宿主、传输与灾备专测**：`/workbench`/`/state`/`/diag`/`/mutate` CSP 与状态码映射、202 异步生成与取消、`export.conflict` 与重启恢复、SHA-256 整库备份还原与防篡改 |
 | `npm run test:client` | `client-v2` | 1 | 6 | **前端无浏览器单元测试**：`DraftVault` 多标签 owner 隔离与慢保存恢复、大型段落 LCS `computeParagraphDiff`、`apiRequest` 错误汉化、`slot.ts` 三槽位注入、`workbench.html` 全量 ID/页签/Manifest 静态契约校验 |
 | `npm run test:arch` | `smoke`、`refactor-v2` | 2 | 13 | **架构边界与布局守卫**：全仓库 `.ts` 递归依赖隔离（双产品线/宿主/存储/客户端零越界）、`workspace-dto.ts` 纯类型零运行时校验、`AGENTS.md` 目录纯净度、`manifest`/`package.json`/`cordis.patch.yml` 一致性 |
-| `npm test` | `test:contracts` + `test:v2` + `test:v23` | 36 | 284 | **日常核心回归** |
+| `npm test` | `test:contracts` + `test:v2` + `test:v23` | 37 | 287 | **日常核心回归** |
 | `npm run test:evidence` | `*-?01.test.mjs` | 26 | 173 | **历史规则取证**：固定录存 v1.x 规则裁决证据与原始对照行为 |
-| `npm run test:all` | `test/*.test.mjs` | 62 | 457 | **发版前全量验收**：核心 + 取证全覆盖（无跳过、总数精确等于 `test` + `test:evidence` + `test:v23`） |
-| `npm run verify` | `check` + `npm test` | 36 | 284 | **日常开发必跑门禁** |
+| `npm run test:all` | `test/*.test.mjs` | 63 | 460 | **发版前全量验收**：核心 + 取证全覆盖（无跳过、总数精确等于 `test` + `test:evidence` + `test:v23`） |
+| `npm run verify` | `check` + `npm test` | 37 | 287 | **日常开发必跑门禁** |
 
 > **测试目录布局规范（[AGENTS.md](../AGENTS.md)）**：`node --test` 默认把 `test/` 下所有 `.mjs` 文件计为测试文件，因此多夹具共享辅助工具严格位于 `support/` 下，且由 [test/refactor-v2.test.mjs](../test/refactor-v2.test.mjs) 自动化断言 `test/` 目录内仅存在 `*.test.mjs` 文件。
 
@@ -158,6 +158,20 @@ node scripts/workspace-data.mjs restore <备份目录> <全新数据目录>
   2. 打开 `work.db` 验证 `zhizhang/2.x` Schema 窗口并运行 `PRAGMA quick_check;` 确认数据库页完整；
   3. 写入全新的 `target` 目录（权限 `0o700`）并将 `work.db` 映射恢复为宿主所需的 `workspace.sqlite`；建议先在隔离 DsH profile 中打开验证，确认无误后再切换，原目录可随时用于回退。
 - **保留策略保障（`planRetention` / `pruneBackups`）**：清理旧备份时，若某次清理会导致有效备份数量归零，系统强制保留最新的一份有效备份并在 `refused` 字段记录拒删原因。
+
+### 证据段落口径回填（FQ-02，决议 #12）
+
+V2.3 起「非空行算一段」是唯一口径。历史 `author_evidence.point` 曾按物理行号计算，段间空行会造成偏移。回填**不是启动迁移**，必须先生成报告供作者核对：
+
+```bash
+# 1. 只读扫描，输出 point-report.json（变更行数与抽样前后值）
+npm run migrate:evidence-point -- --db <数据目录>/workspace.sqlite --report point-report.json
+
+# 2. 核对通过后执行：自动热备到 <数据目录>/backups/evidence-point-<时间戳>/，再单事务回填
+npm run migrate:evidence-point -- --db <数据目录>/workspace.sqlite --apply
+```
+
+脚本幂等：重复执行时已收敛的行不再变动；若回填后仍有漂移，脚本以非零退出并提示先从热备恢复。
 
 ---
 

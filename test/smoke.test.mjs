@@ -25,7 +25,15 @@ test("the driver seam and pure workflow stay independent of DsH", () => {
 });
 
 test("the product domains expose their rules without depending on the host", () => {
-  assert.deepEqual(Object.keys(sharedDomain).sort(), ["anchor", "isEffective", "orderIndex", "precedes", "resolveAnchor"]);
+  assert.deepEqual(Object.keys(sharedDomain).sort(), [
+    "anchor",
+    "isEffective",
+    "orderIndex",
+    "pointAtOffset",
+    "precedes",
+    "resolveAnchor",
+    "splitChapterParagraphs",
+  ]);
   assert.equal(typeof fanqie.planReorder, "function");
   assert.deepEqual(fanqie.CHAPTER_STATES, ["planned", "drafting", "drafted", "reviewed", "final"]);
   assert.equal(toutiao.TITLE_MAX, 34);

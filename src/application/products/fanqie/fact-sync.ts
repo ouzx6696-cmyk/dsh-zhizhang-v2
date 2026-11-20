@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { normalizeLoreCategory, type SettingFact } from "../../../domain/fanqie/index.ts";
-import { anchor } from "../../../domain/shared/index.ts";
+import { anchor, pointAtOffset } from "../../../domain/shared/index.ts";
 import { stmt, syncChapterFts } from "../../../storage/index.ts";
 import {
   invalid,
@@ -78,7 +78,7 @@ function bindExactEvidence(
   if (!quote) return null;
   const start = body.indexOf(quote);
   if (start < 0 || body.indexOf(quote, start + 1) >= 0) return null;
-  const point = body.slice(0, start).split(/\r?\n/).length;
+  const point = pointAtOffset(body, start);
   const snapshotId = randomUUID();
   const end = start + quote.length;
   const record = {

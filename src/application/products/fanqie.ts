@@ -9,6 +9,7 @@ import {
   type ChapterState,
   type SettingFact,
 } from "../../domain/fanqie/index.ts";
+import { pointAtOffset } from "../../domain/shared/index.ts";
 import { stmt, type SqliteDatabase } from "../../storage/index.ts";
 import { createAuthorSchema } from "../../storage/author-schema.ts";
 import { projectReadUnit, type AuthorReadUnitFactory } from "../../workflow/author-reads.ts";
@@ -112,7 +113,7 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
       if (start < 0 || body.indexOf(quote, start + 1) >= 0) {
         invalid("quote", "quote-must-match-exactly-once");
       }
-      const point = body.slice(0, start).split(/\r?\n/).length;
+      const point = pointAtOffset(body, start);
       const snapshotId = randomUUID();
       const end = start + quote.length;
       const record = {

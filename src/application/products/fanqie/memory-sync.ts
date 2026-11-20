@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { MemorySyncStatus } from "../../../contracts/workspace-dto.ts";
+import { splitChapterParagraphs } from "../../../domain/shared/index.ts";
 import { stmt } from "../../../storage/index.ts";
 import type { WorkspaceContext } from "../../context.ts";
 
@@ -26,11 +27,13 @@ function countOccurrences(haystack: string, needle: string): number {
   return count;
 }
 
+/**
+ * Paragraph boundaries come from the shared splitter so the delta markers use
+ * the same "one non-empty line is one paragraph" rule as evidence anchors and
+ * diagnostics (FQ-02). Trailing/leading spaces stay out of the comparison text.
+ */
 function splitParagraphs(text: string): string[] {
-  return text
-    .split(/\r?\n+/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
+  return splitChapterParagraphs(text).map((span) => span.text.trim());
 }
 
 /**

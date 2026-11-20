@@ -15,6 +15,7 @@
     "deploy:touch": "node scripts/deploy.mjs --touch-only",
     "dev": "node scripts/dev-server.mjs",
     "docs:schema": "node scripts/schema-doc.mjs --write docs/schema.md",
+    "migrate:evidence-point": "node scripts/evidence-point-migrate.mjs",
     "test": "node --test \"test/*-d02.test.mjs\" \"test/*-w02.test.mjs\" \"test/*-v2.test.mjs\" \"test/*-v23.test.mjs\" test/smoke.test.mjs",
     "test:contracts": "node --test \"test/*-d02.test.mjs\" \"test/*-w02.test.mjs\"",
     "test:v2": "node --test \"test/*-v2.test.mjs\" test/smoke.test.mjs",
