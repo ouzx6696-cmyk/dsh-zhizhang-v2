@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.tsbuildinfo
 coverage/
+# Project-local agent data (workspace memory, caches). Never shipped.
+.workbuddy/
