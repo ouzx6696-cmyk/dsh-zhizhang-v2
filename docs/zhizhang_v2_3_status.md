@@ -234,6 +234,25 @@
 
 完成 B2-1 ~ B2-3 后 P0 可达 **20/24**；再加 B2-4 可达 **24/24**（P0 清零）。
 
+### B2-1 执行清单（待开工，按依赖顺序）
+
+**目标**：把 Wave 1 已写好的五个纯函数接进真实写路径，让 P0 的前三条退出标准第一次可验收。
+
+| # | 条目 | 改动点 | 完成判据 |
+| --- | --- | --- | --- |
+| 1 | FQ-02 | `fact-sync.ts:81` 与 `fanqie.ts:115` 的 `body.slice(0, start).split(/\r?\n/).length` 改为 `pointAtOffset(body, start)`；新增迁移 `2.3.1-evidence-point-backfill`，按 `quote_start` 重算 `author_evidence.point` | 含"段间空行"的样章中，证据、fact_sync、诊断三处 point 完全一致 |
+| 2 | FQ-01 | `commitFactBatch`（`fact-sync.ts:101`）改用 `mergeFactVersion`；`materializeApprovedLore` 同步；known-before-effective 由 error 降 warning | 第 3 章已知情 → 第 10 章更新 → 第 5 章查询仍可见 |
+| 3 | FQ-03 | `beginProposalGeneration` 写入 `base_revision_id` + `source_sha256`；`decideProposal` 在 kind 分发前校验当前 `revisionId`；漂移则 `refuse("proposal.decide","proposal-stale")` 并保持 dirty | 生成提案后改稿 → 确认被拒；未改稿 → 正常通过 |
+| 4 | FQ-08 | `commitForeshadowBatch` / `upsertForeshadow` 调 `assertForeshadowTransition` | `proposed → resolved` 的跳变被拒，合法路径逐条通过 |
+| 5 | FQ-10 | 服务端为 `newFacts` 生成 `fq-<uuid>`；`updates` 校验 `factId` 必须已存在 | 模型回传重复/未知 factId 时被服务端改写或明确拒绝 |
+
+**开工前需作者确认的两个门**：
+
+- **D1 · 新增错误码**：`proposal-stale` 目前不在 `contracts/errors.ts`。新增会动到已冻结的错误信封与 HTTP 映射（当前只有 404/400/409 三分支），属契约变更，需作者确认措辞与状态码（建议 `422`）。
+- **D2 · 历史数据回填**：迁移会重算既有 `author_evidence.point`。按决议 #12，执行前必须先热备并输出 point 变化报告供作者核对，不可静默改数。
+
+**验收**：`test:v23` 新增 ≥6 个走真实调用链的用例；`test:all` 从 453 增至 ≥459 且全绿；手工跑通"第 3 章知情 → 第 10 章更新 → 第 5 章可见"。
+
 ---
 
 ## 8. 维护约定
