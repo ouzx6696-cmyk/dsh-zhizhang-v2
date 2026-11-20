@@ -35,6 +35,7 @@ import {
 import type { ErrorCode, ErrorDetails } from "../contracts/index.ts";
 import type { SqliteDatabase } from "./driver.ts";
 import { StorageError } from "./errors.ts";
+import { stmt } from "./stmt-pool.ts";
 
 /** A write request as the journal sees it. */
 export interface AuthorWriteRequest {
@@ -122,7 +123,7 @@ export function payloadEquals(left: unknown, right: unknown): boolean {
 }
 
 function readCurrentRevisionId(db: SqliteDatabase, documentId: string): string | null {
-  const row = db.prepare("SELECT current_revision_id FROM documents WHERE document_id = ?;").get(documentId);
+  const row = stmt(db, "SELECT current_revision_id FROM documents WHERE document_id = ?;").get(documentId);
   if (row === null || row === undefined) {
     throw new StorageError("input.not_found", { objectType: "document", objectId: documentId });
   }
@@ -139,12 +140,11 @@ function readJournalRow(
   db: SqliteDatabase,
   request: AuthorWriteRequest,
 ): JournalRow | null {
-  const row = db
-    .prepare(
-      `SELECT request_payload, result_payload FROM command_journal
-       WHERE actor_id = ? AND command_id = ? AND document_id = ? AND request_key = ?;`,
-    )
-    .get(request.actorId, request.commandId, request.documentId, request.idempotencyKey);
+  const row = stmt(
+    db,
+    `SELECT request_payload, result_payload FROM command_journal
+     WHERE actor_id = ? AND command_id = ? AND document_id = ? AND request_key = ?;`,
+  ).get(request.actorId, request.commandId, request.documentId, request.idempotencyKey);
   if (row === null || row === undefined) return null;
   const value = row as Partial<JournalRow>;
   if (typeof value.request_payload !== "string" || typeof value.result_payload !== "string") {
@@ -202,7 +202,8 @@ export function runAuthorWrite<T>(
     const result = apply();
 
     // 4. Record for replay.
-    db.prepare(
+    stmt(
+      db,
       `INSERT INTO command_journal
          (actor_id, command_id, document_id, request_key, request_payload, result_payload)
        VALUES (?, ?, ?, ?, ?, ?);`,
@@ -229,7 +230,7 @@ export function runAuthorWrite<T>(
 
 /** Creates a document with no revision yet. */
 export function createDocument(db: SqliteDatabase, documentId: string): void {
-  db.prepare("INSERT INTO documents (document_id) VALUES (?);").run(documentId);
+  stmt(db, "INSERT INTO documents (document_id) VALUES (?);").run(documentId);
 }
 
 /** Creates a candidate revision for a document, bound to its base revision. */
@@ -242,7 +243,8 @@ export function createCandidate(
     readonly body: string;
   },
 ): void {
-  db.prepare(
+  stmt(
+    db,
     "INSERT INTO candidates (candidate_id, document_id, base_revision_id, body) VALUES (?, ?, ?, ?);",
   ).run(candidate.candidateId, candidate.documentId, candidate.baseRevisionId, candidate.body);
 }
@@ -252,13 +254,12 @@ export function currentRevision(
   db: SqliteDatabase,
   documentId: string,
 ): { revision_id: string; body: string } | null {
-  const row = db
-    .prepare(
-      `SELECT revisions.revision_id AS revision_id, revisions.body AS body
-       FROM documents JOIN revisions USING (document_id)
-       WHERE documents.document_id = ? AND revisions.revision_id = documents.current_revision_id;`,
-    )
-    .get(documentId);
+  const row = stmt(
+    db,
+    `SELECT revisions.revision_id AS revision_id, revisions.body AS body
+     FROM documents JOIN revisions USING (document_id)
+     WHERE documents.document_id = ? AND revisions.revision_id = documents.current_revision_id;`,
+  ).get(documentId);
   if (row === null || row === undefined) return null;
   const value = row as { revision_id?: unknown; body?: unknown };
   if (typeof value.revision_id !== "string" || typeof value.body !== "string") return null;
@@ -275,10 +276,11 @@ export function appendRevision(
     readonly createdAt: number;
   },
 ): { revisionId: string } {
-  db.prepare(
+  stmt(
+    db,
     "INSERT INTO revisions (revision_id, document_id, body, created_at) VALUES (?, ?, ?, ?);",
   ).run(revision.revisionId, revision.documentId, revision.body, revision.createdAt);
-  db.prepare("UPDATE documents SET current_revision_id = ? WHERE document_id = ?;").run(
+  stmt(db, "UPDATE documents SET current_revision_id = ? WHERE document_id = ?;").run(
     revision.revisionId,
     revision.documentId,
   );

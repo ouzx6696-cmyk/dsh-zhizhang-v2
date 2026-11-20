@@ -5,7 +5,7 @@ import type { SingleShotLlmCaller } from "../workflow/writing-stages.ts";
 import type { DocumentRow, Input, WorkspaceContext } from "./context.ts";
 
 export interface ActionDefinition {
-  readonly scope: "project" | "document";
+  readonly scope: "global" | "project" | "document";
   readonly handler: (ctx: WorkspaceContext, input: Input, row?: DocumentRow) => unknown;
 }
 
@@ -46,6 +46,7 @@ export interface ProductLineModule {
     readonly mode: string | null;
     readonly line: string | null;
   };
+  onDocumentCreated?(ctx: WorkspaceContext, projectId: string, documentId: string, input: Input): void;
   onDraftSaved(ctx: WorkspaceContext, row: DocumentRow): void;
 
   buildFrozenContext(ctx: WorkspaceContext, row: DocumentRow, input: Input): Record<string, unknown>;

@@ -469,7 +469,7 @@ test("host plugin shutdown aborts active generation, returns 503 to in-flight re
 
     await host1.close();
     assert.equal(activeSignal.aborted, true);
-    assert.equal(host1.disposedPaths.length, 14);
+    assert.equal(host1.disposedPaths.length, 4 + CLIENT_JS_MODULES.length);
     assert.equal(host1.routes.size, 0);
 
     // Calling the previously captured /mutate handler after shutdown returns 503 without touching closed SQLite.

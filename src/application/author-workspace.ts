@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { createDocument, type SqliteDatabase } from "../storage/index.ts";
+import { createDocument, stmt, type SqliteDatabase } from "../storage/index.ts";
 import {
   createWorkspaceContext,
   invalid,
@@ -11,20 +11,23 @@ import {
 } from "./context.ts";
 import { createProductLineRegistry } from "./product-line.ts";
 import { createFanqieModule } from "./products/fanqie.ts";
+import type { ProjectBundleDiskWriter } from "./products/fanqie/io.ts";
 import { createToutiaoModule } from "./products/toutiao.ts";
+import { createProposalService } from "./proposal-service.ts";
 import { createRunService } from "./run-service.ts";
 import { createSnapshotService } from "./snapshot-service.ts";
 
 /**
  * Composition root for the Author Workspace application layer.
  * Registers isolated Fanqie and Toutiao product-line modules on top of the
- * shared workspace, run, snapshot, and event-projection platform.
+ * shared workspace, run, snapshot, proposal, and event-projection platform.
  */
 export function openAuthorWorkspace(
   db: SqliteDatabase,
   writeDelivery: (documentId: string, text: string) => void = () => {},
+  writeProjectExport?: ProjectBundleDiskWriter,
 ) {
-  const fanqieModule = createFanqieModule();
+  const fanqieModule = createFanqieModule(writeProjectExport);
   const toutiaoModule = createToutiaoModule(writeDelivery);
   const registry = createProductLineRegistry([fanqieModule, toutiaoModule]);
   const ctx = createWorkspaceContext(db, registry);
@@ -36,12 +39,13 @@ export function openAuthorWorkspace(
 
   const runs = createRunService(ctx, registry, saveDraftForRow);
   const snapshots = createSnapshotService(ctx, registry);
+  const proposals = createProposalService(ctx);
 
   function mutation(action: string, input: Input) {
     switch (action) {
       case "read.model": {
         const projectId = text(input, "projectId");
-        requiredRow(db.prepare("SELECT id FROM author_projects WHERE id = ?;").get(projectId), "project", projectId);
+        requiredRow(stmt(db, "SELECT id FROM author_projects WHERE id = ?;").get(projectId), "project", projectId);
         return ctx.readAuthorModel(projectId, input);
       }
       case "project.create": {
@@ -51,7 +55,7 @@ export function openAuthorWorkspace(
         if (!mod) invalid("product", "unknown-product");
         const id = randomUUID();
         return ctx.atomic(() => {
-          db.prepare("INSERT INTO author_projects (id, name, product, created_at) VALUES (?, ?, ?, ?);")
+          stmt(db, "INSERT INTO author_projects (id, name, product, created_at) VALUES (?, ?, ?, ?);")
             .run(id, name, mod.id, Date.now());
           ctx.event(id, "chapter", "project.created", { name, product: mod.id });
           return { id };
@@ -61,7 +65,7 @@ export function openAuthorWorkspace(
         const projectId = text(input, "projectId");
         const rawTitle = typeof input.title === "string" ? input.title.trim() : "";
         const project = requiredRow<{ product: Product }>(
-          db.prepare("SELECT product FROM author_projects WHERE id = ?;").get(projectId),
+          stmt(db, "SELECT product FROM author_projects WHERE id = ?;").get(projectId),
           "project",
           projectId,
         );
@@ -71,10 +75,10 @@ export function openAuthorWorkspace(
         const initialState = mod.initialState;
         return ctx.atomic(() => {
           createDocument(db, id);
-          db.prepare(`
-            INSERT INTO author_documents (id, project_id, title, state, mode, line)
-            VALUES (?, ?, ?, ?, ?, ?);
-          `).run(id, projectId, title, initialState, mode, line);
+          stmt(db, `
+            INSERT INTO author_documents (id, project_id, title, state, mode, line, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?);
+          `).run(id, projectId, title, initialState, mode, line, Date.now());
           ctx.event(projectId, "chapter", "document.created", {
             documentId: id,
             title,
@@ -82,6 +86,7 @@ export function openAuthorWorkspace(
             line,
             state: initialState,
           });
+          mod.onDocumentCreated?.(ctx, projectId, id, input);
           return { id };
         });
       }
@@ -92,7 +97,7 @@ export function openAuthorWorkspace(
     }
 
     const productAction = registry.resolveAction(action);
-    if (productAction && productAction.scope === "project") {
+    if (productAction && (productAction.scope === "project" || productAction.scope === "global")) {
       return productAction.handler(ctx, input);
     }
 
@@ -122,6 +127,7 @@ export function openAuthorWorkspace(
   }
 
   function recoverStartup(): void {
+    proposals.recoverProposals();
     for (const mod of registry.all()) {
       mod.onStartupRecover?.(ctx);
     }
@@ -140,6 +146,10 @@ export function openAuthorWorkspace(
     recoverGenerations: runs.recoverGenerations,
     reserveRefinement: runs.reserveRefinement,
     failGeneration: runs.failGeneration,
+    beginProposalGeneration: proposals.beginProposalGeneration,
+    recordProposalReceipt: proposals.recordProposalReceipt,
+    finishProposalGeneration: proposals.finishProposalGeneration,
+    recoverProposals: proposals.recoverProposals,
     recoverStartup,
     resumeExports: () => toutiaoModule.onStartupRecover?.(ctx),
   };

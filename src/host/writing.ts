@@ -7,6 +7,7 @@ import {
 } from "../workflow/writing-budget.ts";
 import {
   assertStageOutput,
+  isJsonStagePhase,
   MAX_CANDIDATE_LENGTH,
   WRITING_STAGE_IDS,
   type SingleShotCallRequest,
@@ -87,7 +88,7 @@ export function createSingleShotCaller(
       return budget.snapshot().usedTokens;
     },
 
-    async complete({ phase, system, prompt, maxOutputTokens = Infinity }) {
+    async complete({ phase, system, prompt, maxOutputTokens = Infinity, cachePrefix }) {
       const inputReserve = estimateWritingInput(system, prompt);
       const remainingBefore = run.reserved - budget.snapshot().usedTokens - inputReserve;
       const maxTokens = Math.min(remainingBefore, maxOutputTokens);
@@ -111,12 +112,14 @@ export function createSingleShotCaller(
         requestSignal.throwIfAborted();
         const callId = receipts.begin(phase, inputReserve, maxTokens);
         try {
-          for await (const chunk of call.stream({
+          const streamOptions: Record<string, unknown> = {
             ...call.config,
             system,
             signal: requestSignal,
             messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
-          })) {
+          };
+          if (cachePrefix) streamOptions.cachePrefix = cachePrefix;
+          for await (const chunk of call.stream(streamOptions)) {
             if (chunk.type === "text-delta") {
               length += chunk.text.length;
               if (length > MAX_CANDIDATE_LENGTH) throw new Error("Candidate too long");
@@ -163,7 +166,7 @@ export function createSingleShotCaller(
       if (!completed) {
         throw new ContractError("stage.output_invalid", { stage: WRITING_STAGE_IDS[phase], missing: "complete-text" });
       }
-      if (phase !== "qa") {
+      if (!isJsonStagePhase(phase)) {
         assertStageOutput(WRITING_STAGE_IDS[phase], body, "complete-text");
       }
       return body;

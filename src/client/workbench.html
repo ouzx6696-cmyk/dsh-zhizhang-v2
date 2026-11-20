@@ -13,6 +13,16 @@
     <a href="./workbench" class="brand">织章工作台</a>
     <nav class="top-nav" aria-label="工作区视图控制">
       <span id="breadcrumb" class="breadcrumb">未选择项目</span>
+      <div class="segmented workspace-views" role="tablist" aria-label="主工作区视图">
+        <button type="button" data-workspace-view="writing" aria-selected="true" class="active">写作</button>
+        <button type="button" data-workspace-view="outline" aria-selected="false">卷幕大纲</button>
+        <button type="button" data-workspace-view="worldbook" aria-selected="false">设定库</button>
+        <button type="button" data-workspace-view="deconstruct" aria-selected="false">拆书库</button>
+        <button type="button" data-workspace-view="techniques" aria-selected="false">技法卡</button>
+        <button type="button" data-workspace-view="io" aria-selected="false">导入导出</button>
+      </div>
+      <button id="quick-jump" type="button" class="nav-toggle" title="快速跳转 (Ctrl/Cmd + K)">跳转</button>
+      <button id="global-search" type="button" class="nav-toggle" title="全书检索 (Ctrl/Cmd + Shift + F)">检索</button>
       <button id="navigation-toggle" type="button" class="nav-toggle" aria-pressed="true">目录</button>
       <button id="pipeline-toggle" type="button" class="nav-toggle" aria-pressed="true">流程</button>
       <button id="theme-toggle" type="button" class="nav-toggle">深色</button>
@@ -44,6 +54,13 @@
 
       <div id="document-tools" class="sidebar-block" hidden>
         <h2 class="section-heading">稿件目录</h2>
+        <div id="tree-toolbar" class="tree-toolbar" hidden>
+          <input id="tree-filter" type="search" placeholder="筛选章名或摘要…" aria-label="筛选章节">
+          <div class="actions">
+            <button id="tree-new-volume" type="button" class="notice-dismiss">+ 卷</button>
+            <button id="tree-open-outline" type="button" class="notice-dismiss">管理卷幕</button>
+          </div>
+        </div>
         <nav id="documents" class="doc-list" aria-label="稿件列表"></nav>
         <details class="disclosure">
           <summary>新建稿件</summary>
@@ -77,23 +94,25 @@
         <button id="notice-close" type="button" class="notice-dismiss" aria-label="关闭提示">关闭</button>
       </div>
 
-      <section id="empty" class="empty-stage">
-        <p class="eyebrow">DeepSeek Harness 作者工作台</p>
-        <h1>从这里落笔</h1>
-        <p class="lead">在左侧目录新建或打开一个番茄连载或头条创作项目，稿件修订、人物知情边界、候选差异对照与版本交稿均在同一工作台内闭环管理。</p>
-      </section>
+      <div data-workspace-panel="writing">
+        <section id="empty" class="empty-stage">
+          <p class="eyebrow">DeepSeek Harness 作者工作台</p>
+          <h1>从这里落笔</h1>
+          <p class="lead">在左侧目录新建或打开一个番茄连载或头条创作项目，稿件修订、人物知情边界、候选差异对照与版本交稿均在同一工作台内闭环管理。</p>
+        </section>
 
-      <section id="manuscript" class="manuscript" aria-labelledby="heading" hidden>
-        <header class="manuscript-header">
-          <div class="manuscript-titles">
-            <p class="eyebrow-row">
-              <span id="document-label"></span>
-              <span aria-hidden="true">·</span>
-              <span id="state" class="state-text"></span>
-            </p>
-            <h1 id="heading"></h1>
-          </div>
-        </header>
+        <section id="manuscript" class="manuscript" aria-labelledby="heading" hidden>
+          <header class="manuscript-header">
+            <div class="manuscript-titles">
+              <p class="eyebrow-row">
+                <span id="document-label"></span>
+                <span aria-hidden="true">·</span>
+                <span id="state" class="state-text"></span>
+                <span id="active-tree-crumb" class="muted-copy" hidden></span>
+              </p>
+              <h1 id="heading"></h1>
+            </div>
+          </header>
 
         <form id="rename" class="rename-bar" hidden>
           <div class="rename-row">
@@ -154,11 +173,19 @@
           </div>
         </section>
       </section>
+      </div>
+
+      <section data-workspace-panel="outline" id="view-outline" class="studio-view" hidden></section>
+      <section data-workspace-panel="worldbook" id="view-worldbook" class="studio-view" hidden></section>
+      <section data-workspace-panel="deconstruct" id="view-deconstruct" class="studio-view" hidden></section>
+      <section data-workspace-panel="techniques" id="view-techniques" class="studio-view" hidden></section>
+      <section data-workspace-panel="io" id="view-io" class="studio-view" hidden></section>
     </main>
 
     <aside aria-label="流程" id="pipeline" class="sidebar sidebar-right">
       <div class="pipeline-header">
         <h2 class="section-heading">写作流程</h2>
+        <button id="pipeline-wide-toggle" type="button" class="notice-dismiss" aria-pressed="false">宽栏</button>
       </div>
       <p id="flow-empty" class="muted-copy">打开一份稿件查看流程、规划、设定与候选任务。</p>
 
@@ -302,6 +329,8 @@
             </div>
           </form>
 
+          <div id="context-preview-root" class="context-preview-box" hidden></div>
+
           <div id="run-content" class="run-panel" hidden>
             <hr class="hairline">
             <p id="run-status" class="report-line tabular"></p>
@@ -345,5 +374,6 @@
   </div>
 
   <dialog id="workbench-dialog" class="modal-dialog" aria-modal="true"></dialog>
+  <dialog id="command-palette-dialog" class="modal-dialog palette-dialog" aria-modal="true"></dialog>
 </body>
 </html>

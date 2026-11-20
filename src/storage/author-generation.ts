@@ -1,4 +1,5 @@
 import type { SqliteDatabase } from "./driver.ts";
+import { stmt } from "./stmt-pool.ts";
 
 export interface OpenGenerationAttempt {
   readonly runId: string;
@@ -54,14 +55,14 @@ export function createGenerationLedger(db: SqliteDatabase) {
 
   return {
     pending(runId: string): boolean {
-      return Boolean(db.prepare(`
+      return Boolean(stmt(db, `
         SELECT 1 FROM author_generation_attempts
         WHERE run_id = ? AND state IN ${UNRESOLVED_STATES};
       `).get(runId));
     },
 
     unresolvedForDocument(documentId: string, exceptRunId: string | null): boolean {
-      return Boolean(db.prepare(`
+      return Boolean(stmt(db, `
         SELECT 1 FROM author_generation_attempts a
         JOIN author_runs r ON r.id = a.run_id
         WHERE r.document_id = ? AND r.id IS NOT ? AND a.state IN ${UNRESOLVED_STATES}
@@ -70,19 +71,19 @@ export function createGenerationLedger(db: SqliteDatabase) {
     },
 
     create(id: string, runId: string, provider: string, model: string): void {
-      db.prepare(`
+      stmt(db, `
         INSERT INTO author_generation_attempts (id, run_id, provider, model, state, usage)
         VALUES (?, ?, ?, ?, 'prepared', '[]');
       `).run(id, runId, provider, model);
     },
 
     beginCall(attemptId: string, callId: string, phase: string, inputReserve: number, maxOutput: number): boolean {
-      const marked = db.prepare(`
+      const marked = stmt(db, `
         UPDATE author_generation_attempts SET state = 'inflight', stage = ?
         WHERE id = ? AND state IN ('prepared','received');
       `).run(phase, attemptId);
       if (!marked.changes) return false;
-      db.prepare(`
+      stmt(db, `
         INSERT INTO author_generation_calls (id, attempt_id, phase, input_reserve, max_output)
         VALUES (?, ?, ?, ?, ?);
       `).run(callId, attemptId, phase, inputReserve, maxOutput);
@@ -90,14 +91,14 @@ export function createGenerationLedger(db: SqliteDatabase) {
     },
 
     receiveCall(attemptId: string, callId: string, usage: readonly number[]): boolean {
-      const call = db.prepare(`
+      const call = stmt(db, `
         UPDATE author_generation_calls SET usage = ?
         WHERE id = ? AND attempt_id = ? AND usage IS NULL
           AND EXISTS (SELECT 1 FROM author_generation_attempts WHERE id = ? AND state = 'inflight')
         RETURNING phase;
       `).get(JSON.stringify(usage), callId, attemptId, attemptId) as { phase: string } | undefined;
       if (!call) return false;
-      db.prepare(`
+      stmt(db, `
         UPDATE author_generation_attempts
         SET state = 'received', usage = json_insert(usage, '$[#]', json(?))
         WHERE id = ?;
@@ -106,32 +107,32 @@ export function createGenerationLedger(db: SqliteDatabase) {
     },
 
     openAttempt(id: string): OpenGenerationAttempt | undefined {
-      return db.prepare(`
+      return stmt(db, `
         SELECT run_id AS runId, state, usage FROM author_generation_attempts
         WHERE id = ? AND state IN ${OPEN_STATES};
       `).get(id) as OpenGenerationAttempt | undefined;
     },
 
     close(id: string, state: string, error: string | null): void {
-      db.prepare("UPDATE author_generation_attempts SET state = ?, error = ? WHERE id = ?;")
+      stmt(db, "UPDATE author_generation_attempts SET state = ?, error = ? WHERE id = ?;")
         .run(state, error, id);
     },
 
     unfinished(): readonly { id: string }[] {
-      return db.prepare(`
+      return stmt(db, `
         SELECT id FROM author_generation_attempts WHERE state IN ${OPEN_STATES};
       `).all() as readonly { id: string }[];
     },
 
     reconcile(id: string, runId: string): boolean {
-      return Boolean(db.prepare(`
+      return Boolean(stmt(db, `
         UPDATE author_generation_attempts SET state = 'reconciled'
         WHERE id = ? AND run_id = ? AND state = 'uncertain';
       `).run(id, runId).changes);
     },
 
     history(runId: string): readonly GenerationAttemptRecord[] {
-      return db.prepare(`
+      return stmt(db, `
         SELECT id, provider, model, state, stage, usage, error
         FROM author_generation_attempts
         WHERE run_id = ? ORDER BY rowid DESC;
@@ -139,7 +140,7 @@ export function createGenerationLedger(db: SqliteDatabase) {
     },
 
     calls(runId: string): readonly GenerationCallRecord[] {
-      return db.prepare(`
+      return stmt(db, `
         SELECT c.id, c.attempt_id AS attemptId, c.phase,
           c.input_reserve AS inputReserve, c.max_output AS maxOutput, c.usage
         FROM author_generation_calls c

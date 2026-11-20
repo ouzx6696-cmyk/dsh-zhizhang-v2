@@ -208,9 +208,15 @@ test("writing stage registry validates stage outputs and host writing transport 
 });
 
 test("architecture boundaries enforce domain isolation and zero native browser dialogs", () => {
-  const fanqieModule = readFileSync(new URL("../src/application/products/fanqie.ts", import.meta.url), "utf8");
+  const fanqieFiles = [
+    fileURLToPath(new URL("../src/application/products/fanqie.ts", import.meta.url)),
+    ...walkTsFiles("../src/application/products/fanqie/"),
+  ];
+  for (const file of fanqieFiles) {
+    const source = readFileSync(file, "utf8");
+    assert.doesNotMatch(source, /from\s+["'][^"']*(domain\/toutiao|products\/toutiao)/);
+  }
   const toutiaoModule = readFileSync(new URL("../src/application/products/toutiao.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(fanqieModule, /from\s+["'][^"']*(domain\/toutiao|products\/toutiao)/);
   assert.doesNotMatch(toutiaoModule, /from\s+["'][^"']*(domain\/fanqie|products\/fanqie)/);
 
   const hostFiles = ["../src/host/writing.ts", "../src/host/plugin.ts"];
@@ -223,6 +229,7 @@ test("architecture boundaries enforce domain isolation and zero native browser d
     "../src/application/context.ts",
     "../src/application/run-service.ts",
     "../src/application/snapshot-service.ts",
+    "../src/application/proposal-service.ts",
     "../src/workflow/author-reads.ts",
   ];
   for (const relativePath of basePlatformFiles) {
@@ -238,22 +245,10 @@ test("architecture boundaries enforce domain isolation and zero native browser d
   assert.doesNotMatch(fanqieUi, /from\s+["'][^"']*plugins\/toutiao/);
   assert.doesNotMatch(toutiaoUi, /from\s+["'][^"']*plugins\/fanqie/);
 
-  const clientFiles = [
-    "../src/client/workbench/main.ts",
-    "../src/client/workbench/shell.ts",
-    "../src/client/workbench/api.ts",
-    "../src/client/workbench/diff.ts",
-    "../src/client/workbench/draft-vault.ts",
-    "../src/client/workbench/modal.ts",
-    "../src/client/workbench/plugins/fanqie.ts",
-    "../src/client/workbench/plugins/toutiao.ts",
-    "../src/client/workbench/views/diff-view.ts",
-    "../src/client/workbench/views/run-inspector.ts",
-  ];
-  for (const relativePath of clientFiles) {
-    const source = readFileSync(new URL(relativePath, import.meta.url), "utf8");
+  for (const file of walkTsFiles("../src/client/workbench/")) {
+    const source = readFileSync(file, "utf8");
     assert.doesNotMatch(source, /\b(window|globalThis)\.(confirm|prompt|alert)\s*\(/);
-    if (!relativePath.endsWith("modal.ts")) {
+    if (!file.endsWith("modal.ts")) {
       assert.doesNotMatch(source, /(?<![.\w])(confirm|prompt|alert)\s*\(/);
     }
   }

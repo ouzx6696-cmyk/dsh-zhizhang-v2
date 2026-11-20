@@ -6,7 +6,10 @@ import {
   createCommandSchema,
   createDeliverySchema,
   createEventLogSchema,
+  createFtsSchema,
   executeCommand,
+  stmt,
+  syncChapterFts,
   type SqliteDatabase,
 } from "../storage/index.ts";
 import { createGenerationLedger, type GenerationLedger } from "../storage/author-generation.ts";
@@ -31,6 +34,11 @@ export interface DocumentRow {
   readonly body: string | null;
   readonly editorialRejections: number;
   readonly qaRounds: number;
+  readonly volumeId: string | null;
+  readonly actId: string | null;
+  readonly charCount: number;
+  readonly summary: string;
+  readonly updatedAt: number;
 }
 
 export interface RunRow {
@@ -72,11 +80,24 @@ export function refuse(action: string, reason: string): never {
   throw new ContractError("gate.denied", { action, reason });
 }
 
+export function countNonWhitespace(value: string): number {
+  return [...value.replace(/\s/gu, "")].length;
+}
+
+export function optionalText(input: Input, field: string): string | undefined {
+  const value = input[field];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") invalid(field, "string-required");
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 export function createWorkspaceContext(db: SqliteDatabase, registry: ProductLineRegistry) {
   createCommandSchema(db);
   createEventLogSchema(db);
   createDeliverySchema(db);
   createAuthorSchema(db);
+  createFtsSchema(db);
   for (const mod of registry.all()) mod.initSchema(db);
 
   function transaction<T>(apply: () => T, begin: "BEGIN" | "BEGIN IMMEDIATE"): T {
@@ -101,7 +122,7 @@ export function createWorkspaceContext(db: SqliteDatabase, registry: ProductLine
   const generation: GenerationLedger = createGenerationLedger(db);
   const readAuthorModel = createAuthorModelReader(db, { read, atomic }, registry.collectReadModels());
 
-  const competingRunStmt = db.prepare(`
+  const competingRunStmt = stmt(db, `
     SELECT 1 FROM author_runs
     WHERE document_id = ? AND id IS NOT ? AND state IN ('running', 'paused', 'awaiting-author')
     LIMIT 1;
@@ -110,7 +131,9 @@ export function createWorkspaceContext(db: SqliteDatabase, registry: ProductLine
   const documentSelect = `
     SELECT a.id, a.project_id AS projectId, a.title, p.product, a.state, a.mode, a.line,
       d.current_revision_id AS revisionId, a.final_revision_id AS finalRevisionId, r.body,
-      a.editorial_rejections AS editorialRejections, a.qa_rounds AS qaRounds
+      a.editorial_rejections AS editorialRejections, a.qa_rounds AS qaRounds,
+      a.volume_id AS volumeId, a.act_id AS actId, a.char_count AS charCount,
+      a.summary, a.updated_at AS updatedAt
     FROM author_documents a
     JOIN author_projects p ON p.id = a.project_id
     JOIN documents d ON d.document_id = a.id
@@ -118,12 +141,12 @@ export function createWorkspaceContext(db: SqliteDatabase, registry: ProductLine
   `;
 
   function document(id: string): DocumentRow {
-    return requiredRow<DocumentRow>(db.prepare(`${documentSelect} WHERE a.id = ?;`).get(id), "document", id);
+    return requiredRow<DocumentRow>(stmt(db, `${documentSelect} WHERE a.id = ?;`).get(id), "document", id);
   }
 
   function run(id: string): RunRow {
     return requiredRow<RunRow>(
-      db.prepare(`
+      stmt(db, `
         SELECT id, document_id AS documentId, state, base_revision_id AS baseRevisionId,
           frozen_input AS frozenInput, reserved, settled, candidate_id AS candidateId,
           late_usage_settled AS lateUsageSettled
@@ -148,7 +171,7 @@ export function createWorkspaceContext(db: SqliteDatabase, registry: ProductLine
     if (!isLegalTransition(current.state, next)) {
       refuse("run.transition", `${current.state} → ${next}`);
     }
-    db.prepare("UPDATE author_runs SET state = ? WHERE id = ?;").run(next, current.id);
+    stmt(db, "UPDATE author_runs SET state = ? WHERE id = ?;").run(next, current.id);
     const row = document(current.documentId);
     event(row.projectId, "run", "run.state", { runId: current.id, state: next });
     if ((next === "applied" || next === "discarded" || next === "cancelled") && current.candidateId) {
@@ -204,11 +227,22 @@ export function createWorkspaceContext(db: SqliteDatabase, registry: ProductLine
     onSavedState: (doc: DocumentRow) => void,
   ): { revisionId: string } {
     if (isLockedDocument(row)) refuse("draft.save", "revision-locked");
+    const now = Date.now();
     const revision = appendRevision(db, {
       revisionId: randomUUID(),
       documentId: row.id,
       body,
-      createdAt: Date.now(),
+      createdAt: now,
+    });
+    const charCount = countNonWhitespace(body);
+    stmt(db, "UPDATE author_documents SET char_count = ?, updated_at = ? WHERE id = ?;")
+      .run(charCount, now, row.id);
+    syncChapterFts(db, {
+      projectId: row.projectId,
+      documentId: row.id,
+      title: row.title,
+      summary: row.summary,
+      body,
     });
     onSavedState(row);
     event(row.projectId, "revision", "revision.saved", {
@@ -219,11 +253,9 @@ export function createWorkspaceContext(db: SqliteDatabase, registry: ProductLine
   }
 
   function chapterOrder(projectId: string, chapters?: readonly { id: string }[]): string[] {
-    const known = chapters ?? (db
-      .prepare("SELECT id FROM author_documents WHERE project_id = ? ORDER BY rowid;")
+    const known = chapters ?? (stmt(db, "SELECT id FROM author_documents WHERE project_id = ? ORDER BY rowid;")
       .all(projectId) as readonly { id: string }[]);
-    const saved = db
-      .prepare("SELECT chapter_ids FROM author_chapter_order WHERE project_id = ?;")
+    const saved = stmt(db, "SELECT chapter_ids FROM author_chapter_order WHERE project_id = ?;")
       .get(projectId) as { chapter_ids: string } | undefined;
     const ids: string[] = saved ? (JSON.parse(saved.chapter_ids) as string[]) : [];
     const ordered = new Set(ids);
@@ -231,14 +263,13 @@ export function createWorkspaceContext(db: SqliteDatabase, registry: ProductLine
   }
 
   function planning(documentId: string): Input | null {
-    const row = db
-      .prepare("SELECT value FROM author_planning WHERE document_id = ?;")
+    const row = stmt(db, "SELECT value FROM author_planning WHERE document_id = ?;")
       .get(documentId) as { value: string } | undefined;
     return row ? (JSON.parse(row.value) as Input) : null;
   }
 
   function savePlanning(row: DocumentRow, value: Input): void {
-    db.prepare(`
+    stmt(db, `
       INSERT INTO author_planning (document_id, value) VALUES (?, ?)
       ON CONFLICT (document_id) DO UPDATE SET value = excluded.value;
     `).run(row.id, JSON.stringify(value));

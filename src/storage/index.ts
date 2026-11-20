@@ -105,3 +105,27 @@ export {
   type DeliverArticleRequest,
   type ExportWriter,
 } from "./delivery.ts";
+
+export { stmt, configureStorePragmas } from "./stmt-pool.ts";
+
+export {
+  createFtsSchema,
+  deleteLibraryFts,
+  rebuildProjectFts,
+  searchWorkspaceFts,
+  syncChapterFts,
+  syncLibraryFts,
+  syncLoreFts,
+  type FtsSearchHit,
+  type FtsSearchScope,
+} from "./fts.ts";
+
+export {
+  assertSafeRelativePath,
+  parseChapterMarkdown,
+  sanitizePathSegment,
+  serializeChapterMarkdown,
+  writeLocalBundleToDir,
+  type BundleFileInput,
+  type ChapterMarkdownFrontmatter,
+} from "./local-io.ts";

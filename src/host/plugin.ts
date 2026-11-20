@@ -3,8 +3,15 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ContractError } from "../contracts/index.ts";
 import { CLIENT_ENTRY_CSS, CLIENT_ENTRY_HTML, CLIENT_JS_MODULES } from "../client/manifest.ts";
-import { createStore, openStore } from "../storage/index.ts";
-import { executeGenerationWithRunner, type LlmTransport } from "./writing.ts";
+import {
+  configureStorePragmas,
+  createStore,
+  openStore,
+  sanitizePathSegment,
+  writeLocalBundleToDir,
+} from "../storage/index.ts";
+import { assertStageOutput, WRITING_STAGE_IDS } from "../workflow/writing-stages.ts";
+import { createSingleShotCaller, executeGenerationWithRunner, type LlmTransport } from "./writing.ts";
 import { openAuthorWorkspace } from "./workspace.ts";
 
 export interface DsHPluginConfig {
@@ -128,15 +135,25 @@ export function applyWorkbench(
     const db = openStore(database);
     const disposers: (() => void | Promise<void>)[] = [];
     const generations = new Map<string, { controller: AbortController; task: Promise<void> }>();
+    const proposalJobs = new Map<string, { controller: AbortController; task: Promise<void> }>();
     let closing = false;
     let workspaceOnClose: () => void = () => {};
 
     try {
-      db.exec("PRAGMA journal_mode = WAL;");
-      db.exec("PRAGMA busy_timeout = 5000;");
-      const workspace = openAuthorWorkspace(db, (id, contents) => writeDelivery(exportsDir, id, contents));
-      workspaceOnClose = workspace.recoverGenerations;
+      configureStorePragmas(db, false);
+      const bundleExportsRoot = join(config.dataDirectory, "exports");
+      const workspace = openAuthorWorkspace(
+        db,
+        (id, contents) => writeDelivery(exportsDir, id, contents),
+        (projectId, files) =>
+          writeLocalBundleToDir(join(bundleExportsRoot, sanitizePathSegment(projectId)), files).writtenDir,
+      );
+      workspaceOnClose = () => {
+        workspace.recoverGenerations();
+        workspace.recoverProposals();
+      };
       workspace.recoverGenerations();
+      workspace.recoverProposals();
       workspace.recoverStartup();
 
       const route = (
@@ -228,6 +245,61 @@ export function applyWorkbench(
             return json({ ok: true, result: { id: run.id, generating: true } }, 202);
           }
 
+          if (action === "proposal.generate") {
+            const job = workspace.beginProposalGeneration(input);
+            const controller = new AbortController();
+            const caller = createSingleShotCaller(
+              ctx.llm,
+              { provider: job.provider, model: job.model, reserved: job.reserved },
+              controller.signal,
+              {
+                begin() {
+                  return job.id;
+                },
+                receive(_callId, usage) {
+                  if (!closing) workspace.recordProposalReceipt(job.id, usage);
+                },
+              },
+            );
+            const task = caller
+              .complete({
+                phase: job.phase,
+                system: job.system,
+                prompt: job.prompt,
+                maxOutputTokens: 2400,
+              })
+              .then((raw) => {
+                let parsed: unknown;
+                try {
+                  parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/giu, ""));
+                } catch {
+                  throw new ContractError("stage.output_invalid", {
+                    stage: WRITING_STAGE_IDS[job.phase],
+                    missing: "json",
+                  });
+                }
+                assertStageOutput(WRITING_STAGE_IDS[job.phase], parsed, "json");
+                if (!closing) {
+                  workspace.finishProposalGeneration(job.id, parsed as Record<string, unknown>, null);
+                }
+              })
+              .catch((error: unknown) => {
+                if (!closing) {
+                  const reason = error instanceof ContractError
+                    ? error.code
+                    : controller.signal.aborted
+                      ? "cancelled"
+                      : "generation.failed";
+                  workspace.finishProposalGeneration(job.id, null, reason);
+                }
+              })
+              .finally(() => {
+                proposalJobs.delete(job.id);
+              });
+            proposalJobs.set(job.id, { controller, task });
+            return json({ ok: true, result: { id: job.id, kind: job.kind, generating: true } }, 202);
+          }
+
           if (action === "run.complete" && typeof input.runId === "string" && generations.has(input.runId)) {
             throw new ContractError("gate.denied", { action, reason: "generation-in-progress" });
           }
@@ -256,6 +328,7 @@ export function applyWorkbench(
     return async () => {
       closing = true;
       for (const { controller } of generations.values()) controller.abort();
+      for (const { controller } of proposalJobs.values()) controller.abort();
       await Promise.all(disposers.map((dispose) => dispose()));
       try {
         workspaceOnClose();

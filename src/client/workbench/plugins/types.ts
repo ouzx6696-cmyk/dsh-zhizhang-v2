@@ -1,13 +1,15 @@
-import type { Product, WorkspaceSnapshot } from "../../../contracts/workspace-dto.ts";
+import type { NovelTreeDto, Product, WorkspaceSnapshot } from "../../../contracts/workspace-dto.ts";
 import type { ModalController } from "../modal.ts";
 
 export type PipelineTabId = "workflow" | "planning" | "continuity" | "runs";
+export type WorkspaceViewId = "writing" | "outline" | "worldbook" | "deconstruct" | "techniques" | "io";
 
 export interface ShellStateView {
   readonly projectId: string;
   readonly documentId: string;
   readonly snapshot: WorkspaceSnapshot;
   readonly composing: boolean;
+  readonly activeView: WorkspaceViewId;
 }
 
 export interface WorkbenchShellHost {
@@ -17,6 +19,10 @@ export interface WorkbenchShellHost {
   stashEditor(): void;
   perform(work: () => Promise<unknown> | void): Promise<void>;
   load(ifSequence?: number): Promise<void>;
+  selectDocument(documentId: string): Promise<void>;
+  setDirectoryTree(tree: NovelTreeDto | null): void;
+  switchWorkspaceView(viewId: WorkspaceViewId): void;
+  switchPipelineTab(tabId: PipelineTabId): void;
   change<T = Record<string, unknown>>(
     action: string,
     extra?: Record<string, unknown>,
@@ -37,6 +43,8 @@ export interface ProductLineUiSession {
   onDirectoryUpdated?(isActiveProject: boolean, projectId: string, snapshot: WorkspaceSnapshot): void;
   /** Called right before switching away to another document. */
   onDocumentSelected?(): void;
+  /** Called whenever the primary workspace view switches. */
+  onWorkspaceViewChanged?(viewId: WorkspaceViewId, isActiveProduct: boolean, snapshot: WorkspaceSnapshot): void;
   /** Slot 1: new-document dialog options for this product line. */
   onCreateDocumentFormChanged?(isActiveProject: boolean): void;
   /** Slots 2, 3 & 4: render product-specific header, pipeline panels, and run extras. */

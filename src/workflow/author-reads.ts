@@ -3,6 +3,7 @@ import {
   createProjectionStore,
   currentSeq,
   readTail,
+  stmt,
   type CheckpointRow,
   type ProjectionStore,
   type ProjectionUnit,
@@ -14,7 +15,8 @@ import { serveReadFromLog } from "./readserve.ts";
 export type Fields = Record<string, unknown>;
 type View = Record<string, unknown>;
 export type AuthorReadEvent = Fields & { kind: string };
-type Chapter = { chapterId: string; title: string; businessState: string };
+type Chapter = { chapterId: string; title: string; businessState: string; volumeId?: string | null };
+type Volume = { volumeId: string; title: string };
 type Reducer<S> = (state: S, event: AuthorReadEvent) => S;
 
 export type AuthorReadUnitFactory = (
@@ -49,9 +51,25 @@ export function projectReadUnit<S>(
 function navigation(definition: ReadDefinition, projectId: string) {
   return projectReadUnit(
     definition,
-    () => ({ title: "", chapters: [] as Chapter[] }),
+    () => ({ title: "", volumes: [] as Volume[], chapters: [] as Chapter[] }),
     (state, event) => {
       if (event.kind === "project.created") return { ...state, title: event.name as string };
+      if (event.kind === "volume.created") {
+        const volumeId = event.volumeId as string;
+        if (state.volumes.some((v) => v.volumeId === volumeId)) return state;
+        return {
+          ...state,
+          volumes: [...state.volumes, { volumeId, title: event.title as string }],
+        };
+      }
+      if (event.kind === "volume.renamed") {
+        return {
+          ...state,
+          volumes: state.volumes.map((vol) =>
+            vol.volumeId === event.volumeId ? { ...vol, title: event.title as string } : vol,
+          ),
+        };
+      }
       if (event.kind === "document.created") {
         return {
           ...state,
@@ -61,6 +79,7 @@ function navigation(definition: ReadDefinition, projectId: string) {
               chapterId: event.documentId as string,
               title: event.title as string,
               businessState: typeof event.state === "string" ? event.state : "planned",
+              volumeId: typeof event.volumeId === "string" ? event.volumeId : null,
             },
           ],
         };
@@ -79,27 +98,79 @@ function navigation(definition: ReadDefinition, projectId: string) {
           ),
         };
       }
+      if (event.kind === "chapter.moved") {
+        return {
+          ...state,
+          chapters: state.chapters.map((chapter) =>
+            chapter.chapterId === event.documentId
+              ? { ...chapter, volumeId: typeof event.volumeId === "string" ? event.volumeId : null }
+              : chapter,
+          ),
+        };
+      }
       if (event.kind === "chapter.reordered") {
         const ids = event.chapterIds as string[];
         const positions = new Map(ids.map((id, index) => [id, index]));
         return {
           ...state,
-          chapters: [...state.chapters].sort((a, b) => positions.get(a.chapterId)! - positions.get(b.chapterId)!),
+          chapters: [...state.chapters].sort((a, b) => (positions.get(a.chapterId) ?? 0) - (positions.get(b.chapterId) ?? 0)),
         };
       }
       return state;
     },
-    ({ title, chapters }) => ({
-      projectId,
-      title,
-      volumes: [
-        {
-          volumeId: projectId,
+    ({ title, volumes, chapters }) => {
+      const ordered = chapters.map(({ chapterId, title: chTitle, businessState, volumeId }, index) => ({
+        chapterId,
+        title: chTitle,
+        businessState,
+        order: index + 1,
+        volumeId: volumeId ?? null,
+      }));
+      if (volumes.length === 0) {
+        return {
+          projectId,
           title,
-          chapters: chapters.map((chapter, order) => ({ ...chapter, order: order + 1 })),
-        },
-      ],
-    }),
+          volumes: [
+            {
+              volumeId: projectId,
+              title,
+              chapters: ordered.map(({ chapterId, title: chTitle, order, businessState }) => ({
+                chapterId,
+                title: chTitle,
+                order,
+                businessState,
+              })),
+            },
+          ],
+        };
+      }
+      const mapped = volumes.map((vol) => ({
+        volumeId: vol.volumeId,
+        title: vol.title,
+        chapters: ordered
+          .filter((ch) => ch.volumeId === vol.volumeId)
+          .map(({ chapterId, title: chTitle, order, businessState }) => ({
+            chapterId,
+            title: chTitle,
+            order,
+            businessState,
+          })),
+      }));
+      const ungrouped = ordered.filter((ch) => !ch.volumeId || !volumes.some((v) => v.volumeId === ch.volumeId));
+      if (ungrouped.length > 0) {
+        mapped.push({
+          volumeId: `${projectId}:ungrouped`,
+          title: "未分卷",
+          chapters: ungrouped.map(({ chapterId, title: chTitle, order, businessState }) => ({
+            chapterId,
+            title: chTitle,
+            order,
+            businessState,
+          })),
+        });
+      }
+      return { projectId, title, volumes: mapped };
+    },
   );
 }
 
@@ -219,12 +290,13 @@ function loadDurableCheckpoint(
   cacheKey: string,
   unitKey: string,
 ): CheckpointRow[] {
-  const row = db
-    .prepare(`
+  const row = stmt(
+    db,
+    `
       SELECT version, seq, state FROM author_read_checkpoints
       WHERE project_id = ? AND cache_key = ?;
-    `)
-    .get(projectId, cacheKey) as { version: number; seq: number; state: string } | undefined;
+    `,
+  ).get(projectId, cacheKey) as { version: number; seq: number; state: string } | undefined;
   if (!row) return [];
   return [{ key: unitKey, ver: row.version, seq: row.seq, val: JSON.parse(row.state) as unknown }];
 }
@@ -235,13 +307,16 @@ function saveDurableCheckpointRow(
   cacheKey: string,
   row: CheckpointRow,
 ): void {
-  db.prepare(`
+  stmt(
+    db,
+    `
     INSERT INTO author_read_checkpoints (project_id, cache_key, version, seq, state)
     VALUES (?, ?, ?, ?, ?)
     ON CONFLICT (project_id, cache_key)
     DO UPDATE SET version = excluded.version, seq = excluded.seq, state = excluded.state
     WHERE excluded.seq >= author_read_checkpoints.seq OR excluded.version != author_read_checkpoints.version;
-  `).run(projectId, cacheKey, row.ver, row.seq, JSON.stringify(row.val));
+  `,
+  ).run(projectId, cacheKey, row.ver, row.seq, JSON.stringify(row.val));
 }
 
 export interface ReadTransactionRunner {
@@ -307,7 +382,7 @@ export function createAuthorModelReader(
 
       cache.delete(cacheKey);
       cache.set(cacheKey, entry);
-      if (cache.size > 32) cache.delete(cache.keys().next().value!);
+      if (cache.size > 256) cache.delete(cache.keys().next().value!);
 
       return {
         result: structuredClone(result),

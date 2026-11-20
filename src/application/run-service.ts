@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { createCandidate } from "../storage/index.ts";
+import { createCandidate, stmt } from "../storage/index.ts";
 import {
   estimateWritingInput,
   recommendedTokenBudget,
@@ -46,7 +46,7 @@ export function createRunService(
     const usage = count(input, "tokens");
     if (!Number.isSafeInteger(current.settled + usage)) invalid("tokens", "usage-overflow");
     if (current.state !== "running") refuse("run.complete", "run-no-longer-running");
-    db.prepare("UPDATE author_runs SET settled = settled + ? WHERE id = ?;").run(usage, current.id);
+    stmt(db, "UPDATE author_runs SET settled = settled + ? WHERE id = ?;").run(usage, current.id);
     if (usage + current.settled > current.reserved) {
       ctx.event(row.projectId, "run", "run.attempt", {
         runId: current.id,
@@ -67,7 +67,7 @@ export function createRunService(
     });
     const mod = registry.require(row.product);
     mod.onCandidateCreated?.(ctx, row, candidateId, body, current.frozenInput, input);
-    db.prepare("UPDATE author_runs SET candidate_id = ? WHERE id = ?;").run(candidateId, current.id);
+    stmt(db, "UPDATE author_runs SET candidate_id = ? WHERE id = ?;").run(candidateId, current.id);
     ctx.event(row.projectId, "run", "run.attempt", {
       runId: current.id,
       stage: WRITING_STAGE_IDS.write,
@@ -84,13 +84,29 @@ export function createRunService(
     return { id: current.id, candidateId };
   }
 
+  function estimatePromptForFrozen(frozen: string): {
+    readonly inputReserve: number;
+    readonly contextReport: unknown;
+  } {
+    const parsed = JSON.parse(frozen) as {
+      contextBundle?: { stablePrefix?: string; dynamicTail?: string; report?: unknown };
+    };
+    const promptForReserve = parsed.contextBundle
+      ? [parsed.contextBundle.stablePrefix, parsed.contextBundle.dynamicTail].filter(Boolean).join("\n\n---\n\n")
+      : frozen;
+    return {
+      inputReserve: estimateWritingInput(WRITER_SYSTEM, promptForReserve),
+      contextReport: parsed.contextBundle?.report ?? null,
+    };
+  }
+
   function previewBudget(row: DocumentRow, input: Input) {
     return ctx.read(() => {
       const current = ctx.document(row.id);
       ctx.currentBody(current, input);
       const frozen = freezeWriting(current, input);
-      const inputReserve = estimateWritingInput(WRITER_SYSTEM, frozen);
-      return { inputReserve, recommended: recommendedTokenBudget(inputReserve) };
+      const { inputReserve, contextReport } = estimatePromptForFrozen(frozen);
+      return { inputReserve, recommended: recommendedTokenBudget(inputReserve), contextReport };
     });
   }
 
@@ -104,7 +120,7 @@ export function createRunService(
       if (reserved === 0) invalid("tokenLimit", "positive-budget-required");
       const id = randomUUID();
       const frozenInput = freezeWriting(current, input);
-      db.prepare(`
+      stmt(db, `
         INSERT INTO author_runs (id, document_id, state, base_revision_id, frozen_input, reserved)
         VALUES (?, ?, 'running', ?, ?, ?);
       `).run(id, row.id, current.revisionId, frozenInput, reserved);
@@ -127,7 +143,7 @@ export function createRunService(
       const usage = count(input, "tokens");
       if (current.state === "cancelled") {
         if (current.lateUsageSettled === 0 && generation.history(current.id).length === 0) {
-          const updated = db.prepare(`
+          const updated = stmt(db, `
             UPDATE author_runs
             SET settled = settled + ?, late_usage_settled = 1
             WHERE id = ? AND late_usage_settled = 0;
@@ -150,7 +166,7 @@ export function createRunService(
         refuse("candidate.adopt", "candidate-base-mismatch");
       }
       const candidate = requiredRow<{ body: string }>(
-        db.prepare("SELECT body FROM candidates WHERE candidate_id = ?;").get(current.candidateId),
+        stmt(db, "SELECT body FROM candidates WHERE candidate_id = ?;").get(current.candidateId),
         "candidate",
         current.candidateId,
       );
@@ -162,7 +178,7 @@ export function createRunService(
 
   function runHistory(row: DocumentRow, input: Input) {
     const before = input.before === undefined ? Number.MAX_SAFE_INTEGER : count(input, "before");
-    return db.prepare(`
+    return stmt(db, `
       SELECT rowid AS cursor, id, state, reserved, settled FROM author_runs
       WHERE document_id = ? AND rowid < ? ORDER BY rowid DESC LIMIT 25;
     `).all(row.id, before);
@@ -173,7 +189,7 @@ export function createRunService(
       const detail = ctx.run(text(input, "runId"));
       if (detail.documentId !== row.id) invalid("runId", "document-mismatch");
       const candidate = detail.candidateId
-        ? db.prepare("SELECT body FROM candidates WHERE candidate_id = ?;").get(detail.candidateId)
+        ? stmt(db, "SELECT body FROM candidates WHERE candidate_id = ?;").get(detail.candidateId)
         : null;
       return {
         ...detail,
@@ -194,7 +210,7 @@ export function createRunService(
       if (!generation.reconcile(id, detail.id)) {
         refuse("run.reconcile", "no-uncertain-attempt");
       }
-      db.prepare("UPDATE author_runs SET settled = settled + ? WHERE id = ?;").run(tokens, detail.id);
+      stmt(db, "UPDATE author_runs SET settled = settled + ? WHERE id = ?;").run(tokens, detail.id);
       ctx.event(row.projectId, "run", "run.attempt", {
         runId: detail.id,
         attemptId: id,
@@ -274,7 +290,7 @@ export function createRunService(
       if (current.state === "running" && result && !uncertain) {
         return completeRun(current, row, { ...result, tokens });
       }
-      db.prepare("UPDATE author_runs SET settled = settled + ? WHERE id = ?;").run(tokens, current.id);
+      stmt(db, "UPDATE author_runs SET settled = settled + ? WHERE id = ?;").run(tokens, current.id);
       ctx.event(row.projectId, "run", "run.attempt", {
         runId: current.id,
         attemptId: id,
@@ -307,7 +323,7 @@ export function createRunService(
     ctx.atomic(() => {
       const current = ctx.run(id);
       if (current.state === "running") {
-        db.prepare("UPDATE author_runs SET settled = settled + ? WHERE id = ?;").run(tokens, id);
+        stmt(db, "UPDATE author_runs SET settled = settled + ? WHERE id = ?;").run(tokens, id);
         const row = ctx.document(current.documentId);
         ctx.event(row.projectId, "run", "run.attempt", {
           runId: id,

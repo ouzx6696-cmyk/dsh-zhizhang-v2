@@ -1,4 +1,4 @@
-import { currentSeq } from "../storage/index.ts";
+import { currentSeq, stmt } from "../storage/index.ts";
 import type { WorkspaceContext } from "./context.ts";
 import type { ProductLineRegistry } from "./product-line.ts";
 
@@ -6,14 +6,13 @@ export function createSnapshotService(ctx: WorkspaceContext, registry: ProductLi
   const { db } = ctx;
 
   function buildSnapshot(projectId?: string, documentId?: string) {
-    const projects = db
-      .prepare("SELECT id, name, product FROM author_projects ORDER BY rowid;")
-      .all();
+    const projects = stmt(db, "SELECT id, name, product FROM author_projects ORDER BY rowid;").all();
     if (!projectId) return { projects };
 
-    const documents = db
-      .prepare("SELECT id, title, state FROM author_documents WHERE project_id = ? ORDER BY rowid;")
-      .all(projectId) as readonly { id: string; title: string; state: string }[];
+    const documents = stmt(
+      db,
+      "SELECT id, title, state FROM author_documents WHERE project_id = ? ORDER BY rowid;",
+    ).all(projectId) as readonly { id: string; title: string; state: string }[];
     const order = ctx.chapterOrder(projectId, documents);
     const byId = new Map(documents.map((entry) => [entry.id, entry]));
     const sorted = order
@@ -22,8 +21,23 @@ export function createSnapshotService(ctx: WorkspaceContext, registry: ProductLi
       .map(({ id, title }) => ({ id, title }));
 
     const active = documentId && byId.has(documentId) ? ctx.document(documentId) : undefined;
+    const activeContext = active
+      ? {
+          volumeId: active.volumeId,
+          volumeTitle: active.volumeId
+            ? ((stmt(db, "SELECT title FROM author_volumes WHERE id = ?;").get(active.volumeId) as { title?: string } | undefined)?.title ?? null)
+            : null,
+          actId: active.actId,
+          actTitle: active.actId
+            ? ((stmt(db, "SELECT title FROM author_acts WHERE id = ?;").get(active.actId) as { title?: string } | undefined)?.title ?? null)
+            : null,
+          charCount: active.charCount,
+          summary: active.summary,
+        }
+      : null;
+
     const runs = active
-      ? db.prepare(`
+      ? stmt(db, `
           SELECT r.id, r.state, r.base_revision_id AS baseRevisionId,
             r.reserved, r.settled, r.candidate_id AS candidateId,
             CASE WHEN r.state = 'awaiting-author' THEN c.body END AS candidateBody,
@@ -54,6 +68,7 @@ export function createSnapshotService(ctx: WorkspaceContext, registry: ProductLi
       projects,
       documents: sorted,
       active,
+      activeContext,
       runs,
       approved: false,
       delivery: null,

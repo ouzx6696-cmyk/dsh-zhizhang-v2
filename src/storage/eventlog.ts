@@ -19,6 +19,7 @@
 import type { SqliteDatabase } from "./driver.ts";
 import { canonicalJson } from "./command.ts";
 import { StorageError } from "./errors.ts";
+import { stmt } from "./stmt-pool.ts";
 
 /** One committed event as the log returns it. */
 export interface LoggedEvent {
@@ -85,7 +86,7 @@ export function createEventLogSchema(db: SqliteDatabase): void {
 
 /** The project's current watermark: 0 when nothing has been committed. */
 export function currentSeq(db: SqliteDatabase, projectId: string): number {
-  const row = db.prepare("SELECT MAX(seq) AS seq FROM event_log WHERE project_id = ?;").get(projectId);
+  const row = stmt(db, "SELECT MAX(seq) AS seq FROM event_log WHERE project_id = ?;").get(projectId);
   const value = (row as { seq?: unknown } | null)?.seq;
   return typeof value === "number" ? value : 0;
 }
@@ -108,7 +109,7 @@ export function appendEvent(
 ): { seq: number; appended: boolean } {
   // Allocate the sequence and insert in the same SQLite statement, so two
   // connections cannot read the same watermark and then race to insert it.
-  const inserted = db.prepare(`
+  const inserted = stmt(db, `
     INSERT INTO event_log (project_id, seq, event_id, kind, payload)
     SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ? FROM event_log WHERE project_id = ?
     ON CONFLICT (project_id, event_id) DO NOTHING
@@ -117,8 +118,7 @@ export function appendEvent(
     { seq: number } | undefined;
   if (inserted !== undefined) return { seq: inserted.seq, appended: true };
 
-  const existing = db
-    .prepare("SELECT seq FROM event_log WHERE project_id = ? AND event_id = ?;")
+  const existing = stmt(db, "SELECT seq FROM event_log WHERE project_id = ? AND event_id = ?;")
     .get(event.projectId, event.eventId) as { seq?: unknown } | undefined;
   if (typeof existing?.seq !== "number") {
     throw new StorageError("storage.format_unsupported", { reason: "event-log-row-malformed" });
@@ -138,8 +138,8 @@ export function readEvents(
       : "SELECT seq, event_id, kind, payload FROM event_log WHERE project_id = ? AND seq > ? ORDER BY seq LIMIT ?;";
   const rows =
     limit === undefined
-      ? db.prepare(sql).all(projectId, afterSeq)
-      : db.prepare(sql).all(projectId, afterSeq, limit);
+      ? stmt(db, sql).all(projectId, afterSeq)
+      : stmt(db, sql).all(projectId, afterSeq, limit);
   const events: LoggedEvent[] = [];
   for (const row of rows) {
     const value = row as {

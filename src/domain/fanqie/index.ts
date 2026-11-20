@@ -22,3 +22,38 @@ export {
   CHAPTER_STATES, EDITORIAL_REJECTION_LIMIT, DEFAULT_CHAPTER_LENGTH, CHAPTER_LENGTH_WARNING_BAND,
   PACING, OUTLINE_SECTIONS, chapterLengthWarnings, assertChapterFinalizable, settingsAt, type ChapterState, type SettingFact,
 } from "./editorial.ts";
+
+export {
+  flattenNovelOrder,
+  planTreeChapterMove,
+  type ChapterMoveSpec,
+  type HierarchyAct,
+  type HierarchyChapter,
+  type HierarchyVolume,
+} from "./hierarchy.ts";
+
+export {
+  FORESHADOW_STATUSES,
+  LORE_CATEGORIES,
+  assertForeshadowStatus,
+  detectLoreConflicts,
+  normalizeLoreCategory,
+  type ChapterOutlineFacts,
+  type ForeshadowState,
+  type LoreCategoryId,
+  type LoreConflictReport,
+  type LoreForeshadowEntry,
+} from "./lore.ts";
+
+export {
+  TECHNIQUE_CATEGORIES,
+  normalizeTags,
+  rankTechniquesForChapter,
+  resolveEffectiveMount,
+  resolveScopedItems,
+  validatePacingLabel,
+  type LibraryMountRule,
+  type TechniqueCardForRank,
+  type TechniqueCategory,
+  type TechniqueMatchResult,
+} from "./library.ts";

@@ -1,4 +1,4 @@
-import type { RunDetailDto, SettingFactDto } from "../../../contracts/workspace-dto.ts";
+import type { ContextAssemblyReportDto, RunDetailDto, SettingFactDto } from "../../../contracts/workspace-dto.ts";
 
 interface ParsedFrozenInput {
   readonly title?: string;
@@ -6,6 +6,7 @@ interface ParsedFrozenInput {
   readonly instruction?: string;
   readonly knownAt?: { readonly chapterId: string; readonly point: number };
   readonly knownFacts?: readonly SettingFactDto[];
+  readonly contextBundle?: { readonly report?: ContextAssemblyReportDto };
 }
 
 const PHASE_LABELS: Readonly<Record<string, string>> = {
@@ -79,6 +80,25 @@ export function renderRunInspector(target: HTMLElement, detail: RunDetailDto): v
   }
   header.append(meta);
   target.append(header);
+
+  const ctxReport = frozen.contextBundle?.report;
+  if (ctxReport) {
+    const ctxSec = el("div", "inspector-section");
+    ctxSec.append(
+      el(
+        "h3",
+        "inspector-heading",
+        `分层上下文配额（Prefix ${ctxReport.prefixTokens} + 动态 ${ctxReport.dynamicTokens} / 上限 ${ctxReport.maxInputTokens}）`,
+      ),
+    );
+    const list = el("ul", "inspector-list");
+    for (const slot of ctxReport.slots) {
+      if (slot.status === "empty") continue;
+      list.append(el("li", undefined, `${slot.label}：${slot.status}（${slot.includedTokens}/${slot.rawTokens} token）`));
+    }
+    ctxSec.append(list);
+    target.append(ctxSec);
+  }
 
   if (detail.attempts.length > 0) {
     const attemptsSec = el("div", "inspector-section");

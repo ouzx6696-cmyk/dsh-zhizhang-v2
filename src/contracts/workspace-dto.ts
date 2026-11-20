@@ -204,11 +204,254 @@ export interface PlanningDto {
 }
 export type PlanningView = PlanningDto;
 
+export type LoreCategory =
+  | "character"
+  | "item"
+  | "location"
+  | "faction"
+  | "world_rule"
+  | "foreshadow"
+  | "agreement";
+
+export type ForeshadowStatus = "proposed" | "planted" | "hinted" | "resolved" | "abandoned";
+
+export type LibraryScope = "global" | "project";
+export type LibraryStatus = "proposed" | "approved" | "archived";
+export type LibraryItemKind = "deconstruction" | "technique";
+export type LibraryMountTarget = "project" | "volume" | "act" | "chapter";
+export type LibraryMountMode = "include" | "exclude" | "pin";
+export type ContextSlotPriority = "critical" | "high" | "medium" | "optional";
+export type AiProposalKind = "deconstruct" | "technique" | "setting" | "summary";
+
+export interface VolumeDto {
+  readonly id: string;
+  readonly projectId: string;
+  readonly title: string;
+  readonly goal: string;
+  readonly summary: string;
+  readonly sortOrder: number;
+  readonly createdAt: number;
+}
+
+export interface ActDto {
+  readonly id: string;
+  readonly projectId: string;
+  readonly volumeId: string;
+  readonly title: string;
+  readonly goal: string;
+  readonly summary: string;
+  readonly sortOrder: number;
+  readonly createdAt: number;
+}
+
+export interface ChapterTreeItemDto {
+  readonly id: string;
+  readonly title: string;
+  readonly state: string;
+  readonly volumeId: string | null;
+  readonly actId: string | null;
+  readonly charCount: number;
+  readonly summary: string;
+  readonly targetLength: number | null;
+  readonly viewpoint: string | null;
+  readonly order: number;
+  readonly updatedAt: number;
+}
+
+export interface NovelTreeDto {
+  readonly projectId: string;
+  readonly volumes: readonly VolumeDto[];
+  readonly acts: readonly ActDto[];
+  readonly chapters: readonly ChapterTreeItemDto[];
+  readonly totalChars: number;
+  readonly asOfSeq: number;
+}
+
+export interface ActiveContextCrumbDto {
+  readonly volumeId: string | null;
+  readonly volumeTitle: string | null;
+  readonly actId: string | null;
+  readonly actTitle: string | null;
+  readonly charCount: number;
+  readonly summary: string;
+}
+
+export interface LoreEntryDto {
+  readonly factId: string;
+  readonly category: LoreCategory;
+  readonly entityName: string;
+  readonly latestSettingId: string;
+  readonly locked: boolean;
+  readonly fact: SettingFactDto;
+  readonly decidedSeq: number;
+}
+
+export interface ForeshadowDto {
+  readonly id: string;
+  readonly projectId: string;
+  readonly factId: string | null;
+  readonly title: string;
+  readonly plantedChapterId: string | null;
+  readonly plantedPoint: number;
+  readonly targetChapterId: string | null;
+  readonly resolvedChapterId: string | null;
+  readonly status: ForeshadowStatus;
+  readonly note: string;
+  readonly updatedAt: number;
+}
+
+export interface LoreConflictDto {
+  readonly kind: "expiry-before-known" | "outline-fact-mismatch" | "stale-foreshadow" | "foreshadow-order-flip";
+  readonly severity: "warning" | "error";
+  readonly targetId: string;
+  readonly chapterId?: string;
+  readonly message: string;
+}
+
+export interface DeconstructionDto {
+  readonly id: string;
+  readonly scope: LibraryScope;
+  readonly projectId: string | null;
+  readonly overrideOfId: string | null;
+  readonly title: string;
+  readonly sourceBook: string;
+  readonly genre: string;
+  readonly pacing: string;
+  readonly tags: readonly string[];
+  readonly excerpt: string;
+  readonly hookAnalysis: string;
+  readonly conflictBeats: string;
+  readonly payoffRhythm: string;
+  readonly proseNotes: string;
+  readonly status: LibraryStatus;
+  readonly sourceKind: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export interface TechniqueCardDto {
+  readonly id: string;
+  readonly scope: LibraryScope;
+  readonly projectId: string | null;
+  readonly overrideOfId: string | null;
+  readonly title: string;
+  readonly category: string;
+  readonly pacing: string;
+  readonly sceneTags: readonly string[];
+  readonly triggerWhen: string;
+  readonly executionSteps: string;
+  readonly constraints: string;
+  readonly antiPatterns: string;
+  readonly exampleExcerpt: string;
+  readonly priority: number;
+  readonly status: LibraryStatus;
+  readonly sourceKind: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export interface LibraryMountDto {
+  readonly id: string;
+  readonly projectId: string;
+  readonly targetType: LibraryMountTarget;
+  readonly targetId: string;
+  readonly itemKind: LibraryItemKind;
+  readonly itemId: string;
+  readonly mode: LibraryMountMode;
+  readonly weight: number;
+  readonly note: string;
+}
+
+export interface TechniqueRecommendationDto {
+  readonly card: TechniqueCardDto;
+  readonly score: number;
+  readonly mountedMode: LibraryMountMode | null;
+  readonly mountTarget: LibraryMountTarget | null;
+  readonly reasons: readonly string[];
+}
+
+export interface ContextSlotReportDto {
+  readonly id: string;
+  readonly label: string;
+  readonly group: "prefix" | "dynamic";
+  readonly priority: ContextSlotPriority;
+  readonly rawTokens: number;
+  readonly includedTokens: number;
+  readonly status: "included" | "truncated" | "dropped" | "empty";
+}
+
+export interface ContextAssemblyReportDto {
+  readonly maxInputTokens: number;
+  readonly totalEstimatedTokens: number;
+  readonly prefixTokens: number;
+  readonly dynamicTokens: number;
+  readonly slots: readonly ContextSlotReportDto[];
+  readonly activeTechniqueIds: readonly string[];
+  readonly activeDeconstructionIds: readonly string[];
+}
+
+export interface ContextBundleDto {
+  readonly stablePrefix: string;
+  readonly dynamicTail: string;
+  readonly report: ContextAssemblyReportDto;
+}
+
+export interface AiProposalDto {
+  readonly id: string;
+  readonly projectId: string | null;
+  readonly documentId: string | null;
+  readonly kind: AiProposalKind;
+  readonly status: "pending" | "approved" | "rejected" | "failed";
+  readonly sourceRef: string;
+  readonly payload: Readonly<Record<string, unknown>>;
+  readonly provider: string | null;
+  readonly model: string | null;
+  readonly reserved: number;
+  readonly settled: number;
+  readonly error: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export interface SearchHitDto {
+  readonly scope: "chapter" | "lore" | "deconstruction" | "technique";
+  readonly id: string;
+  readonly title: string;
+  readonly subtitle: string;
+  readonly snippet: string;
+}
+
+export interface LocalBundleFileDto {
+  readonly path: string;
+  readonly content: string;
+  readonly sha256?: string;
+}
+
+export interface ProjectExportBundleDto {
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly exportedAt: string;
+  readonly writtenDirectory?: string | null;
+  readonly files: readonly LocalBundleFileDto[];
+}
+
+export interface ProjectImportSummaryDto {
+  readonly projectId: string;
+  readonly volumesCreated: number;
+  readonly actsCreated: number;
+  readonly chaptersCreated: number;
+  readonly chaptersUpdated: number;
+  readonly chaptersSkippedLocked: readonly string[];
+  readonly loreProposed: number;
+  readonly libraryImported: number;
+}
+
 export interface WorkspaceSnapshot {
   readonly unchanged?: boolean;
   readonly projects?: readonly ProjectSummary[];
   readonly documents?: readonly DocumentSummary[];
   readonly active?: ActiveDocument;
+  readonly activeContext?: ActiveContextCrumbDto | null;
   readonly runs?: readonly RunSummary[];
   readonly approved?: boolean;
   readonly delivery?: string | null;
@@ -296,4 +539,35 @@ export type WorkspaceAction =
   | "run.reconcile"
   | "run.detail"
   | "run.history"
-  | "candidate.adopt";
+  | "candidate.adopt"
+  | "tree.get"
+  | "volume.create"
+  | "volume.update"
+  | "volume.delete"
+  | "act.create"
+  | "act.update"
+  | "act.delete"
+  | "chapter.move"
+  | "chapter.summary.save"
+  | "lore.list"
+  | "lore.conflicts"
+  | "foreshadow.upsert"
+  | "foreshadow.list"
+  | "deconstruct.save"
+  | "deconstruct.list"
+  | "deconstruct.delete"
+  | "technique.save"
+  | "technique.list"
+  | "technique.delete"
+  | "library.mount"
+  | "library.unmount"
+  | "library.mounts"
+  | "technique.recommend"
+  | "context.preview"
+  | "proposal.create"
+  | "proposal.list"
+  | "proposal.decide"
+  | "proposal.generate"
+  | "workspace.search"
+  | "project.export_bundle"
+  | "project.import_bundle";

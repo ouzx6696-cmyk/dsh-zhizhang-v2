@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { CLIENT_ENTRY_CSS, CLIENT_JS_MODULES } from "../src/client/manifest.ts";
 import { apiRequest, fetchWorkspaceState } from "../src/client/workbench/api.ts";
 import { computeParagraphDiff } from "../src/client/workbench/diff.ts";
 import { createDraftVault } from "../src/client/workbench/draft-vault.ts";
+import { createRenderGate } from "../src/client/workbench/store.ts";
+import { createVirtualList } from "../src/client/workbench/views/virtual-list.ts";
 import { createMemoryStorage, withBrowserGlobals } from "../support/v2-harness.mjs";
 
 test("DraftVault handles caching, dirty checks, owner-scoped multi-tab isolation, and storage warning recovery", async () => {
@@ -223,17 +227,19 @@ test("workbench.html satisfies static DOM ID, pipeline tab, diff mode, and manif
   assert.ok(htmlIds.length > 40);
 
   // 2. Every static ID queried by shell/plugins/views exists in workbench.html
-  const uiSources = [
-    "../src/client/workbench/shell.ts",
-    "../src/client/workbench/plugins/fanqie.ts",
-    "../src/client/workbench/plugins/toutiao.ts",
-    "../src/client/workbench/views/diff-view.ts",
-    "../src/client/workbench/views/run-inspector.ts",
-    "../src/client/workbench/modal.ts",
-  ];
+  const uiSources = [];
+  function walkClientTs(dir) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walkClientTs(full);
+      else if (entry.isFile() && entry.name.endsWith(".ts")) uiSources.push(full);
+    }
+  }
+  walkClientTs(fileURLToPath(new URL("../src/client/workbench/", import.meta.url)));
+
   const referencedIds = new Set(["navigation", "pipeline", "navigation-toggle", "pipeline-toggle"]);
-  for (const relPath of uiSources) {
-    const src = readFileSync(new URL(relPath, import.meta.url), "utf8");
+  for (const filePath of uiSources) {
+    const src = readFileSync(filePath, "utf8");
     for (const match of src.matchAll(/\b(?:byId|bindForm|bindClick)(?:<[^>]+>)?\(\s*"([^"]+)"/g)) {
       referencedIds.add(match[1]);
     }
@@ -251,6 +257,12 @@ test("workbench.html satisfies static DOM ID, pipeline tab, diff mode, and manif
   assert.deepEqual([...tabs].sort(), ["continuity", "planning", "runs", "workflow"]);
   assert.deepEqual([...panels].sort(), [...tabs].sort());
 
+  // 3b. Workspace views and panels match 1-to-1
+  const views = new Set([...html.matchAll(/data-workspace-view="([^"]+)"/g)].map((m) => m[1]));
+  const viewPanels = new Set([...html.matchAll(/data-workspace-panel="([^"]+)"/g)].map((m) => m[1]));
+  assert.deepEqual([...views].sort(), ["deconstruct", "io", "outline", "techniques", "worldbook", "writing"]);
+  assert.deepEqual([...viewPanels].sort(), [...views].sort());
+
   // 4. Diff display modes present
   const diffModes = new Set([...html.matchAll(/data-diff-mode="([^"]+)"/g)].map((m) => m[1]));
   assert.deepEqual([...diffModes].sort(), ["inline", "raw", "split"]);
@@ -258,4 +270,81 @@ test("workbench.html satisfies static DOM ID, pipeline tab, diff mode, and manif
   // 5. HTML entrypoint links match client/manifest.ts
   assert.ok(html.includes(`<link rel="stylesheet" href="./${CLIENT_ENTRY_CSS}">`));
   assert.ok(html.includes(`<script src="./${CLIENT_JS_MODULES[0]}" type="module">`));
+});
+
+test("renderGate tracks fine-grained dirty keys and virtualList windows 700+ rows cleanly", async () => {
+  const gate = createRenderGate();
+  assert.equal(gate.changed("projects", "p1"), true);
+  assert.equal(gate.changed("projects", "p1"), false);
+  assert.equal(gate.changed("projects", "p2"), true);
+  gate.reset("proj");
+  assert.equal(gate.changed("projects", "p2"), true);
+
+  function makeFakeElement(tag) {
+    const node = {
+      tagName: tag.toUpperCase(),
+      className: "",
+      textContent: "",
+      style: {},
+      children: [],
+      clientHeight: 400,
+      scrollTop: 0,
+      parentElement: null,
+      addEventListener() {},
+      removeEventListener() {},
+      append(...nodes) {
+        for (const child of nodes) {
+          if (child._isFrag) {
+            for (const c of child.children) {
+              c.parentElement = node;
+              node.children.push(c);
+            }
+          } else {
+            child.parentElement = node;
+            node.children.push(child);
+          }
+        }
+      },
+      replaceChildren(...nodes) {
+        node.children = [];
+        node.append(...nodes);
+      },
+    };
+    return node;
+  }
+
+  await withBrowserGlobals(
+    {
+      document: {
+        createElement: (tag) => makeFakeElement(tag),
+        createDocumentFragment: () => ({ _isFrag: true, children: [], append(...n) { this.children.push(...n); } }),
+      },
+      requestAnimationFrame: (fn) => fn(),
+    },
+    async () => {
+      const container = makeFakeElement("nav");
+      const vlist = createVirtualList(container, {
+        rowHeight: 40,
+        overscan: 3,
+        directThreshold: 80,
+        renderItem: (item) => {
+          const btn = makeFakeElement("button");
+          btn.textContent = item;
+          return btn;
+        },
+      });
+      const items = Array.from({ length: 700 }, (_, i) => `第 ${i + 1} 章`);
+      vlist.setItems(items);
+      assert.equal(container.children.length, 1); // spacer
+      const spacer = container.children[0];
+      assert.equal(spacer.style.height, `${700 * 40}px`);
+      const viewport = spacer.children[0];
+      assert.ok(viewport.children.length > 0 && viewport.children.length <= 30);
+
+      vlist.scrollToIndex(500);
+      assert.ok(viewport.children.some((btn) => btn.textContent === "第 501 章"));
+      assert.ok(viewport.children.length <= 30);
+      vlist.destroy();
+    },
+  );
 });

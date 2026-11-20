@@ -4,7 +4,14 @@ import { join, normalize } from "node:path";
 import { CLIENT_ENTRY_CSS, CLIENT_ENTRY_HTML, CLIENT_JS_MODULES } from "../src/client/manifest.ts";
 import { ContractError } from "../src/contracts/index.ts";
 import { openAuthorWorkspace } from "../src/host/workspace.ts";
-import { createStore, openDatabase, openStore } from "../src/storage/index.ts";
+import {
+  configureStorePragmas,
+  createStore,
+  openDatabase,
+  openStore,
+  sanitizePathSegment,
+  writeLocalBundleToDir,
+} from "../src/storage/index.ts";
 
 const PORT = Number(process.env.PORT ?? 3000);
 const HOST = process.env.HOST ?? "127.0.0.1";
@@ -31,18 +38,25 @@ if (DATA_DIR) {
   const dbPath = join(DATA_DIR, "workspace.sqlite");
   if (!existsSync(dbPath)) createStore(dbPath);
   db = openStore(dbPath);
-  db.exec("PRAGMA journal_mode = WAL;");
-  db.exec("PRAGMA busy_timeout = 5000;");
+  configureStorePragmas(db, false);
 } else {
   db = openDatabase(":memory:");
+  configureStorePragmas(db, true);
 }
 
-const workspace = openAuthorWorkspace(db, (id, contents) => {
-  deliveries.set(id, contents);
-  if (DATA_DIR) {
-    writeFileSync(join(DATA_DIR, "deliveries", `${id}.md`), contents, "utf8");
-  }
-});
+const workspace = openAuthorWorkspace(
+  db,
+  (id, contents) => {
+    deliveries.set(id, contents);
+    if (DATA_DIR) {
+      writeFileSync(join(DATA_DIR, "deliveries", `${id}.md`), contents, "utf8");
+    }
+  },
+  DATA_DIR
+    ? (projectId, files) =>
+        writeLocalBundleToDir(join(DATA_DIR, "exports", sanitizePathSegment(projectId)), files).writtenDir
+    : undefined,
+);
 
 function sendJson(res, value, status = 200) {
   const payload = JSON.stringify(value);
@@ -115,7 +129,7 @@ const server = createServer(async (req, res) => {
       if (typeof action !== "string") {
         throw new ContractError("input.invalid", { field: "action", reason: "required" });
       }
-      if (action === "run.generate") {
+      if (action === "run.generate" || action === "proposal.generate") {
         throw new ContractError("gate.denied", {
           action,
           reason: "preview-no-llm-transport",

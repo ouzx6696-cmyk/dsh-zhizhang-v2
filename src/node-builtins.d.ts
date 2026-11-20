@@ -83,9 +83,18 @@ declare module "node:crypto" {
 }
 
 declare module "node:path" {
+  export const sep: string;
   export function join(...paths: readonly string[]): string;
+  export function resolve(...paths: readonly string[]): string;
+  export function relative(from: string, to: string): string;
   export function dirname(path: string): string;
   export function basename(path: string, suffix?: string): string;
+  export function isAbsolute(path: string): boolean;
+  export const posix: {
+    join(...paths: readonly string[]): string;
+    normalize(path: string): string;
+    isAbsolute(path: string): boolean;
+  };
 }
 
 declare module "node:fs" {
@@ -100,6 +109,13 @@ declare module "node:fs" {
   ): void;
   export function linkSync(existingPath: string | URL, newPath: string | URL): void;
   export function unlinkSync(path: string | URL): void;
+  export function renameSync(oldPath: string | URL, newPath: string | URL): void;
+  export function rmSync(path: string | URL, options?: { recursive?: boolean; force?: boolean }): void;
+  export function readdirSync(
+    path: string | URL,
+    options: { withFileTypes: true },
+  ): Array<{ name: string; isFile(): boolean; isDirectory(): boolean }>;
+  export function readdirSync(path: string | URL): string[];
 }
 
 declare module "node:fs/promises" {

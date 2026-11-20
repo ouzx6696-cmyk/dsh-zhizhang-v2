@@ -1,8 +1,10 @@
 import type {
   CandidateQaReport,
+  NovelTreeDto,
   RunDetailDto,
   RunHistoryItem,
   RunSummary,
+  SearchHitDto,
   WorkspaceSnapshot,
 } from "../../contracts/workspace-dto.ts";
 import { apiRequest, fetchWorkspaceState } from "./api.ts";
@@ -14,9 +16,13 @@ import type {
   ProductLineUiModule,
   ProductLineUiSession,
   WorkbenchShellHost,
+  WorkspaceViewId,
 } from "./plugins/types.ts";
+import { createRenderGate, el, formatCharCount } from "./store.ts";
+import { createCommandPalette } from "./views/command-palette.ts";
 import { createDiffView } from "./views/diff-view.ts";
 import { renderRunInspector } from "./views/run-inspector.ts";
+import { createTreeSidebar } from "./views/tree-sidebar.ts";
 
 const RUN_STATE_LABELS: Readonly<Record<string, string>> = {
   running: "等待候选稿",
@@ -27,21 +33,12 @@ const RUN_STATE_LABELS: Readonly<Record<string, string>> = {
   cancelled: "已取消",
 };
 
+const PIPELINE_TABS: readonly PipelineTabId[] = ["workflow", "planning", "continuity", "runs"];
+
 function byId<T extends HTMLElement = HTMLElement>(id: string): T {
   const node = document.getElementById(id);
   if (!node) throw new Error(`Missing workbench element #${id}`);
   return node as T;
-}
-
-function el<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  label = "",
-  className?: string,
-): HTMLElementTagNameMap[K] {
-  const entry = document.createElement(tag);
-  if (label) entry.textContent = label;
-  if (className) entry.className = className;
-  return entry;
 }
 
 function formFields(form: HTMLFormElement): Record<string, string> {
@@ -50,6 +47,14 @@ function formFields(form: HTMLFormElement): Record<string, string> {
     if (typeof value === "string") result[key] = value;
   }
   return result;
+}
+
+function quickEstimateTokens(text: string): number {
+  let total = 0;
+  for (let i = 0; i < text.length; i++) {
+    total += text.charCodeAt(i) <= 0x7f ? 0.4 : 1.4;
+  }
+  return Math.ceil(total);
 }
 
 function initTheme(): void {
@@ -95,6 +100,7 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
   const modal = createModalController(byId<HTMLDialogElement>("workbench-dialog"));
   const diffView = createDiffView(byId("comparison"));
   const modulesById = new Map(modules.map((mod) => [mod.id, mod]));
+  const gate = createRenderGate();
 
   let snapshot: WorkspaceSnapshot = {};
   let projectId = "";
@@ -105,12 +111,12 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
   let editSequence = 0;
   let editorBase: EditorBase | undefined;
   let stashTimer: number | undefined;
+  let budgetTimer: number | undefined;
   let composing = false;
-  let directoryKey = "";
-  let selectedDirectoryButton: HTMLButtonElement | undefined;
-  let directoryButtons = new Map<string, HTMLButtonElement>();
   let toolDocument: string | undefined;
   let activePipelineTab: PipelineTabId = "workflow";
+  let activeWorkspaceView: WorkspaceViewId = "writing";
+  let usingCustomTree = false;
 
   function notice(message: string, isError = false): void {
     const container = byId("notice");
@@ -153,6 +159,10 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     return snapshot.active ? modulesById.get(snapshot.active.product) : undefined;
   }
 
+  function currentProjectProduct(): string | undefined {
+    return snapshot.projects?.find((item) => item.id === projectId)?.product;
+  }
+
   function switchPipelineTab(tabId: PipelineTabId): void {
     activePipelineTab = tabId;
     for (const button of document.querySelectorAll<HTMLButtonElement>("[data-pipeline-tab]")) {
@@ -172,6 +182,56 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     };
   }
 
+  function switchWorkspaceView(viewId: WorkspaceViewId): void {
+    activeWorkspaceView = viewId;
+    for (const button of document.querySelectorAll<HTMLButtonElement>("[data-workspace-view]")) {
+      const selected = button.dataset.workspaceView === viewId;
+      button.setAttribute("aria-selected", String(selected));
+      button.classList.toggle("active", selected);
+    }
+    for (const panel of document.querySelectorAll<HTMLElement>("[data-workspace-panel]")) {
+      panel.hidden = panel.dataset.workspacePanel !== viewId;
+    }
+    const product = currentProjectProduct();
+    for (const [id, session] of sessions) {
+      session.onWorkspaceViewChanged?.(viewId, product === id, snapshot);
+    }
+  }
+
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-workspace-view]")) {
+    button.onclick = () => {
+      const viewId = button.dataset.workspaceView as WorkspaceViewId | undefined;
+      if (viewId) switchWorkspaceView(viewId);
+    };
+  }
+
+  const treeSidebar = createTreeSidebar(byId("documents"), (docId) => {
+    void perform(async () => {
+      await selectDocument(docId);
+    });
+  });
+
+  async function selectDocument(nextDocumentId: string): Promise<void> {
+    stash();
+    for (const session of sessions.values()) session.onDocumentSelected?.();
+    documentId = nextDocumentId;
+    treeSidebar.updateActiveId(nextDocumentId);
+    if (activeWorkspaceView !== "writing") {
+      switchWorkspaceView("writing");
+    }
+    await load();
+  }
+
+  function setDirectoryTree(tree: NovelTreeDto | null): void {
+    if (tree) {
+      usingCustomTree = true;
+      treeSidebar.renderNovelTree(tree, documentId);
+    } else {
+      usingCustomTree = false;
+      treeSidebar.renderFlat(snapshot.documents ?? [], documentId);
+    }
+  }
+
   function updateEditorMetrics(): void {
     const chars = countNonWhitespaceChars(editor.value);
     const rangeHint = activeModule()?.wordCountHint(snapshot) ?? "";
@@ -186,15 +246,18 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     if (!active) return;
     const instruction = form.elements.namedItem("instruction") as HTMLTextAreaElement;
     const tokenLimit = form.elements.namedItem("tokenLimit") as HTMLInputElement;
-    const serialized = JSON.stringify([active.body, active.title, snapshot.planning, snapshot.scenario, instruction.value]);
-    const estimate = new TextEncoder().encode(serialized).length + 1024;
+    const estimate =
+      quickEstimateTokens(active.body ?? "") +
+      quickEstimateTokens(active.title) +
+      quickEstimateTokens(instruction.value) +
+      512;
     const recommended = Math.max(8000, Math.ceil((estimate * 2 + 2400) / 1000) * 1000);
     if (toolDocument !== active.id || !tokenLimit.value || tokenLimit.value === tokenLimit.dataset.suggested) {
       tokenLimit.value = String(recommended);
     }
     tokenLimit.dataset.suggested = String(recommended);
     byId("budget-hint").textContent =
-      `保守输入估算约 ${estimate.toLocaleString("zh-Hans")} token · 建议总额 ${recommended.toLocaleString("zh-Hans")}（含输出余量）`;
+      `校准输入估算约 ${estimate.toLocaleString("zh-Hans")} token · 建议总额 ${recommended.toLocaleString("zh-Hans")}（含输出余量）`;
   }
 
   async function load(ifSequence?: number): Promise<void> {
@@ -277,12 +340,16 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
   }
 
   const host: WorkbenchShellHost = {
-    getState: () => ({ projectId, documentId, snapshot, composing }),
+    getState: () => ({ projectId, documentId, snapshot, composing, activeView: activeWorkspaceView }),
     readEditorValue: () => editor.value,
     isDirty: dirty,
     stashEditor: stash,
     perform,
     load,
+    selectDocument,
+    setDirectoryTree,
+    switchWorkspaceView,
+    switchPipelineTab,
     change,
     request,
     notice,
@@ -297,52 +364,35 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
 
   function render(): void {
     const projectsSelect = byId<HTMLSelectElement>("projects");
-    const navigation = byId("documents");
     const project = snapshot.projects?.find((item) => item.id === projectId);
     const active = snapshot.active;
     const mod = activeModule();
     const hasDraft = Boolean(active?.revisionId);
     const locked = Boolean(active && mod?.lockedStates.includes(active.state));
 
-    const nextDirectoryKey = JSON.stringify([projectId, snapshot.projects, snapshot.documents]);
-    if (nextDirectoryKey !== directoryKey) {
-      directoryKey = nextDirectoryKey;
-      projectsSelect.replaceChildren(new Option("选择项目", ""));
+    const projSig = (snapshot.projects ?? []).map((p) => `${p.id}:${p.name}:${p.product}`).join("|");
+    if (gate.changed("projects", projSig)) {
+      const fragment = document.createDocumentFragment();
+      fragment.append(new Option("选择项目", ""));
       for (const item of snapshot.projects ?? []) {
         const displayName = modulesById.get(item.product)?.displayName ?? item.product;
-        projectsSelect.append(new Option(`${item.name} · ${displayName}`, item.id));
+        fragment.append(new Option(`${item.name} · ${displayName}`, item.id));
       }
-      directoryButtons = new Map();
-      for (const item of snapshot.documents ?? []) {
-        const title = item.title || "微头条";
-        const button = el("button", title);
-        button.type = "button";
-        directoryButtons.set(item.id, button);
-        button.setAttribute("aria-current", "false");
-        button.onclick = () =>
-          void perform(async () => {
-            stash();
-            for (const session of sessions.values()) session.onDocumentSelected?.();
-            documentId = item.id;
-            await load();
-          });
-      }
-      if (directoryButtons.size === 0 && project) {
-        navigation.replaceChildren(el("p", "暂无稿件，请先新建。", "muted-copy"));
-      } else {
-        navigation.replaceChildren(...directoryButtons.values());
+      projectsSelect.replaceChildren(fragment);
+    }
+    projectsSelect.value = projectId;
+
+    const docsList = snapshot.documents ?? [];
+    const docSig = `${projectId}:${snapshot.asOfSeq ?? 0}:${docsList.length}:${docsList.map((d) => `${d.id}:${d.title}`).join(",")}`;
+    if (gate.changed("directory", docSig)) {
+      if (!usingCustomTree || project?.product !== "fanqie") {
+        treeSidebar.renderFlat(docsList, documentId);
       }
       for (const [id, session] of sessions) {
         session.onDirectoryUpdated?.(project?.product === id, projectId, snapshot);
       }
-    }
-
-    projectsSelect.value = projectId;
-    const selectedButton = directoryButtons.get(documentId);
-    if (selectedButton !== selectedDirectoryButton) {
-      selectedDirectoryButton?.setAttribute("aria-current", "false");
-      selectedButton?.setAttribute("aria-current", "true");
-      selectedDirectoryButton = selectedButton;
+    } else {
+      treeSidebar.updateActiveId(documentId);
     }
 
     byId("document-tools").hidden = !project;
@@ -364,6 +414,7 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
 
     editorBase = active ? { id: active.id, revisionId: active.revisionId, body: active.body ?? "" } : undefined;
     if (!active) {
+      byId("active-tree-crumb").hidden = true;
       for (const session of sessions.values()) session.renderDocumentSlots(false, snapshot);
       return;
     }
@@ -371,6 +422,19 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     byId("document-label").textContent = mod?.documentTypeLabel(snapshot) ?? active.product;
     byId("heading").textContent = active.title || "微头条";
     byId("state").textContent = mod?.stateLabels[active.state] ?? active.state;
+
+    const crumbEl = byId("active-tree-crumb");
+    const ctxCrumb = snapshot.activeContext;
+    if (ctxCrumb && (ctxCrumb.volumeTitle || ctxCrumb.actTitle || ctxCrumb.charCount > 0)) {
+      crumbEl.hidden = false;
+      crumbEl.textContent = [
+        ctxCrumb.volumeTitle,
+        ctxCrumb.actTitle,
+        ctxCrumb.charCount > 0 ? `已存 ${formatCharCount(ctxCrumb.charCount)}` : "",
+      ].filter(Boolean).join(" / ");
+    } else {
+      crumbEl.hidden = true;
+    }
 
     const saved = vault.read(active.id);
     const stale = Boolean(saved && saved.revisionId !== active.revisionId);
@@ -458,24 +522,50 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     }
   }
 
-  // Collapsible sidebars with scroll-ratio preservation
-  for (const region of ["navigation", "pipeline"] as const) {
+  function toggleSidebar(region: "navigation" | "pipeline", forceHidden?: boolean): void {
+    const scrollBox = document.scrollingElement;
+    const span = scrollBox ? scrollBox.scrollHeight - scrollBox.clientHeight : 0;
+    const ratio = scrollBox && span > 0 ? scrollBox.scrollTop / span : 0;
+    const panel = byId(region);
     const button = byId<HTMLButtonElement>(`${region}-toggle`);
-    button.onclick = () => {
-      const scrollBox = document.scrollingElement;
-      const span = scrollBox ? scrollBox.scrollHeight - scrollBox.clientHeight : 0;
-      const ratio = scrollBox && span > 0 ? scrollBox.scrollTop / span : 0;
-      const panel = byId(region);
-      panel.hidden = !panel.hidden;
-      byId("layout").classList.toggle(`without-${region}`, panel.hidden);
-      button.setAttribute("aria-pressed", String(!panel.hidden));
-      requestAnimationFrame(() => {
-        if (scrollBox) scrollBox.scrollTop = ratio * (scrollBox.scrollHeight - scrollBox.clientHeight);
-      });
-    };
+    panel.hidden = forceHidden ?? !panel.hidden;
+    byId("layout").classList.toggle(`without-${region}`, panel.hidden);
+    button.setAttribute("aria-pressed", String(!panel.hidden));
+    requestAnimationFrame(() => {
+      if (scrollBox) scrollBox.scrollTop = ratio * (scrollBox.scrollHeight - scrollBox.clientHeight);
+    });
   }
 
-  // Manuscript editing listeners & Cmd/Ctrl+S shortcut
+  for (const region of ["navigation", "pipeline"] as const) {
+    byId<HTMLButtonElement>(`${region}-toggle`).onclick = () => toggleSidebar(region);
+  }
+
+  const wideToggle = byId<HTMLButtonElement>("pipeline-wide-toggle");
+  wideToggle.onclick = () => {
+    const isWide = byId("layout").classList.toggle("pipeline-wide");
+    wideToggle.setAttribute("aria-pressed", String(isWide));
+    wideToggle.textContent = isWide ? "窄栏" : "宽栏";
+  };
+
+  const commandPalette = createCommandPalette({
+    dialog: byId<HTMLDialogElement>("command-palette-dialog"),
+    getDocuments: () => snapshot.documents ?? [],
+    getProjectId: () => projectId,
+    isFanqieActive: () => currentProjectProduct() === "fanqie",
+    searchRemote: (query) => request<SearchHitDto[]>("workspace.search", { projectId, query }),
+    onSelectDocument: (docId) => void perform(() => selectDocument(docId)),
+    onSwitchView: (viewId) => switchWorkspaceView(viewId),
+    onToggleFocusMode: () => {
+      const bothVisible = !byId("navigation").hidden || !byId("pipeline").hidden;
+      toggleSidebar("navigation", bothVisible);
+      toggleSidebar("pipeline", bothVisible);
+    },
+  });
+
+  byId("quick-jump").onclick = () => commandPalette.open("jump");
+  byId("global-search").onclick = () => commandPalette.open("search");
+
+  // Manuscript editing listeners & global shortcuts
   editor.addEventListener("input", () => {
     editSequence++;
     updateEditorMetrics();
@@ -487,12 +577,33 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
   editor.addEventListener("blur", stash);
   window.addEventListener("pagehide", stash);
   document.addEventListener("visibilitychange", () => { if (document.hidden) stash(); });
+
   window.addEventListener("keydown", (event) => {
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+    const modKey = event.metaKey || event.ctrlKey;
+    const key = event.key.toLowerCase();
+    if (modKey && key === "s") {
       const saveBtn = byId<HTMLButtonElement>("save");
       if (!saveBtn.hidden && !saveBtn.disabled) {
         event.preventDefault();
         void perform(() => change("draft.save", { body: editor.value }, { clearDraft: true }));
+      }
+    } else if (modKey && event.shiftKey && key === "f") {
+      event.preventDefault();
+      commandPalette.open("search");
+    } else if (modKey && !event.shiftKey && key === "k") {
+      event.preventDefault();
+      commandPalette.open("jump");
+    } else if (modKey && event.key === "\\") {
+      event.preventDefault();
+      const bothVisible = !byId("navigation").hidden || !byId("pipeline").hidden;
+      toggleSidebar("navigation", bothVisible);
+      toggleSidebar("pipeline", bothVisible);
+    } else if (event.altKey && ["1", "2", "3", "4"].includes(event.key)) {
+      const idx = Number(event.key) - 1;
+      const targetTab = PIPELINE_TABS[idx];
+      if (targetTab) {
+        event.preventDefault();
+        switchPipelineTab(targetTab);
       }
     }
   });
@@ -524,6 +635,8 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
       stash();
       projectId = selected;
       documentId = "";
+      usingCustomTree = false;
+      gate.reset("directory");
       await load();
     });
   };
@@ -533,6 +646,8 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     const created = await request<{ id: string }>("project.create", values);
     projectId = created.id;
     documentId = "";
+    usingCustomTree = false;
+    gate.reset();
     form.reset();
     form.closest("details")?.removeAttribute("open");
     await load();
@@ -540,9 +655,9 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
   });
 
   byId<HTMLFormElement>("new-document").addEventListener("input", () => {
-    const project = snapshot.projects?.find((item) => item.id === projectId);
+    const product = currentProjectProduct();
     for (const [id, session] of sessions) {
-      session.onCreateDocumentFormChanged?.(project?.product === id);
+      session.onCreateDocumentFormChanged?.(product === id);
     }
   });
 
@@ -642,7 +757,10 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
   });
 
   (byId<HTMLFormElement>("start-run").elements.namedItem("instruction") as HTMLTextAreaElement)
-    .addEventListener("input", updateBudgetHint);
+    .addEventListener("input", () => {
+      window.clearTimeout(budgetTimer);
+      budgetTimer = window.setTimeout(updateBudgetHint, 250);
+    });
 
   // Structured run inspector & paginated history
   async function showRunDetail(runId: string): Promise<RunDetailDto> {
@@ -665,13 +783,15 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
         target.append(el("p", "暂无历史任务记录。", "muted-copy"));
         return;
       }
+      const fragment = document.createDocumentFragment();
       for (const entry of entries) {
         const label = `${RUN_STATE_LABELS[entry.state] ?? entry.state} · ${entry.settled} / ${entry.reserved} token`;
         const button = el("button", label, "history-item");
         button.type = "button";
         button.onclick = () => void perform(() => showRunDetail(entry.id));
-        target.append(button);
+        fragment.append(button);
       }
+      target.append(fragment);
       if (entries.length === 25) {
         const more = el("button", "加载更早任务");
         more.type = "button";
@@ -696,5 +816,6 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
   });
 
   switchPipelineTab("workflow");
+  switchWorkspaceView("writing");
   void perform(load);
 }
