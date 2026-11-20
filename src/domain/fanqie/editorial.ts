@@ -7,6 +7,36 @@ export const EDITORIAL_REJECTION_LIMIT = 2;
 export const DEFAULT_CHAPTER_LENGTH = [2000, 2500] as const;
 export const CHAPTER_LENGTH_WARNING_BAND = [1500, 6000] as const;
 
+/**
+ * Author-authorized explicit Fanqie chapter transition table (Res#1 / FQ-25),
+ * encoded verbatim from `docs/02-domain-rules.md` without adding or removing
+ * any transition edge.
+ */
+export const CHAPTER_TRANSITIONS = {
+  planned: ["drafting"],
+  drafting: ["drafting", "drafted", "reviewed"],
+  drafted: ["drafted", "reviewed"],
+  reviewed: ["drafted", "final"],
+  final: [],
+} as const satisfies Readonly<Record<ChapterState, readonly ChapterState[]>>;
+
+export function assertChapterTransition(from: ChapterState, to: ChapterState): void {
+  if (!Object.hasOwn(CHAPTER_TRANSITIONS, from)) {
+    throw new ContractError("input.invalid", { field: "state", reason: "unknown-chapter-state" });
+  }
+  if (!Object.hasOwn(CHAPTER_TRANSITIONS, to)) {
+    throw new ContractError("input.invalid", { field: "state", reason: "unknown-chapter-state" });
+  }
+  if (!(CHAPTER_TRANSITIONS[from] as readonly string[]).includes(to)) {
+    throw new ContractError("gate.denied", {
+      action: "chapter.transition",
+      from,
+      to,
+      reason: `${from} → ${to}`,
+    });
+  }
+}
+
 export const PACING = {
   快爽: { opening: "约前 300 字见到具体处境", payoff: "小回报约 1–2 章，阶段回报约 4–6 章", genres: ["逆袭", "打脸", "系统", "鉴宝", "高武", "战神", "重生"] },
   稳推: { opening: "首章立住处境与所求", payoff: "单元内有可见进展", genres: ["权谋", "经营", "种田", "年代", "都市", "都市日常", "言情"] },
@@ -29,6 +59,7 @@ export interface SettingFact extends ValidityInterval {
   readonly kind: "fact" | "agreement";
   readonly locked: boolean;
   readonly source: string;
+  readonly aliases?: readonly string[];
 }
 
 export function settingsAt(

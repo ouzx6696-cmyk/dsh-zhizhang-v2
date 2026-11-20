@@ -45,9 +45,25 @@ export function flattenNovelOrder(
   const sortedVolumes = [...volumes].sort((a, b) => a.sortOrder - b.sortOrder);
   const actsByVolume = new Map<string, HierarchyAct[]>();
   for (const act of [...acts].sort((a, b) => a.sortOrder - b.sortOrder)) {
-    const bucket = actsByVolume.get(act.volumeId) ?? [];
-    bucket.push(act);
-    actsByVolume.set(act.volumeId, bucket);
+    const bucket = actsByVolume.get(act.volumeId);
+    if (bucket) bucket.push(act);
+    else actsByVolume.set(act.volumeId, [act]);
+  }
+
+  // Pre-bucket chapters once in O(C) to avoid O((V + A) * C) filtering at 5,000-chapter scale (FQ-18).
+  const chaptersByAct = new Map<string, HierarchyChapter[]>();
+  const directChaptersByVolume = new Map<string, HierarchyChapter[]>();
+  for (const ch of chapters) {
+    if (ch.volumeId !== null && ch.actId !== null) {
+      const key = `${ch.volumeId}\0${ch.actId}`;
+      const bucket = chaptersByAct.get(key);
+      if (bucket) bucket.push(ch);
+      else chaptersByAct.set(key, [ch]);
+    } else if (ch.volumeId !== null && !ch.actId) {
+      const bucket = directChaptersByVolume.get(ch.volumeId);
+      if (bucket) bucket.push(ch);
+      else directChaptersByVolume.set(ch.volumeId, [ch]);
+    }
   }
 
   const assigned = new Set<string>();
@@ -56,9 +72,7 @@ export function flattenNovelOrder(
   for (const volume of sortedVolumes) {
     const volumeActs = actsByVolume.get(volume.id) ?? [];
     for (const act of volumeActs) {
-      const actChapters = chapters
-        .filter((ch) => ch.volumeId === volume.id && ch.actId === act.id)
-        .sort(byCurrentRank);
+      const actChapters = (chaptersByAct.get(`${volume.id}\0${act.id}`) ?? []).sort(byCurrentRank);
       for (const ch of actChapters) {
         if (!assigned.has(ch.id)) {
           assigned.add(ch.id);
@@ -67,9 +81,7 @@ export function flattenNovelOrder(
       }
     }
     // Chapters placed directly inside a volume without an act come after its acts.
-    const directVolumeChapters = chapters
-      .filter((ch) => ch.volumeId === volume.id && !ch.actId)
-      .sort(byCurrentRank);
+    const directVolumeChapters = (directChaptersByVolume.get(volume.id) ?? []).sort(byCurrentRank);
     for (const ch of directVolumeChapters) {
       if (!assigned.has(ch.id)) {
         assigned.add(ch.id);

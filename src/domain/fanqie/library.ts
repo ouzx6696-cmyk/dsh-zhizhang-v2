@@ -96,6 +96,43 @@ export function normalizeStageBindings(raw: unknown): WritingStageBinding[] {
   return result;
 }
 
+const VALID_TECHNIQUE_CATEGORIES = new Set<string>(TECHNIQUE_CATEGORIES);
+
+/** Type guard checking whether a string is an official Fanqie technique category (FE-32 / Res#20). */
+export function isTechniqueCategory(value: unknown): value is TechniqueCategory {
+  return typeof value === "string" && VALID_TECHNIQUE_CATEGORIES.has(value.trim().toLowerCase());
+}
+
+/**
+ * Validates a technique card category against `TECHNIQUE_CATEGORIES` (including `atmosphere`).
+ * Empty/omitted inputs default to `fallback` (`"narrative"`); unknown non-empty values throw `input.invalid`.
+ */
+export function validateTechniqueCategory(
+  category: unknown,
+  fallback: TechniqueCategory = "narrative",
+): TechniqueCategory {
+  if (category === undefined || category === null || category === "") return fallback;
+  if (typeof category !== "string") {
+    throw new ContractError("input.invalid", { field: "category", reason: "string-required" });
+  }
+  const normalized = category.trim().toLowerCase();
+  if (!normalized) return fallback;
+  if (!VALID_TECHNIQUE_CATEGORIES.has(normalized)) {
+    throw new ContractError("input.invalid", { field: "category", reason: "unknown-technique-category" });
+  }
+  return normalized as TechniqueCategory;
+}
+
+/** Lenient technique category normalizer for external imports (e.g. SKILL.md), falling back without throwing. */
+export function normalizeTechniqueCategory(
+  category: unknown,
+  fallback: TechniqueCategory = "narrative",
+): TechniqueCategory {
+  if (typeof category !== "string") return fallback;
+  const normalized = category.trim().toLowerCase();
+  return VALID_TECHNIQUE_CATEGORIES.has(normalized) ? (normalized as TechniqueCategory) : fallback;
+}
+
 /** Validates optional pacing tier against Fanqie `PACING` vocabulary. */
 export function validatePacingLabel(pacing: unknown): string {
   if (pacing === undefined || pacing === null || pacing === "") return "";
@@ -178,6 +215,7 @@ export function rankTechniquesForChapter(params: {
     readonly chapterId: string;
   };
   readonly pacing?: string;
+  readonly genreTags?: readonly string[];
   readonly outlineText?: string;
   readonly chapterIndex?: number;
   readonly stage?: WritingStageBinding;
@@ -189,6 +227,9 @@ export function rankTechniquesForChapter(params: {
     return bindings.includes(params.stage);
   });
   const textCorpus = (params.outlineText ?? "").toLowerCase();
+  const normalizedGenreTags = new Set(
+    (params.genreTags ?? []).map((tag) => tag.trim().toLowerCase()).filter((tag) => tag.length >= 2),
+  );
   const isGoldenOpening = params.chapterIndex !== undefined && params.chapterIndex < 3;
   const results: TechniqueMatchResult[] = [];
 
@@ -221,7 +262,11 @@ export function rankTechniquesForChapter(params: {
       reasons.push("黄金三章开篇强化");
     }
 
-    const matchedTags = card.sceneTags.filter((tag) => tag.length >= 2 && textCorpus.includes(tag.toLowerCase()));
+    const matchedTags = card.sceneTags.filter((tag) => {
+      if (tag.length < 2) return false;
+      const lower = tag.toLowerCase();
+      return textCorpus.includes(lower) || normalizedGenreTags.has(lower);
+    });
     if (matchedTags.length > 0) {
       score += matchedTags.length * 45;
       reasons.push(`命中标签：${matchedTags.slice(0, 3).join("、")}`);
