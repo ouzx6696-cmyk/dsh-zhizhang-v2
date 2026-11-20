@@ -1,6 +1,6 @@
 # 织章 V2（`@zhizhang/dsh-workbench`）
 
-**织章 V2.2（`v2.2.0`）** 是运行在 **DeepSeek Harness（DsH Web `0.2.2+`）** 上的**作者主权创作工作台插件**。项目采用零运行时依赖的 TypeScript + `node:sqlite` 架构，把长篇连载与短中篇图文创作中的「控制面与滚动规划、标准 `SKILL.md` 方法论沙箱、离线体检与定性观察审稿、正文修订、SHA-256 记忆同步与四维历史召回、逐段字级合稿与选段微改写、QA 自动回改、版本审批与原子交稿」收拢到同一套事件溯源与版本账本之下。
+**织章 V2**（已发布基线 `v2.2.0`，当前分支开发 `v2.3`）是运行在 **DeepSeek Harness（DsH Web `0.2.2+`）** 上的**作者主权创作工作台插件**。项目采用零运行时依赖的 TypeScript + `node:sqlite` 架构，把长篇连载与短中篇图文创作中的「控制面与滚动规划、标准 `SKILL.md` 方法论沙箱、离线体检与定性观察审稿、正文修订、SHA-256 记忆同步与四维历史召回、逐段字级合稿与选段微改写、QA 自动回改、版本审批与原子交稿」收拢到同一套事件溯源与版本账本之下。
 
 > 核心定位：**作者写作者的正文，模型只产隔离候选，一切采纳、定稿、设定确认与交稿批准皆由作者主权决定。**
 
@@ -55,7 +55,10 @@
 | [02 · 领域规则与共享契约](docs/02-domain-rules.md) | **做什么的精确规范** | 两条线状态机、受保护阈值（34/84/2/2/尾句）、11 个错误码、6 字段批准门、§2 七大权威命令表 |
 | [03 · 系统架构与接口手册](docs/03-architecture.md) | **怎么做（架构与端到端链路）** | 分层依赖边界、垂直应用服务、DsH Cordis 宿主与 LLM 桥接、客户端模块、`GET /state` 与 `/mutate` 动作手册、架构演进说明 |
 | [04 · 数据存储与工作流内核](docs/04-data-and-workflow.md) | **怎么做（数据与内核机制）** | SQLite 表结构与 ER 图、幂等命令账本、事件日志与 6 大持久化读模型冷恢复、运行状态机、预算守卫与生成账本 |
-| [05 · 开发、验收与运维指南](docs/05-development-and-ops.md) | **怎么做（工程实操与运维）** | 环境安装、双管线 TS 构建（`dist/server` + `dist/client`）、本地预览服务器、58 文件 / 417 项分层离线测试与浏览器/性能基准、打包与 `mtime` 刷新、SHA-256 备份恢复与故障排查 |
+| [05 · 开发、验收与运维指南](docs/05-development-and-ops.md) | **怎么做（工程实操与运维）** | 环境安装、双管线 TS 构建（`dist/server` + `dist/client`）、本地预览服务器、61 文件 / 453 项分层离线测试与浏览器/性能基准、打包与 `mtime` 刷新、SHA-256 备份恢复与故障排查 |
+| [V2.3 全量优化计划](docs/zhizhang_v2_3_full_optimization_plan.md) | **下一阶段路线图** | 123 条发现的完整证据、十个跨视角主题、P0–P3 路线图与作者决议记录 |
+| [V2.3 实现状态对照表](docs/zhizhang_v2_3_status.md) | **当前进度真源** | 123 条逐条状态（✅/⚠️/❌）、P0 退出标准达成情况、Batch 2 开发批次 |
+| [Schema 参考（自动生成）](docs/schema.md) | **数据层只读真源** | 由 `npm run docs:schema` 从 `sqlite_master` 生成的全部表、列、索引与触发器 |
 
 ### 一体化框架设计规范（文档先行）
 
@@ -84,33 +87,37 @@
 # 1. 安装 pinned 开发期编译器（不执行包生命周期脚本）
 npm ci --ignore-scripts
 
-# 2. 日常验证：后端与客户端只读类型检查 + 核心离线测试（32 文件 / 244 用例）
+# 2. 日常验证：后端与客户端只读类型检查 + 核心离线测试（35 文件 / 280 用例）
 npm run verify
 
-# 3. 分层专项离线回归（契约 147 / V2 全栈 97 / 宿主与灾备 16 / 客户端 6 / 架构 13）
+# 3. 分层专项离线回归（契约 147 / V2 全栈 97 / V2.3 基础 36 / 宿主与灾备 16 / 客户端 6 / 架构 13）
 npm run test:contracts
 npm run test:v2
+npm run test:v23
 npm run test:host
 npm run test:client
 npm run test:arch
 
-# 4. 历史规则取证夹具（173 用例）与全量离线测试（58 文件 / 417 用例）
+# 4. 历史规则取证夹具（173 用例）与全量离线测试（61 文件 / 453 用例）
 npm run test:evidence
 npm run test:all
 
-# 5. 构建服务端 ESM 与模块化浏览器客户端（输出至 dist/server/ 与 dist/client/）并刷新时间戳
+# 5. 从 sqlite_master 重新生成 Schema 参考文档（写入 docs/schema.md）
+npm run docs:schema
+
+# 6. 构建服务端 ESM 与模块化浏览器客户端（输出至 dist/server/ 与 dist/client/）并刷新时间戳
 npm run build
 npm run deploy:touch
 
-# 6. 启动本地零依赖预览工作台（需先执行 build，默认仅监听 127.0.0.1:3000/workbench）
+# 7. 启动本地零依赖预览工作台（需先执行 build，默认仅监听 127.0.0.1:3000/workbench）
 npm run dev
 
-# 7. 专项验证（模型回放 / 650 章性能基准 / Playwright 三旅程 + 4 视口浏览器验收）
+# 8. 专项验证（模型回放 / 650 章性能基准 / Playwright 三旅程 + 4 视口浏览器验收）
 npm run test:model
 npm run test:bench
 npm run test:browser
 
-# 8. 生成 DsH 可安装的本地 tgz 安装包
+# 9. 生成 DsH 可安装的本地 tgz 安装包
 npm pack --ignore-scripts
 ```
 
@@ -125,9 +132,9 @@ dsh-zhizhangv2/
 ├── tsconfig.json               # 后端只读类型检查配置（noEmit）
 ├── tsconfig.build.json         # 后端构建配置（输出 dist/server/）
 ├── tsconfig.client.json        # 浏览器端构建配置（输出 dist/client/）
-├── docs/                       # 项目文档体系（01-overview ~ 05-development-and-ops 与 framework/ 一体化框架设计）
+├── docs/                       # 文档体系：01-overview ~ 05-development-and-ops、framework/ 框架设计、zhizhang_v2_3_* 计划与状态、optimization/ 四份视角评审、schema.md 自动生成
 ├── src/
-│   ├── contracts/              # 冻结共享契约（错误信封、批准门、§2 命令表）与单一 DTO 真源 workspace-dto.ts
+│   ├── contracts/              # 冻结共享契约（错误信封、批准门、§2 命令表）、受保护常量 protected-rules.ts 与单一 DTO 真源 workspace-dto.ts
 │   ├── domain/
 │   │   ├── shared/             # 叙事锚点、章序比较与半开区间原语
 │   │   ├── fanqie/             # 番茄领域规则（三层级/设定冲突/4维历史召回/离线体检/拆书与技法推荐/审稿/定稿/重排影响）
@@ -140,5 +147,5 @@ dsh-zhizhangv2/
 │   └── bundle/                 # DsH Cordis 补丁声明与中英文元数据
 ├── scripts/                    # preflight、deploy、dev-server、browser-check、model-check、workspace-bench、workspace-data
 ├── support/                    # 共享离线测试底座（a01.mjs + v2-harness.mjs，独立于 test/ 以避免误计用例数）
-└── test/                       # 53 个分层离线自动化测试文件（d02/w02 契约合规 + ?01 规则取证 + *-v2 全栈/宿主/客户端/架构测试）
+└── test/                       # 61 个分层离线自动化测试文件（d02/w02 契约合规 + ?01 规则取证 + *-v2 全栈/宿主/客户端/架构 + *-v23 V2.3 基础）
 ```

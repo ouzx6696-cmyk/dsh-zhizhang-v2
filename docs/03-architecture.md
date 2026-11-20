@@ -137,7 +137,7 @@ flowchart TD
 
 ### 2. 执行业务动作：`POST /api/zhizhang/mutate`
 
-请求体为 `{ "action": "<动作名>", ...input }`，共支持 **32 个动作**（其中 31 个由 `author-workspace.ts` 同步执行，1 个由宿主插件异步托管）：
+请求体为 `{ "action": "<动作名>", ...input }`，V2.3 实测共支持 **74 个动作**：下表 32 个核心动作 + 本节末尾 42 个 V2.3 增补动作。除 `run.generate`、`proposal.generate` 由宿主插件异步托管（返回 `202`）外，其余均同步执行。
 
 | 分类 | `action` | 关键入参 | 执行特征与说明 |
 | --- | --- | --- | --- |
@@ -174,6 +174,22 @@ flowchart TD
 | | `run.history` | `documentId`, `before?` | 基于 `rowid` 游标分页拉取历史任务摘要（每页 25 条） |
 | | `candidate.adopt` | `documentId`, `baseRevisionId`, `runId`, `key` | 经 `command_journal`；校验候选基准修订一致后写入新工作修订并将任务迁至 `applied` |
 
+### 3. V2.3 增补动作（42 个）
+
+由两条产品线的处理器注册表（`fanqie.ts` 48 个 + `toutiao/` 模块）与工作区 `mutation` 分发共同提供，按域分组：
+
+| 域 | `action` |
+| --- | --- |
+| **卷幕树 (7)** | `tree.get`、`volume.create`、`volume.update`、`volume.delete`、`act.create`、`act.update`、`act.delete` |
+| **章节与上下文 (4)** | `chapter.move`、`chapter.summary.save`、`chapter.diagnose`、`context.preview` |
+| **设定·伏笔·观察 (7)** | `lore.list`、`lore.conflicts`、`foreshadow.list`、`foreshadow.upsert`、`observation.create`、`observation.list`、`observation.update` |
+| **提案与选段 (6)** | `proposal.create`、`proposal.decide`、`proposal.list`、`proposal.generate`、`proposal.cancel`、`selection.rewrite` |
+| **共享库与技能 (11)** | `library.mount`、`library.mounts`、`library.unmount`、`deconstruct.list`、`deconstruct.save`、`deconstruct.delete`、`technique.list`、`technique.save`、`technique.delete`、`technique.recommend`、`skill.import` |
+| **检索与工程包 (3)** | `workspace.search`、`project.export_bundle`、`project.import_bundle` |
+| **控制面与配置 (4)** | `controls.get`、`controls.save`、`slop.config.get`、`slop.config.save` |
+
+> **收口状态**：`contracts/workspace-dto.ts` 的 `ActionMap` 目前只声明 26 个动作，且包含 10 个尚未实现的占位（`project.bootstrap`、`chapter.read`、`chapter.creation_report`、`project.daily_stats`、`setting.revoke_known`、`foreshadow.create`、`foreshadow.patch`、`backup.create`、`backup.list`、`revisions.compact`）。FE-17 的目标是让 `ActionMap` 覆盖全部 74 个动作并删除占位，当前状态见 [V2.3 状态对照表](zhizhang_v2_3_status.md)。
+
 ---
 
 ## 六、一体化收口状态说明
@@ -183,3 +199,16 @@ flowchart TD
 1. **客户端与契约分叉已清零（M0–M1）**：已移除孤立残留的 `src/client/workbench.ts`、`src/client/app/*` 与分裂类型文件；所有前后端 DTO 统一收口于纯类型 [src/contracts/workspace-dto.ts](../src/contracts/workspace-dto.ts)，所有静态资产路径统一收口于 [src/client/manifest.ts](../src/client/manifest.ts)。
 2. **旧版 `2.0.0` 数据库实现平滑升级（M2）**：[src/storage/author-schema.ts](../src/storage/author-schema.ts) 已支持幂等检测并清理旧版同名 `author_article_reports` 索引，补齐缺失列并从 `event_log` 回填批准顺序与历史报告，并由 `test/workspace-v2.test.mjs` 回归锁定。
 3. **高并发锁升级与前后端解耦已收口（M2–M4）**：文件数据库统一启用 WAL 模式与 `busy_timeout = 5000`；`author-reads.ts` 已将只读快照查询与检查点写落盘分离；前后端双线分别通过 `ProductLineModule` 与 `ProductLineUiModule` 完全隔离。
+
+---
+
+## 七、V2.3 增量架构说明（Wave 1 已落地部分）
+
+本节只记录**已在代码中生效**的增量；未落地的宿主契约、身份边界与 worker 化见 [状态对照表](zhizhang_v2_3_status.md)。
+
+1. **受保护常量单点定义**：[src/contracts/protected-rules.ts](../src/contracts/protected-rules.ts) 是 `34 / 84 / 2 / 2 / 交稿尾句 / 状态词表` 的唯一来源，纯 `as const`、浏览器安全、零导入；`domain/fanqie/editorial.ts` 与 `domain/toutiao/rules.ts` 原值转出，数值不变。前端 `client/plugins/toutiao.ts` 仍有一处本地 `34`，属 FE-16 待收口项。
+2. **数据层**：读模型改为**每个项目一个 `ProjectionStore`** 共享一遍折叠（`author-reads.ts`）；FTS 改为两段式（先取 rowid 排序 `LIMIT`，仅对前 K 条取 snippet），1–2 字中文查询走 `author_chapter_entities` 倒排；语句缓存 LRU 上限 256；`PRAGMA busy_timeout` 前置于 WAL 切换，Windows 关闭 `mmap`。
+3. **运维**：`createHotBackup` 使用 `node:sqlite` 的 `backup()`（回退 `VACUUM INTO`），保留策略 `planRetention` + `pruneBackups` 已实现并测试；`command_journal` 增加 `request_hash` 与 `pruneCommandJournal`（**尚未接入宿主定时调用**，属 DB-02 待办）。
+4. **用量口径**：`workflow/budget.ts` 的 `normalizeUsage` 把回执规范为四类互斥（未命中输入 / 缓存命中 / 缓存写入 / 输出），写作预算已改用。
+5. **前端**：Diff 改为句级切分 + Myers，并保留空行 spacer 归属与行尾风格还原；选段微改写新增捕获校验（切章拒绝、唯一匹配重定位）与 AI 撤销栈；虚拟列表行高改由 `--vrow-h` 驱动并用 `ResizeObserver` 重算；三套主题补齐 diff/success/warning token。
+6. **仍属自拟契约的部分**：`plugin.ts` 直接调用宿主 API，尚无 `dsh-adapter.ts` 收口；工具未声明 `output{schema,render}`；无 Actor/Peer 透传。这三项是 DSH-01/02/04/14 的内容，**不能据本文档推断已在真实 DsH 上验证**。

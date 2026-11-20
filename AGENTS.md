@@ -34,6 +34,8 @@ Do not freeze public APIs, business states, title rules, scenario mappings, budg
 
 The author-protected v1.x business semantics are the Toutiao title cap `34`, the QA pass line `84`, at most two editorial rejections, at most two automatic QA refinement rounds, the fixed delivery ending, and both product lines' status word tables and transition constraints. V2 keeps the semantics and rebuilds the implementation; none of these may be changed, widened, narrowed or re-derived without explicit author authorization. Recorded v1.x divergences (for example the micro title applicability) are evidence for the author, never a licence to pick a side.
 
+**Single definition site**: these constants live only in `src/contracts/protected-rules.ts` (pure `as const`, browser-safe, zero imports). Domain and client modules import or re-export them unchanged; no other file may restate the values. Consolidating a value into that module is not a semantic change, but altering a value there is — it needs explicit author authorization and a guard test asserting the original number.
+
 ## Records that live outside this repository
 
 The contract draft, the freeze checklist and the task tracker live in the original workspace under its locally ignored `plans/v2.0/`. This repository holds only code and test-only samples; do not copy the plan here and do not treat it as a public dependency. When a count, status or fixture reference changes here, update the plan records in the same round.

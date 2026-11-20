@@ -2,6 +2,8 @@
 
 本文档逐条梳理受保护的业务规则、双产品线状态机及共享冻结契约。所有数值、词表和流转规则均直接对应 `src/contracts/` 与 `src/domain/` 源码；**未经作者显式授权，不得擅自放宽、收窄或重定义其中任何受保护语义**。
 
+> **常量唯一定义位置**：`34` / `84` / `2` / `2` / 交稿尾句与两条线状态词表统一位于 [src/contracts/protected-rules.ts](../src/contracts/protected-rules.ts)（纯 `as const`、浏览器安全、零导入）。`domain/fanqie/editorial.ts` 与 `domain/toutiao/rules.ts` 只做原值转出；本文出现的数字用于解释规则，不得在代码中另处复述。V2.3 起段落口径统一为"非空行算一段"（`splitChapterParagraphs`），设定合并统一走 `mergeFactVersion`。
+
 ---
 
 ## 一、番茄连载领域规则

@@ -13,23 +13,30 @@
   - `openStore(path)` 严格校验正则 `/^zhizhang\/2\.\d+$/`（仅接受 `zhizhang/2.x` 主版本窗口）；
   - 缺少 `meta` 行、字节损坏、或属于 v1.x / 3.x 的库**绝不尝试迁移或半吊子提供服务**，立即关闭已打开句柄并抛出 `StorageError("storage.format_unsupported")`。
 
-### 2. 全量 23 张表分组清查
+### 2. 全量 40 张表分组清查
 
-| 分组 | 源码文件 | 表名（共 23 张） | 核心职责与关键约束 |
-| --- | --- | --- | --- |
-| **元数据 (1)** | [store.ts](../src/storage/store.ts) | `meta` | 存储 `schema` 版本键（`zhizhang/2.0`） |
-| **命令与修订 (5)** | [command.ts](../src/storage/command.ts) | `documents`, `revisions`, `candidates`, `author_decisions`, `command_journal` | 文档当前修订指针、只增修订历史、绑定基准的候选稿、采纳决策审计、`PRIMARY KEY(actor_id, command_id, document_id, request_key)` 幂等账本 |
-| **事件日志 (1)** | [eventlog.ts](../src/storage/eventlog.ts) | `event_log` | `PRIMARY KEY(project_id, seq)` + `UNIQUE(project_id, event_id)` 唯一性幂等索引 |
-| **通用投影 (1)** | [projection.ts](../src/storage/projection.ts) | `projection_rows` | `ProjectionStore.saveCheckpoint()` 的标准持久化表（按 `project_id, key` 存储，主要供基础存储层使用） |
-| **交稿导出 (1)** | [export.ts](../src/storage/export.ts) | `deliveries` | 每篇文章仅一行（`article_id PRIMARY KEY`），记录获批修订、`export_state`（`pending`/`exported`/`failed`）、SHA-256 `export_hash`、错误对象与重试次数 |
-| **作者工作台业务 (12)** | [author-schema.ts](../src/storage/author-schema.ts) | `author_projects`, `author_documents`, `author_runs`, `author_planning`, `author_run_refinement_claims`, `author_candidate_qa`, `author_article_reports`, `author_evidence`, `author_approvals`, `author_chapter_order`, `author_settings`, `author_read_checkpoints` | 双线项目与文档属性、任务与冻结输入/`late_usage_settled`、跨重启回改计数、候选 QA、文章质检/退回报告索引、正文证据锚点表、修订批准记录、章序数组、带 `decided_seq` 的设定提案表、以及按复合缓存键存储的持久化只读模型检查点 |
-| **生成调用账本 (2)** | [author-generation.ts](../src/storage/author-generation.ts) | `author_generation_attempts`, `author_generation_calls` | 记录每次生成尝试状态（`prepared`/`inflight`/`received`/`completed`/`failed`/`uncertain`/`reconciled`）与每次子阶段 LLM 调用的预留及 4 元组令牌回执 |
+> 列、索引、触发器的逐项权威清单由 `npm run docs:schema` 从 `sqlite_master` 生成到 [schema.md](schema.md)，本节只维护分组与职责。FTS5 自动创建的 `fts_*_data/_idx/_content/_docsize/_config` 影子表不计入。
+
+| 分组 | 源码文件 | 张数 | 表名 |
+| --- | --- | :---: | --- |
+| **元数据** | [store.ts](../src/storage/store.ts) | 1 | `meta`（`schema` 版本键、`db_uuid` 实例标识） |
+| **命令与修订** | [command.ts](../src/storage/command.ts) | 5 | `documents`, `revisions`, `candidates`, `author_decisions`, `command_journal`（`PRIMARY KEY(actor_id, command_id, document_id, request_key)` 幂等账本 + `request_hash` 轻量审计） |
+| **事件日志** | [eventlog.ts](../src/storage/eventlog.ts) | 2 | `event_log`（`PRIMARY KEY(project_id, seq)` + `UNIQUE(project_id, event_id)`）、`event_log_quarantine`（无法推断 concern 的隔离事件） |
+| **通用投影** | [projection.ts](../src/storage/projection.ts) | 1 | `projection_rows`（按 `project_id, key` 存检查点，V2.3 起由每项目 `ProjectionStore` 共享折叠） |
+| **交稿导出** | [export.ts](../src/storage/export.ts) | 1 | `deliveries`（`article_id PRIMARY KEY`、`export_state`、SHA-256 `export_hash`、错误对象与重试次数） |
+| **作者工作台主体** | [author-schema.ts](../src/storage/author-schema.ts) | 24 | `author_projects`, `author_documents`, `author_volumes`, `author_acts`, `author_chapter_order`, `author_planning`, `author_runs`, `author_run_refinement_claims`, `author_candidate_qa`, `author_article_reports`, `author_evidence`, `author_approvals`, `author_settings`, `author_ai_proposals`, `author_foreshadows`, `author_lore_current`, `author_chapter_memory_sync`, `author_chapter_entities`, `author_chapter_observations`, `author_library_mounts`, `author_micro_calls`, `author_project_controls`, `author_project_slop_config`, `author_read_checkpoints` |
+| **共享库** | [author-schema.ts](../src/storage/author-schema.ts) | 2 | `library_deconstructions`, `library_technique_cards` |
+| **生成调用账本** | [author-generation.ts](../src/storage/author-generation.ts) | 2 | `author_generation_attempts`（`prepared`/`inflight`/`received`/`completed`/`failed`/`uncertain`/`reconciled`）、`author_generation_calls`（预留与四元组回执） |
+| **FTS 行号映射** | [fts.ts](../src/storage/fts.ts) | 1 | `fts_rowid_map`（外部内容表 rowid ↔ 业务 id） |
+| **迁移记录** | [migrations.ts](../src/storage/migrations.ts) | 1 | `schema_migrations`（原子版本迁移台账） |
 
 关键查询索引（`author-schema.ts`）：
 - `author_settings_approved_order`：局部索引 `(project_id, decided_seq) WHERE decision = 'approved'`，加速人物知情视图查询与逆序批准裁决；
 - `author_reports_by_revision`：`(project_id, revision_id, id DESC)`，快速获取当前修订最新质检/退回报告；
 - `author_evidence_by_fact`：`(project_id, fact_id)`，支撑按设定编号检索正文证据；
-- `author_documents_by_project`、`author_runs_by_document`、`author_generation_by_run`、`author_calls_by_attempt`。
+- `ux_proposal_inflight`：`(kind, COALESCE(document_id, project_id, 'global')) WHERE status='inflight'`，AI 提案的数据库级互斥；
+- `author_documents_by_project`、`author_runs_by_document`、`author_generation_by_run`、`author_calls_by_attempt`；
+- V2.3 热点：`revisions_by_document_created`、`candidates_by_document`、`author_generation_attempts_open`、`author_ai_proposals_by_doc`、`author_runs_by_doc_state`、`author_settings_by_project_fact`、`author_foreshadows_by_target`、`author_chapter_entities_by_name`、`author_read_checkpoints_lru`。
 
 ### 3. 核心实体关系图（ER）
 
@@ -57,11 +64,24 @@ erDiagram
 
 ### 4. V2.2 新增 Schema 演进表（`schema_migrations` 原子版本迁移）
 
-除核心 23 张基线表外，[author-schema.ts](../src/storage/author-schema.ts) 与 [fts.ts](../src/storage/fts.ts) 在 V2.2 原子追加：
+除基线表外，[author-schema.ts](../src/storage/author-schema.ts) 与 [fts.ts](../src/storage/fts.ts) 在 V2.2 原子追加：
 - **FTS5 External Content 与行号映射**：`fts_rowid_map` + `v_fts_chapters` / `v_fts_lore` / `v_fts_library` + `fts_chapters` / `fts_lore` / `fts_library`（支持 BM25 + RRF 多 Scope 防饿死排序）；
 - **连贯性记忆闭环**：`author_chapter_memory_sync`（SHA-256 变更感知）与 `author_chapter_entities`（零 Token 实体出现倒排）；
 - **技能、诊断与观察审稿**：`library_technique_cards` 扩展 `asset_kind`/`stage_bindings_json`/`references_json`、`author_project_slop_config` 与 `author_chapter_observations`；
 - **控制面与滚动规划**：`author_project_controls`（`author_intent` / `current_focus`）及 `author_acts` 扩展 `arc_goal`/`arc_summary`/`pacing_template`、`author_runs` 扩展 `context_trace`/`recovery_hints`。
+
+### 5. V2.3 新增 Schema 演进（6 个原子迁移）
+
+| 迁移 ID | 变更 |
+| --- | --- |
+| `2.3.0-proposals-micro-generation-origin` | `author_ai_proposals` 增 `base_revision_id`、`source_sha256`、`origin`、`origin_ref`、`error_detail`；`author_settings` 增 `origin`；`author_read_checkpoints` 增 `last_used_at`；新建 `author_micro_calls`（微改写独立账本）与 `ux_proposal_inflight` 部分唯一索引 |
+| `2.3.0-document-sort-key-and-backfill` | `author_documents` 增 `sort_key REAL`（同级分数索引），并按既有章序回填 |
+| `2.3.0-controls-foreshadows-observations-memory` | `author_project_controls` 增 `pacing_tier`、`genre_tags_json`、`agent_tools_enabled`、`daily_target`、`stale_foreshadow_gap`、`token_calibration_json`；`author_foreshadows` 增 `hinted_chapter_ids_json`；`author_chapter_observations` 增 `verified`；`author_chapter_memory_sync` 增 `synced_revision_id` |
+| `2.3.0-event-log-timestamps-and-quarantine` | `event_log` 补时间戳列；新建 `event_log_quarantine` |
+| `2.3.0-hot-indexes` | 9 个热点索引（修订按文档+时间、候选按文档、未结生成尝试、提案按文档、运行按文档+状态、设定按项目+事实、伏笔按回收章、实体按名称、检查点 LRU） |
+| `2.3.0-meta-version-and-uuid` | `meta` 增 `db_uuid`（连接级缓存键），`schema` 版本与 `PRAGMA user_version` 对齐 |
+
+> 迁移仍按版本号命名（DB-09 的命名空间拆分尚未实施）；新表尚未统一使用 `STRICT` 与完整 `CHECK`（DB-10 待办）。
 
 ---
 
