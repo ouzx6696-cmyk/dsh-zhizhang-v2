@@ -9,22 +9,37 @@ export interface EditorBase {
   readonly body: string;
 }
 
+export interface DraftVaultOptions {
+  readonly now?: () => number;
+  readonly maxAgeMs?: number;
+}
+
 interface StoredDraft extends DraftEntry {
   readonly owner?: string;
+  readonly savedAt?: number;
 }
 
 const MAX_VAULT_CACHE = 256;
+const DRAFT_KEY_PREFIX = "zhizhang:draft:";
+
+/** Retention window (30 days) before stale orphaned local drafts are pruned on init. */
+export const DRAFT_VAULT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
  * Manages browser-local unsaved draft persistence (`sessionStorage` + owner-scoped
  * `localStorage`) so slow saves, page reloads, and multi-tab edits never lose text.
  */
-export function createDraftVault(onStorageWarning: (message: string) => void) {
+export function createDraftVault(
+  onStorageWarning: (message: string) => void,
+  options?: DraftVaultOptions,
+) {
   const cache = new Map<string, DraftEntry | null>();
   const owner = Array.from(crypto.getRandomValues(new Uint32Array(2))).join("-");
+  const now = options?.now ?? (() => Date.now());
+  const defaultMaxAgeMs = options?.maxAgeMs ?? DRAFT_VAULT_TTL_MS;
   let storageUnavailable = false;
 
-  const keyFor = (id: string) => `zhizhang:draft:${id}`;
+  const keyFor = (id: string) => `${DRAFT_KEY_PREFIX}${id}`;
 
   function cacheSet(id: string, entry: DraftEntry | null): void {
     cache.delete(id);
@@ -33,6 +48,60 @@ export function createDraftVault(onStorageWarning: (message: string) => void) {
       cache.delete(cache.keys().next().value!);
     }
   }
+
+  function pruneStale(maxAgeMs = defaultMaxAgeMs): number {
+    let pruned = 0;
+    const cutoff = now() - maxAgeMs;
+    const pruneFrom = (store: Storage | undefined, clearSessionMirror: boolean) => {
+      if (!store) return;
+      const keys: string[] = [];
+      try {
+        for (let i = 0; i < store.length; i++) {
+          const key = store.key(i);
+          if (key && key.startsWith(DRAFT_KEY_PREFIX)) keys.push(key);
+        }
+      } catch {
+        return;
+      }
+      for (const key of keys) {
+        try {
+          const raw = store.getItem(key);
+          if (!raw) continue;
+          const parsed = JSON.parse(raw) as StoredDraft | null;
+          if (typeof parsed?.savedAt === "number" && Number.isFinite(parsed.savedAt) && parsed.savedAt < cutoff) {
+            store.removeItem(key);
+            const id = key.slice(DRAFT_KEY_PREFIX.length);
+            cache.delete(id);
+            if (clearSessionMirror) {
+              try {
+                const tabRaw = sessionStorage.getItem(key);
+                if (tabRaw) {
+                  const tabParsed = JSON.parse(tabRaw) as StoredDraft | null;
+                  if (typeof tabParsed?.savedAt === "number" && tabParsed.savedAt < cutoff) {
+                    sessionStorage.removeItem(key);
+                  }
+                }
+              } catch {
+                // Ignore private-mode sessionStorage errors.
+              }
+            }
+            pruned++;
+          }
+        } catch {
+          // Skip unreadable or malformed entries without aborting init.
+        }
+      }
+    };
+
+    try {
+      if (typeof localStorage !== "undefined") pruneFrom(localStorage, typeof sessionStorage !== "undefined");
+    } catch {
+      // Ignore storage access errors on init.
+    }
+    return pruned;
+  }
+
+  pruneStale();
 
   function read(id: string): DraftEntry | null {
     if (cache.has(id)) return cache.get(id) ?? null;
@@ -62,10 +131,11 @@ export function createDraftVault(onStorageWarning: (message: string) => void) {
     }
     cacheSet(id, draft);
     const key = keyFor(id);
+    const savedAt = now();
     let stored = false;
     try {
       if (draft) {
-        sessionStorage.setItem(key, JSON.stringify(draft));
+        sessionStorage.setItem(key, JSON.stringify({ ...draft, savedAt }));
       } else {
         sessionStorage.removeItem(key);
       }
@@ -75,7 +145,7 @@ export function createDraftVault(onStorageWarning: (message: string) => void) {
     }
     try {
       if (draft) {
-        localStorage.setItem(key, JSON.stringify({ ...draft, owner }));
+        localStorage.setItem(key, JSON.stringify({ ...draft, owner, savedAt }));
       } else {
         const backup = JSON.parse(localStorage.getItem(key) ?? "null") as StoredDraft | null;
         if (
@@ -113,7 +183,7 @@ export function createDraftVault(onStorageWarning: (message: string) => void) {
     return storageUnavailable;
   }
 
-  return { read, write, capture, isDirty, isUnavailable };
+  return { read, write, capture, isDirty, isUnavailable, pruneStale };
 }
 
 export type DraftVault = ReturnType<typeof createDraftVault>;

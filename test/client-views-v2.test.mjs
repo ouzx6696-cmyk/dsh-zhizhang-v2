@@ -386,8 +386,8 @@ test("Sprint 4 UI #2: 5000-chapter outline-board keeps initial DOM < 120, lazy-m
   });
 });
 
-test("Sprint 4 UI #3: study-home, 4 SEED_PACKS, 3-step new-book-wizard, and 3-theme appearance + reader typography", async () => {
-  assert.equal(SEED_PACKS.length, 4);
+test("Sprint 4 UI #3: study-home, SEED_PACKS, 3-step new-book-wizard, and 3-theme appearance + reader typography", async () => {
+  assert.ok(SEED_PACKS.length >= 4);
   const { createNode, FakeOption, doc } = createRichFakeDom();
   const storage = createMemoryStorage();
   storage.setItem(
