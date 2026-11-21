@@ -42,7 +42,7 @@ test("createSingleShotCaller orders multi-index blocks, honors text block-end, e
         { type: "text-delta", index: 1, text: "stale-second" },
         { type: "text-delta", index: 0, text: "第一" },
         { type: "text-delta", index: 0, text: "段落" },
-        { type: "block-end", index: 0, block: { type: "thinking", text: "should-be-ignored" } },
+        { type: "block-end", index: 0, block: { type: "text" } },
         { type: "block-end", index: 1, block: { type: "text", text: "第二段落" } },
         { type: "usage", usage: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 20, cacheWriteTokens: 10 } },
         { type: "finish", reason: { kind: "stop" } },
@@ -72,6 +72,62 @@ test("createSingleShotCaller orders multi-index blocks, honors text block-end, e
   assert.equal(ledger.entries.length, 1);
   assert.equal(ledger.entries[0].phase, "write");
   assert.deepEqual(ledger.entries[0].usage, [100, 50, 20, 10]);
+});
+
+test("DSH-03: thinking block deltas are dropped from the candidate body after block-end declares the type", async () => {
+  const llm = createScriptedLlm([
+    {
+      chunks: [
+        { type: "text-delta", index: 0, text: "先想一下" },
+        { type: "text-delta", index: 0, text: "，整段都是思维链" },
+        { type: "block-end", index: 0, block: { type: "thinking", text: "先想一下，整段都是思维链" } },
+        { type: "text-delta", index: 1, text: "正文第一段" },
+        { type: "block-end", index: 1, block: { type: "text" } },
+        { type: "text-delta", index: 2, text: "正文第二段" },
+        { type: "usage", usage: { inputTokens: 40, outputTokens: 20 } },
+        { type: "finish", reason: { kind: "stop" } },
+      ],
+    },
+  ]);
+  const caller = createSingleShotCaller(
+    llm,
+    { provider: "fixture", model: "test-model", reserved: 10_000 },
+    new AbortController().signal,
+    createReceiptLedger(),
+  );
+
+  const output = await caller.complete({ phase: "write", system: "SYS", prompt: "USR", maxOutputTokens: 2000 });
+  assert.equal(output, "正文第一段\n正文第二段");
+  assert.equal(output.includes("思维链"), false, "chain of thought must never be presented as candidate text");
+});
+
+test("DSH-03: a run whose entire output was thinking reports thinking_exhausted instead of leaking the chain of thought", async () => {
+  const llm = createScriptedLlm([
+    {
+      chunks: [
+        { type: "text-delta", index: 0, text: "很长很长的思考过程" },
+        { type: "block-end", index: 0, block: { type: "thinking" } },
+        { type: "usage", usage: { inputTokens: 100, outputTokens: 500 } },
+        { type: "finish", reason: { kind: "length" } },
+      ],
+    },
+  ]);
+  const caller = createSingleShotCaller(
+    llm,
+    { provider: "fixture", model: "test-model", reserved: 4000 },
+    new AbortController().signal,
+    createReceiptLedger(),
+  );
+
+  await assert.rejects(
+    caller.complete({ phase: "write", system: "SYS", prompt: "USR" }),
+    (error) => {
+      assert.equal(error.code, "stage.output_invalid");
+      assert.equal(error.details.missing, "complete-text");
+      assert.equal(error.recoveryKind, "thinking_exhausted");
+      return true;
+    },
+  );
 });
 
 test("single-shot caller enforces input reservation, actual usage budget, and MAX_CANDIDATE_LENGTH caps", async () => {

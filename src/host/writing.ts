@@ -163,6 +163,10 @@ export function createSingleShotCaller(
 
       const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(180_000)]);
       const blocks = new Map<number, string>();
+      // Upstream streams declare a block's real type only at `block-end`, which
+      // arrives after all of that block's deltas. Thinking deltas therefore have
+      // to be tracked per index and dropped retroactively (DSH-03).
+      const blockTypes = new Map<number, string>();
       let usage: LlmUsage | undefined;
       let completed = false;
       let finishReasonKind: string | null = null;
@@ -188,13 +192,21 @@ export function createSingleShotCaller(
           if (disableThinking === true) streamOptions.thinking = false;
           for await (const chunk of call.stream(streamOptions)) {
             if (chunk.type === "text-delta") {
+              const declaredType = blockTypes.get(chunk.index);
+              if (declaredType !== undefined && declaredType !== "text") {
+                // Late deltas for a block already declared as thinking/tool.
+                continue;
+              }
               length += chunk.text.length;
               if (length > MAX_CANDIDATE_LENGTH) throw new Error("Candidate too long");
               blocks.set(chunk.index, (blocks.get(chunk.index) ?? "") + chunk.text);
             }
             if (chunk.type === "block-end") {
-              if (chunk.block.type === "thinking") sawThinkingBlock = true;
-              if (chunk.block.type === "text" && typeof chunk.block.text === "string") {
+              blockTypes.set(chunk.index, chunk.block.type);
+              if (chunk.block.type === "thinking") {
+                sawThinkingBlock = true;
+                blocks.delete(chunk.index);
+              } else if (chunk.block.type === "text" && typeof chunk.block.text === "string") {
                 blocks.set(chunk.index, chunk.block.text);
               }
             }
@@ -229,6 +241,11 @@ export function createSingleShotCaller(
         throw new ContractError("usage.uncertain", { reason: "missing-token-usage" });
       }
       const body = [...blocks.entries()]
+        .filter(([index]) => {
+          const declaredType = blockTypes.get(index);
+          // Only text blocks, or blocks the stream never typed (truncated tail).
+          return declaredType === undefined || declaredType === "text";
+        })
         .sort(([a], [b]) => a - b)
         .map(([, value]) => value)
         .join("\n");
