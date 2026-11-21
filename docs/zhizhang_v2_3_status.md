@@ -2,7 +2,7 @@
 
 > **本表是什么**：`docs/zhizhang_v2_3_full_optimization_plan.md` 中 123 条发现的**代码核对结果**。只记录"代码里到底有没有"，不含排期、人力与决策；排期与决议仍以计划正文为准。
 >
-> **核对基线**：2026-11-21 · HEAD `25ce2f3`（B2-4 收尾后，P0 清零） · `npm run check` 通过 · `npm test` = 44 文件 / 325 用例 · `npm run test:v23` = 12 文件 / 78 用例 · `npm run test:all` = 70 文件 / 498 用例（需 Node ≥ 24.15 全绿；Node 22 实测 497 执行 / 496 通过，`workflow-w01` 的 `using` 语法失败） · 源码 125 文件 / 31,154 行 TS（含注释与空行） · Schema 40 表 / 40 索引 / 14 触发器（见 [schema.md](schema.md)）
+> **核对基线**：2026-11-21 · 代码 HEAD `7379354`（B2-5 复核补丁后，另有文档提交） · `npm run check` 通过 · `npm test` = 44 文件 / 335 用例 · `npm run test:v23` = 12 文件 / 87 用例 · `npm run test:all` = 70 文件 / 508 用例（需 Node ≥ 24.15 全绿；Node 22 实测 507 执行 / 506 通过，`workflow-w01` 的 `using` 语法失败） · 源码 126 文件 / 31,324 行 TS（含注释与空行） · Schema 40 表 / 40 索引 / 14 触发器（见 [schema.md](schema.md)）
 >
 > **状态定义**
 > - ✅ **已落地**：实现 + 测试，且真实调用链走通，可验收。
@@ -21,7 +21,7 @@
 | 番茄小说工作线（FQ） | 10 | 7 | 17 | 34 |
 | **合计** | **43** | **23** | **57** | **123** |
 
-**结论**：数据库底座完成度最高（63%）；宿主层已有 5/28 落地（工具契约、可选服务、thinking 过滤、排空、微改写账本），身份边界与 worker 化仍未动；**P0 已清零（24/24）**，后续重心转入 P1（身份边界、同步模型、读写热点）。
+**结论**：数据库底座完成度最高（63%）；宿主层已有 5/28 落地（工具契约、可选服务、thinking 过滤、排空、微改写账本），身份边界与 worker 化仍未动；**P0 24/24 经 B2-5 独立复核补丁后维持**，但复核发现的原缺陷与仍未解决的限制见 [§9](#9-b25--p0-清零复核补丁2026-11-21)。后续重心转入 P1 前应先处理 §9.2 的决议 #3 / #5。
 
 ---
 
@@ -32,13 +32,13 @@
 | FE-01 | ✅ | `resolveCapturedSelection`：切章拒绝、唯一匹配重定位、0/多命中拒绝 |
 | FE-02 | ✅ | `execCommand("insertText")` 优先 + 10 步 AI 撤销栈 |
 | FE-06 | ✅ | `--vrow-h` CSS 变量 + `ResizeObserver` 重算行高 |
-| FE-07 | ✅ | `apiRequest` 按动作设超时（读 15s / 写 30s / 导入导出 120s），超时提示保留本地草稿；幂等键经评估对非幂等 `draft.save` 无效，未引入 |
+| FE-07 | ✅ | 读 15s / 写 30s / 长耗时 120s（`selection.rewrite`、`backup.create`、`article.deliver` 等）；超时提示保留本地草稿；幂等键经评估对非幂等 `draft.save` 无效，未引入 |
 | FE-12 | ✅ | raw 模式保留已勾选 hunk，部分勾选显示 banner |
 | FE-27 | ✅ | 键盘处理器在 `event.isComposing` 或编辑器组字期间直接返回，输入法选词时不会触发 Ctrl+S |
 | DSH-01 | ✅ | 10 个工具全部声明 `output{schema,render}` 与 `additionalProperties:false`，`dsh-tools-adapter` 注册前自检、失败整体回滚 |
 | DSH-02 | ✅ | 可选服务走 `ctx.get`；有 `ctx.inject` 时工具与设置表单各挂独立子作用域，注册失败只记日志 |
-| DSH-03 | ✅ | `block-end` 按块类型回删 thinking 增量，正文不再混入思维链，长度上限只计可见文本 |
-| DSH-08 | ✅ | `accepting`/`dbOpen` 双状态门：排空期继续写回执与收尾，上限 15 秒；微改写也登记进 inFlight |
+| DSH-03 | ✅ | `block-end` 按块类型回删 thinking 增量；严格长度上限移到最终可见 `body`，长思维链不再占满配额 |
+| DSH-08 | ✅ | `accepting`/`dbOpen` 双状态门；15 秒预算耗尽后强制二次 abort 并记日志，但仍等所有 task settle 才关库，迟到回执不丢 |
 | DSH-10 | ✅ | 新增 `micro-service`：inflight 行即文档级锁、四类用量落库、卸载中止并对账；运行检查器显示累计微改写 |
 | DB-01 | ✅ | `normalizeUsage` 四类互斥，`writing-budget` 已改用 |
 | DB-02 | ✅ | 宿主启动即修剪一次，此后每 6 小时一次；失败只记日志，不阻塞工作台 |
@@ -48,11 +48,11 @@
 | DB-21 | ✅ | `schema-doc.mjs` 生成确定性 schema 文档 + 测试 |
 | FQ-01 | ✅ | `commitFactBatch`、`knownFromUpdates`、`setting.decide` 均走 `mergeFactVersion`（`ed83ef9`） |
 | FQ-02 | ✅ | 证据、增量同步、诊断统一走 `pointAtOffset`；回填脚本 `migrate:evidence-point`（`07df82d`） |
-| FQ-03 | ✅ | 生成时写 `base_revision_id` + 全文 `source_sha256`；决策前校验，漂移返回 `proposal-stale` 并保持 pending/dirty（`854ccbf`） |
-| FQ-06 | ✅ | 库条目按 id 写入前校验 scope/project 一致；伏笔 upsert 跨项目拒绝；`decideProposal` 固定 `row.projectId` 并剥离 payload 保留字段 |
-| FQ-07 | ✅ | 章节绑定提案在创建、生成、决策三处强制 `documentId`，移除 `chapterOrder` 回落 |
+| FQ-03 | ✅ | 生成时写 `base_revision_id` + 全文 `source_sha256`；unpinned 行用 body hash 兜底，未验证的提交保持 dirty（`854ccbf` / B2-5） |
+| FQ-06 | ✅ | 库条目写入与删除均校验 scope/project；伏笔跨项目拒绝；`decideProposal` 固定 `row.projectId` 并剥离含 `overrideOfId` 的保留字段 |
+| FQ-07 | ✅ | 章节绑定提案创建/生成/决策强制 `documentId`；决策目标固定 `row.documentId`；历史空文档行可在决策时补绑 |
 | FQ-08 | ✅ | 补 `foreshadow.create/patch`，应用层统一调 `assertForeshadowTransition`；回收不再清空 `targetChapterId`/`plantedPoint`（`bd0763c`） |
-| FQ-10 | ✅ | 服务端生成 `fq-<uuid>` 并 remap 同载荷引用；`updates` 已消费且未知 id 明确拒绝；`retiredFacts` 上报 `unapplied`（`9567d00`） |
+| FQ-10 | ✅ | 服务端生成 `fq-<uuid>` 并 remap 同载荷引用；规范化已幂等且覆盖手工提案与 `editedPayload`；`retiredFacts` 上报 `unapplied` |
 
 **P0 退出标准达成情况**：跨模块 point 一致性、第 3 章知情第 10 章更新仍可见、跨项目 id 攻击被拒、严格 registrar 下 10 工具注册成功 —— **4/4 全部可验收**（B2-4 补齐跨项目写入拦截）。P0 至此清零。
 
@@ -68,7 +68,7 @@
 | FE-04 | P1 | ❌ | `apiRequest` 已支持 `ifSequence`；后端无 `treeSeq`/`unchanged`，仍每次 `tree.get` |
 | FE-05 | P1 | ❌ | 大纲板/设定库无本地草稿，重绘覆盖正在输入的内容 |
 | FE-06 | P0 | ✅ | 虚拟列表行高变量化 + `ResizeObserver` |
-| FE-07 | P0 | ✅ | 读 15s / 写 30s / IO 120s；超时文案提示本地稿已保留 |
+| FE-07 | P0 | ✅ | 读 15s / 写 30s / 长耗时 120s；超时文案提示本地稿已保留（幂等键残余风险见 §9.2） |
 | FE-08 | P1 | ❌ | 导入仍单请求，无 `importId/part/commit` 分批协议 |
 | FE-09 | P1 | ❌ | 无 `project.bootstrap` 实现，向导仍多请求 |
 | FE-10 | P2 | ✅ | 三主题补齐 diff/success/warning 等 29 处 token |
@@ -105,12 +105,12 @@
 | --- | --- | --- | --- |
 | DSH-01 | P0 | ✅ | `dsh-tools-adapter` 统一补 `output{schema,render}`；严格 registrar 下 10 工具注册成功，任一失败整体回滚 |
 | DSH-02 | P0 | ✅ | `ctx.get('tools'/'configForms')` 解析 + 独立 `ctx.inject` 子作用域；无 `inject` 的旧宿主走属性回退 |
-| DSH-03 | P0 | ✅ | `blockTypes` 记录块类型，thinking 块 `block-end` 时删除该 index；候选正文与长度上限只含可见文本 |
+| DSH-03 | P0 | ✅ | `blockTypes` 记录块类型；严格 `MAX_CANDIDATE_LENGTH` 校验放在拼好的可见正文上 |
 | DSH-04 | P1 | ❌ | 无 Peer/Actor，`command_journal` 无 `actor_id` |
 | DSH-05 | P1 | ❌ | 只读工具无动作白名单，无 `chapter.read` 精简 DTO |
 | DSH-06 | P1 | ⚠️ | `origin`/`origin_ref` 列已建；应用层不写 |
 | DSH-07 | P2 | ❌ | 导入/导出/FTS 重建/热备仍同步执行，无 `worker_threads` |
-| DSH-08 | P0 | ✅ | `accepting` 拒新请求、`dbOpen` 保账本；排空 15 秒内回执与结果照常落库 |
+| DSH-08 | P0 | ✅ | `accepting` 拒新请求；15 秒预算耗尽后不提前关库，等迟到的回执写完才 `db.close()` |
 | DSH-09 | P2 | ❌ | 模型默认值未贯通到运行表单 |
 | DSH-10 | P0 | ✅ | `author_micro_calls` 接入写路径：inflight 唯一索引即锁，completed/failed/uncertain 三态收尾 |
 | DSH-11 | P2 | ⚠️ | 已有 `AbortSignal.timeout(180_000)`；无上游超时/重试口径收敛 |
@@ -174,14 +174,14 @@
 | --- | --- | --- | --- |
 | FQ-01 | P0 | ✅ | `commitFactBatch`、`knownFromUpdates` 与 `setting.decide` 均走 `mergeFactVersion`；第 3 章知情、第 10 章更新后第 5 章仍可见 |
 | FQ-02 | P0 | ✅ | 证据、增量同步、诊断统一走 `splitChapterParagraphs`/`pointAtOffset`；回填脚本先出报告再热备执行 |
-| FQ-03 | P0 | ✅ | 生成时写 `base_revision_id` + 全文 `source_sha256`；决策前校验，漂移返回 `gate.denied` / `proposal-stale`；历史 NULL 提案放行并留 `proposal.decide.unpinned` 事件；compact 只钉 pending/inflight |
+| FQ-03 | P0 | ✅ | 漂移校验抽出 `proposal-freshness.ts`；unpinned 行用 body hash 兜底并拒绝改稿；放行时保持 dirty；compact 只钉 pending/inflight |
 | FQ-04 | P1 | ❌ | 无"按当前正文重新生成"与强制应用通道 |
 | FQ-05 | P1 | ❌ | 未挂载技法卡仍自动注入（决议：不注入） |
-| FQ-06 | P0 | ✅ | 库/伏笔跨项目按 id 写入均拒绝；提案 payload 剥离 id/scope/projectId/priority/status |
-| FQ-07 | P0 | ✅ | 创建/生成/决策三处强制章节；历史空文档提案保持 pending 并拒绝 |
+| FQ-06 | P0 | ✅ | 库/伏笔按 id 写入与删除均拒绝跨项目；提案 payload 剥离 id/scope/projectId/priority/status/overrideOfId |
+| FQ-07 | P0 | ✅ | 创建/生成/决策强制章节；决策目标固定 `row.documentId`；历史空文档行可补绑同项目章节 |
 | FQ-08 | P0 | ✅ | 补 `foreshadow.create`/`foreshadow.patch`，`upsert` 退化为兼容 shim；单条与批量写路径均校验状态迁移；前端“标记回收”改 patch，保留目标章与埋设段 |
 | FQ-09 | P1 | ❌ | 仍读 `author_chapter_order`，章序两个真源 |
-| FQ-10 | P0 | ✅ | `finishProposalGeneration` 规范化为 `fq-<uuid>` 并 remap `foreshadowUpdates`/`knownFromUpdates`；`updates` 走 `mergeFactVersion` 新版本，未知 id 返回 `unknown-fact-id`；`retiredFacts` 记入 `unapplied` |
+| FQ-10 | P0 | ✅ | 规范化幂等且覆盖生成、手工提案与 `editedPayload` 三条路径；`updates` 未知 id 明确拒绝；`retiredFacts` 记入 `unapplied` |
 | FQ-11 | P1 | ❌ | 章节号仍 3 位固定，未按总数自适应宽度 |
 | FQ-12 | P3 | ❌ | 工程包仍 `format: zhizhang-novel-bundle/v1`，不含设定版本史 |
 | FQ-13 | P2 | ⚠️ | 续写/重写/定向修稿三模板常量已有；无选择逻辑 |
@@ -301,4 +301,44 @@ B2-1 ~ B2-4 全部完成，P0 达 **24/24（清零）**。
 - 每完成一批，**只改本表对应行的状态与"现状"**，并在提交信息里带上条目编号（如 `feat(fanqie): wire mergeFactVersion (FQ-01)`）。
 - 状态升级必须有测试支撑：⚠️ → ✅ 需在 `test/*-v23.test.mjs` 或对应分层测试中新增至少一个**走真实调用链**的用例。
 - 本表不复制计划正文、不记录决策；决议仍以计划 §6.0 为准。
-- 每次改动后跑 `npm run verify`（只读类型检查 + 325 个核心用例）与 `npm run test:all`（498 个全量用例，需 Node ≥ 24.15），数字写回本页顶部基线。
+- 每次改动后跑 `npm run verify`（只读类型检查 + 335 个核心用例）与 `npm run test:all`（508 个全量用例，需 Node ≥ 24.15），数字写回本页顶部基线。
+- P0 表由 `doc-status-v23` 第 5 个用例守卫（24 行、全 ✅、标题计数与明细行一致）；状态升级仍要求人工/独立复核走真实调用链，守卫只保证表格自洽。
+
+---
+
+## 9. B2-5 · P0 清零复核补丁（2026-11-21）
+
+B2-4 后以三路独立只读审查复核了全部 15 个提交，找出 **8 条会写坏数据或丢账的真实缺陷**，说明当时的「24/24」只是文档自证 —— `doc-status-v23` 原先明确把 P0 三列表排除在断言之外。本批已全部修复并补走真实调用链的用例；守卫测试新增第 5 个用例，强制 P0 表 24 行、全 ✅、标题计数一致、且与明细行的 phase/status 对齐。
+
+### 9.1 已修复
+
+| 缺陷 | 修法 | 验收 |
+| --- | --- | --- |
+| `commitFactSyncProposal` 读 `input.documentId`，可把提交重定向到同项目另一章，绕过 FQ-03/FQ-07 | 固定 `proposalDocId`，删除回落 | `fanqie-proposal-v23` 两条 B2-5 用例 |
+| unpinned / 手工提案把改稿后的正文标 `clean` | `assertProposalFresh` 用 `source_sha256` 兜底；`staleCheck !== "fresh"` 跳过 `markChapterMemoryClean` | `fanqie-proposal-v23` 的 unpinned dirty 用例 |
+| 历史 `document_id IS NULL` 提案永久无法确认 | `pinProposalChapter` 允许决策时补绑同项目章节，跨项目拒绝 | `fanqie-security-v23` 回填用例 |
+| `deconstruct.delete` / `technique.delete` 只按 id 删除 | `assertLibraryDeleteScope`：项目资产须同项目，全局资产须显式 `scope:"global"`；前端与夹具同步补参 | `fanqie-security-v23` 删除用例 |
+| `overrideOfId` 未从 payload 剥离 | 加入 `RESERVED_PAYLOAD_FIELDS` | 既有 FQ-06 用例 |
+| 手工 fact_sync 提案的模型 id 直接落库 | `normalizeFactSyncPayload` 改为幂等，并在 `createManualProposal` 与 `decideProposal` 两处调用 | `fanqie-fact-sync-v23` 手工提案用例 |
+| 15 秒排空超时后无条件 `dbOpen=false; db.close()`，迟到回执被静默吞掉 | 超时只强制二次 abort + 记日志 + 清内存锁，**继续 `await` 所有 task** 才关库；`shutdownDrainMs` 可注入 | `host-ledger-v23` 20ms 预算超时用例 |
+| thinking 增量占满 `MAX_CANDIDATE_LENGTH` 误抛 | 流式只留 4× 宽松内存上限，严格上限移到最终可见 `body` | `generation-v2` 长 thinking 用例 |
+| `selection.rewrite` / `backup.create` 等同步长耗时动作被压到 30s | 加入 120s 白名单 | `client-v2` 分类断言 |
+| `ctx.inject` 返回的 disposer 被丢弃 | `runInServiceScope` 收集并返回给父 effect | `host-tools-v23` 作用域用例 |
+
+为容纳漂移校验与补绑逻辑，新增 `src/application/proposal-freshness.ts`；`proposal-decide.ts` 从 363 行降回 308 行，满足 <350 行架构守卫。
+
+### 9.2 仍未解决 / 已知限制（不计入 P0 完成）
+
+1. **决议 #3 未决**：`writing.ts` 的回执四元组绕过 `normalizeUsage`；若宿主 `inputTokens` 已含缓存命中，`settled` / `microUsage.totalInput` 会双计。改动涉及账单语义，须先定 #3。
+2. **决议 #5 未决**：DSH-14 的②（固定上游类型）与③（隔离 profile 录制）仍缺；`assertHostToolDefinition` 只是对齐自造的 strict registrar，与 fixture 尚有 4 处规则漂移；`output.schema` 用 `additionalProperties:true` 与上游类型契约相反。
+3. **FE-16 仍 ⚠️**：`test:browser` 依赖 Playwright，本机未安装。
+4. **FE-07 幂等键**：`draft.save` 非幂等，超时重试仍可能撞 `version.conflict`；当前策略是「超时 + 本地稿兜底」，无自动重读对账。
+5. **测试链覆盖**：多数 `*-v23` 用例走 `ws.app.mutation`（真实 mutation 分发），但绕过 host HTTP / 异步 `proposal.generate`；前端 TS 视图与 agent 工具入口基本零覆盖；`client-v2` 的 FE-27 是源码字符串正则而非运行时行为断言。
+6. **thinking 乱序边界**：同一 index 被 `block-end` 双向覆盖、或流在声明块类型前截断，仍可能丢正文或把思维链当正文；`sawThinkingBlock` 置位后不复原。
+7. **宿主次要竞态**：启动失败 catch 用 `void dispose()` 不等异步 disposer；`microUsage` 在组合根填充，与 `run.detail` 其余字段不是同一读快照；`recoverMicroCalls()` 一律标 `uncertain`，不区分已有回执。
+8. `project.import_bundle` 直写库资产表，未复用 `assertLibraryWriteScope`（自身按项目隔离，无跨项目覆盖能力，但零测试）。
+
+### 9.3 验收
+
+`npm run check` 通过；`npm test` 44 文件 / 335 用例全绿；`test:v23` 12 / 87 全绿；`npm run build` 通过且产出浏览器镜像；`test:all` 静态 70 / 508，本机 Node 22 实测 507 执行 / 506 通过（唯一失败仍是 `workflow-w01` 的 `using` 语法，需 Node ≥ 24.15）。
+

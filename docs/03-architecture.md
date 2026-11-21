@@ -225,3 +225,4 @@ flowchart TD
 > 上述形状来自公开文档，尚未在隔离 profile 录制核对（决议 #5）。DSH-14 的①（单点收口）与④（契约表）已落地；②（固定上游类型）与③（录制样本）仍阻塞于 #5，因此 DSH-14 保持 ⚠️。
 
 7. **写入安全（FQ-06/FQ-07）**：库条目与伏笔按 id 写入前校验 `scope/project_id` 与既有行一致，跨项目或 global↔project 覆写直接 `invalid("id","scope-mismatch")`；提案决策固定 `projectId = row.projectId`，并从 payload 剔除 `id/scope/projectId/priority/status`；`setting/summary/fact_sync/chapter_review` 四类章节绑定提案在创建、生成、决策三处强制 `documentId`，不再回落到首章。
+8. **P0 复核补丁（B2-5）**：漂移校验与章节补绑抽到 `application/proposal-freshness.ts`；`commitFactSyncProposal` 固定 `row.documentId`，不再接受调用方重定向；unpinned/手工提案不标 `clean`；库资产删除加 scope/project 守卫；`normalizeFactSyncPayload` 幂等并覆盖手工提案与 `editedPayload`；宿主排空预算耗尽后仍等迟到回执写完才 `db.close()`；`MAX_CANDIDATE_LENGTH` 只约束最终可见正文。已知限制见 [V2.3 状态对照表 §9](zhizhang_v2_3_status.md)。

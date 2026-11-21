@@ -55,7 +55,7 @@
 | [02 · 领域规则与共享契约](docs/02-domain-rules.md) | **做什么的精确规范** | 两条线状态机、受保护阈值（34/84/2/2/尾句）、11 个错误码、6 字段批准门、§2 七大权威命令表 |
 | [03 · 系统架构与接口手册](docs/03-architecture.md) | **怎么做（架构与端到端链路）** | 分层依赖边界、垂直应用服务、DsH Cordis 宿主与 LLM 桥接、客户端模块、`GET /state` 与 `/mutate` 动作手册、架构演进说明 |
 | [04 · 数据存储与工作流内核](docs/04-data-and-workflow.md) | **怎么做（数据与内核机制）** | SQLite 表结构与 ER 图、幂等命令账本、事件日志与 6 大持久化读模型冷恢复、运行状态机、预算守卫与生成账本 |
-| [05 · 开发、验收与运维指南](docs/05-development-and-ops.md) | **怎么做（工程实操与运维）** | 环境安装、双管线 TS 构建（`dist/server` + `dist/client`）、本地预览服务器、70 文件 / 498 项分层离线测试与浏览器/性能基准、打包与 `mtime` 刷新、SHA-256 备份恢复与故障排查 |
+| [05 · 开发、验收与运维指南](docs/05-development-and-ops.md) | **怎么做（工程实操与运维）** | 环境安装、双管线 TS 构建（`dist/server` + `dist/client`）、本地预览服务器、70 文件 / 508 项分层离线测试与浏览器/性能基准、打包与 `mtime` 刷新、SHA-256 备份恢复与故障排查 |
 | [V2.3 全量优化计划](docs/zhizhang_v2_3_full_optimization_plan.md) | **下一阶段路线图** | 123 条发现的完整证据、十个跨视角主题、P0–P3 路线图与作者决议记录 |
 | [V2.3 实现状态对照表](docs/zhizhang_v2_3_status.md) | **当前进度真源** | 123 条逐条状态（✅/⚠️/❌）、P0 退出标准达成情况、Batch 2 开发批次 |
 | [Schema 参考（自动生成）](docs/schema.md) | **数据层只读真源** | 由 `npm run docs:schema` 从 `sqlite_master` 生成的全部表、列、索引与触发器 |
@@ -87,10 +87,10 @@
 # 1. 安装 pinned 开发期编译器（不执行包生命周期脚本）
 npm ci --ignore-scripts
 
-# 2. 日常验证：后端与客户端只读类型检查 + 核心离线测试（44 文件 / 325 用例）
+# 2. 日常验证：后端与客户端只读类型检查 + 核心离线测试（44 文件 / 335 用例）
 npm run verify
 
-# 3. 分层专项离线回归（契约 147 / V2 全栈 100 / V2.3 基础 78 / 宿主与灾备 18 / 客户端 7 / 架构 13）
+# 3. 分层专项离线回归（契约 147 / V2 全栈 101 / V2.3 基础 87 / 宿主与灾备 18 / 客户端 7 / 架构 13）
 npm run test:contracts
 npm run test:v2
 npm run test:v23
@@ -98,7 +98,7 @@ npm run test:host
 npm run test:client
 npm run test:arch
 
-# 4. 历史规则取证夹具（173 用例）与全量离线测试（70 文件 / 498 用例）
+# 4. 历史规则取证夹具（173 用例）与全量离线测试（70 文件 / 508 用例）
 npm run test:evidence
 npm run test:all
 
@@ -147,5 +147,5 @@ dsh-zhizhangv2/
 │   └── bundle/                 # DsH Cordis 补丁声明与中英文元数据
 ├── scripts/                    # preflight、deploy、dev-server、browser-check、model-check、workspace-bench、workspace-data
 ├── support/                    # 共享离线测试底座（a01.mjs + v2-harness.mjs，独立于 test/ 以避免误计用例数）
-└── test/                       # 64 个分层离线自动化测试文件（d02/w02 契约合规 + ?01 规则取证 + *-v2 全栈/宿主/客户端/架构 + *-v23 V2.3 基础）
+└── test/                       # 70 个分层离线自动化测试文件（d02/w02 契约合规 + ?01 规则取证 + *-v2 全栈/宿主/客户端/架构 + *-v23 V2.3 基础）
 ```
