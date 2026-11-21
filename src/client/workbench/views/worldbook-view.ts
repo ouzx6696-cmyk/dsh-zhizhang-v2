@@ -145,18 +145,19 @@ export function createWorldbookView(container: HTMLElement, host: WorkbenchShell
         const checkboxes: HTMLInputElement[] = [];
         if (isFactSync && newFacts.length > 0) {
           const checklist = el("div", "", "proposal-checklist");
-          for (const item of newFacts) {
+          newFacts.forEach((item, index) => {
             const fid = typeof item.factId === "string" ? item.factId : "";
-            if (!fid) continue;
             const label = document.createElement("label");
             const cb = document.createElement("input");
             cb.type = "checkbox";
             cb.checked = true;
             cb.value = fid;
+            cb.dataset.index = String(index);
             checkboxes.push(cb);
-            label.append(cb, ` ${typeof item.entityName === "string" && item.entityName ? item.entityName : fid}：${typeof item.note === "string" ? item.note : ""}`);
+            const name = typeof item.entityName === "string" && item.entityName ? item.entityName : fid || `第 ${index + 1} 条`;
+            label.append(cb, ` ${name}：${typeof item.note === "string" ? item.note : ""}`);
             checklist.append(label);
-          }
+          });
           row.append(checklist);
         }
         row.append(el("pre", JSON.stringify(prop.payload, null, 2), "server-body-preview"));
@@ -170,7 +171,11 @@ export function createWorldbookView(container: HTMLElement, host: WorkbenchShell
               proposalId: prop.id,
               accept: true,
               ...(isFactSync && checkboxes.length > 0
-                ? { selectedFactIds: checkboxes.filter((cb) => cb.checked).map((cb) => cb.value) }
+                ? {
+                  selectedNewFactIndices: checkboxes
+                    .filter((cb) => cb.checked)
+                    .map((cb) => Number(cb.dataset.index)),
+                }
                 : {}),
             });
             host.notice("设定提案已确认入库");

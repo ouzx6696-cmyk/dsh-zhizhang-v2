@@ -140,7 +140,6 @@ test("Sprint 2 continuity memory loop runs dirty -> incremental fact_sync -> ato
         text: JSON.stringify({
           newFacts: [
             {
-              factId: "jade-seal",
               category: "item",
               entityName: "残玉印",
               note: "沈青在祠堂暗格取出刻有朱雀纹的残玉印",
@@ -150,13 +149,13 @@ test("Sprint 2 continuity memory loop runs dirty -> incremental fact_sync -> ato
             },
           ],
           knownFromUpdates: [{ factId: "ancestral-key", character: "沈青", point: 1 }],
-          foreshadowUpdates: [{ title: "朱雀印主身份之谜", factId: "jade-seal", status: "hinted", note: "暗格中显露一角" }],
+          foreshadowUpdates: [{ title: "朱雀印主身份之谜", status: "hinted", note: "暗格中显露一角" }],
           summaryDraft: "沈青持祖先铜钥开启祠堂暗格，获得朱雀纹残玉印。",
         }),
       },
       {
         text: JSON.stringify({
-          newFacts: [{ factId: "new-note", category: "location", entityName: "后山石室", note: "沈青夜探后山石室" }],
+          newFacts: [{ category: "location", entityName: "后山石室", note: "沈青夜探后山石室" }],
           knownFromUpdates: [{ factId: "secret-map", character: "沈青", point: 2 }],
           summaryDraft: "沈青寻得残玉印后夜探后山石室。",
         }),
@@ -253,7 +252,10 @@ test("Sprint 2 continuity memory loop runs dirty -> incremental fact_sync -> ato
         (await host.readState({ projectId, documentId: ch2 })).body.result.activeContext.summary,
         "沈青持祖先铜钥开启祠堂暗格，获得朱雀纹残玉印。",
       );
-      const evDetail = (await host.mutate("evidence.detail", { documentId: ch2, factId: "jade-seal" })).body.result;
+      const loreAfterCommit = (await host.mutate("lore.list", { projectId })).body.result.entries;
+      const jadeSeal = loreAfterCommit.find((entry) => entry.entityName === "残玉印").factId;
+      assert.match(jadeSeal, /^fq-/);
+      const evDetail = (await host.mutate("evidence.detail", { documentId: ch2, factId: jadeSeal })).body.result;
       assert.equal(evDetail.value.snapshotId, okCommit.body.result.committed.evidenceIds[0]);
       assert.equal(evDetail.value.anchor.point, "2");
       const settingsView = (await host.mutate("read.model", {
@@ -263,7 +265,7 @@ test("Sprint 2 continuity memory loop runs dirty -> incremental fact_sync -> ato
         point: 2,
         characterId: "沈青",
       })).body.result;
-      assert.ok(settingsView.value.entries.some((e) => e.factId === "jade-seal"));
+      assert.ok(settingsView.value.entries.some((e) => e.factId === jadeSeal));
 
       // Edit ONLY paragraph 2 -> flips dirty again, second fact_sync sends ONLY changed paragraph, and commits knownFromUpdates cleanly!
       const bodyV2 = [

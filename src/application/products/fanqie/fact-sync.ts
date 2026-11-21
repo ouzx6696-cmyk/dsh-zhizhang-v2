@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ContractError } from "../../../contracts/index.ts";
 import {
   assertForeshadowStatus,
   assertForeshadowTransition,
@@ -113,13 +114,31 @@ export function commitFactBatch(
     readonly factById: Map<string, SettingFact>;
     readonly selectedFactIds?: Set<string> | null;
     readonly evidenceDoc?: { readonly revisionId: string | null; readonly body: string } | null;
+    readonly factIdPolicy?: "require" | "generate";
+    readonly requireExistingFactIds?: boolean;
   },
 ) {
   const approvedSettings: string[] = [];
   const evidenceIds: string[] = [];
   const order = ctx.chapterOrder(params.projectId);
   for (const item of params.items) {
-    const factId = text(item, "factId").trim();
+    const rawId = optionalText(item, "factId");
+    if (!rawId && params.factIdPolicy !== "generate") invalid("factId");
+    // A model-supplied id is kept only when it is unique; a collision with an
+    // existing fact is exactly the silent-merge bug FQ-10 fixes. Legacy pending
+    // proposals keep their original ids so they still decide correctly.
+    const factId = rawId
+      ? params.factIdPolicy === "generate" && params.factById.has(rawId)
+        ? `fq-${randomUUID()}`
+        : rawId
+      : `fq-${randomUUID()}`;
+    if (params.requireExistingFactIds && !params.factById.has(factId)) {
+      throw new ContractError("gate.denied", {
+        action: "proposal.decide",
+        reason: "unknown-fact-id",
+        factId,
+      });
+    }
     if (params.selectedFactIds && !params.selectedFactIds.has(factId)) continue;
     if (params.lockedSet.has(factId)) refuse("proposal.decide", "setting-is-locked");
     const point = typeof item.point === "number" && Number.isSafeInteger(item.point) && item.point >= 1
@@ -242,6 +261,9 @@ export function commitFactSyncProposal(
   const lockedSet = new Set(currentApproved.filter((f) => f.locked).map((f) => f.id));
   const factById = new Map(currentApproved.map((f) => [f.id, f]));
   const selectedFactIds = Array.isArray(input.selectedFactIds) ? new Set(input.selectedFactIds.map(String)) : null;
+  const selectedNewFacts = Array.isArray(input.selectedNewFactIndices)
+    ? new Set(input.selectedNewFactIndices.map(Number))
+    : null;
   const selectedKnown = Array.isArray(input.selectedKnownFromIndices)
     ? new Set(input.selectedKnownFromIndices.map(Number))
     : null;
@@ -249,16 +271,51 @@ export function commitFactSyncProposal(
     ? new Set(input.selectedForeshadowIndices.map(Number))
     : null;
 
+  const newFacts = (Array.isArray(edited.newFacts) ? (edited.newFacts as Input[]) : [])
+    .filter((_, index) => !selectedNewFacts || selectedNewFacts.has(index));
+
   const { approvedSettings, evidenceIds } = commitFactBatch(ctx, {
     projectId,
     chapterId: doc.id,
     defaultSource: "AI章节记忆同步（作者确认）",
-    items: Array.isArray(edited.newFacts) ? (edited.newFacts as Input[]) : [],
+    items: newFacts,
     lockedSet,
     factById,
     selectedFactIds,
+    factIdPolicy: "generate",
     evidenceDoc: { revisionId: doc.revisionId, body: doc.body ?? "" },
   });
+
+  const updates = (Array.isArray(edited.updates) ? (edited.updates as Input[]) : []).map((item) => {
+    const factId = optionalText(item, "factId");
+    const existing = factId ? factById.get(factId) : undefined;
+    const meta = factId
+      ? (stmt(ctx.db, `
+          SELECT category, entity_name AS entityName FROM author_lore_current WHERE project_id = ? AND fact_id = ?;
+        `).get(projectId, factId) as { category?: string; entityName?: string } | undefined)
+      : undefined;
+    return {
+      ...item,
+      ...(item.category === undefined && meta?.category ? { category: meta.category } : {}),
+      ...(item.entityName === undefined && meta?.entityName ? { entityName: meta.entityName } : {}),
+      ...(item.source === undefined && existing?.source ? { source: existing.source } : {}),
+    } as Input;
+  });
+  if (updates.length > 0) {
+    const updated = commitFactBatch(ctx, {
+      projectId,
+      chapterId: doc.id,
+      defaultSource: "AI章节记忆更新（作者确认）",
+      items: updates,
+      lockedSet,
+      factById,
+      factIdPolicy: "require",
+      requireExistingFactIds: true,
+      evidenceDoc: { revisionId: doc.revisionId, body: doc.body ?? "" },
+    });
+    approvedSettings.push(...updated.approvedSettings);
+    evidenceIds.push(...updated.evidenceIds);
+  }
 
   const knownUpdates = Array.isArray(edited.knownFromUpdates) ? (edited.knownFromUpdates as Input[]) : [];
   const knownOrder = ctx.chapterOrder(projectId);
@@ -309,5 +366,13 @@ export function commitFactSyncProposal(
   syncChapterMemoryAndEntities(ctx, projectId, doc.id, doc.body ?? "");
   ctx.event(projectId, "setting", "chapter.memory.synced", { documentId: doc.id, syncStatus: "clean" });
 
-  return { approvedSettings, foreshadows, evidenceIds, summaryUpdated, syncStatus: "clean" as const };
+  // FQ-20 owns the expiry semantics; until it lands, never let a retired fact
+  // disappear silently from an approved proposal.
+  const retiredFacts = Array.isArray(edited.retiredFacts) ? (edited.retiredFacts as Input[]) : [];
+  const unapplied: string[] = retiredFacts.length > 0 ? ["retiredFacts"] : [];
+  if (unapplied.length > 0) {
+    ctx.event(projectId, "setting", "proposal.unapplied", { documentId: doc.id, fields: unapplied });
+  }
+
+  return { approvedSettings, foreshadows, evidenceIds, summaryUpdated, unapplied, syncStatus: "clean" as const };
 }

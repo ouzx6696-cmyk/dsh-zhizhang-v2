@@ -11,6 +11,7 @@ import {
   sumUsageTuple,
   TECHNIQUE_EXTRACT_SYSTEM,
 } from "../workflow/writing-budget.ts";
+import { normalizeFactSyncPayload } from "../workflow/fact-sync-payload.ts";
 import type { WritingPhase } from "../workflow/writing-stages.ts";
 import { count, invalid, optionalText, text, type Input, type Product, type WorkspaceContext } from "./context.ts";
 import { sha256Text } from "./digest.ts";
@@ -162,15 +163,18 @@ export function createProposalService(ctx: WorkspaceContext, registry: ProductLi
   ): void {
     ctx.atomic(() => {
       const now = Date.now();
-      const target = stmt(db, "SELECT project_id AS projectId FROM author_ai_proposals WHERE id = ?;")
-        .get(proposalId) as { projectId?: string | null } | undefined;
-      const nextStatus = payload && !failure ? "pending" : "failed";
-      const res = payload && !failure
+      const target = stmt(db, "SELECT project_id AS projectId, kind FROM author_ai_proposals WHERE id = ?;")
+        .get(proposalId) as { projectId?: string | null; kind?: string } | undefined;
+      const normalized = payload && !failure && target?.kind === "fact_sync"
+        ? normalizeFactSyncPayload(payload)
+        : payload;
+      const nextStatus = normalized && !failure ? "pending" : "failed";
+      const res = normalized && !failure
         ? stmt(db, `
             UPDATE author_ai_proposals
             SET status = 'pending', payload = ?, error = NULL, updated_at = ?
             WHERE id = ? AND status = 'inflight';
-          `).run(JSON.stringify(payload), now, proposalId)
+          `).run(JSON.stringify(normalized), now, proposalId)
         : stmt(db, `
             UPDATE author_ai_proposals
             SET status = 'failed', error = ?, updated_at = ?
