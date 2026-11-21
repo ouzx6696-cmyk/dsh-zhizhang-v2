@@ -191,6 +191,62 @@ test("DSH-08: a receipt that arrives during the drain window is persisted instea
   });
 });
 
+test("B2-5 DSH-08: a receipt arriving after the drain budget still lands before SQLite closes", async () => {
+  await withTempDir("zhizhang-drain-timeout-", async (dataDirectory) => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const calls = [];
+    const llm = {
+      calls,
+      async prepareCall() {
+        return {
+          config: {},
+          async *stream(options) {
+            // Deliberately ignores options.signal: real transports may finish
+            // after the unload abort. The receipt must still be persisted.
+            calls.push({ options });
+            yield { type: "text-delta", index: 0, text: "候".repeat(1150) };
+            await gate;
+            yield {
+              type: "usage",
+              usage: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 },
+            };
+          },
+        };
+      },
+    };
+    const host = createMockDsHHost({ llm });
+    applyWorkbench(host.ctx, { dataDirectory, shutdownDrainMs: 20 }, { readAsset: host.readAsset });
+
+    const { projectId, documentId, runId } = await seedChapter(host);
+    const started = await host.mutate("run.generate", { runId, provider: "fixture", model: "test" });
+    assert.equal(started.status, 202);
+    await host.waitFor(() => calls.length === 1);
+
+    const closing = host.close();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    release();
+    await closing;
+
+    assert.ok(
+      host.logs.some((entry) => String(entry.message).includes("drain exceeded budget")),
+      "a drain overrun must be observable in the host log",
+    );
+
+    const reopened = createMockDsHHost();
+    applyWorkbench(reopened.ctx, { dataDirectory }, { readAsset: reopened.readAsset });
+    try {
+      const snap = (await reopened.readState({ projectId, documentId })).body.result;
+      assert.equal(snap.runs[0].generationState, "completed");
+      assert.equal(snap.runs[0].settled, 150, "a late receipt must never be swallowed");
+      const detail = (await reopened.mutate("run.detail", { documentId, runId })).body.result;
+      assert.equal(detail.calls[0].usage, "[100,50,0,0]");
+    } finally {
+      await reopened.close();
+    }
+  });
+});
+
 test("DB-02: the host prunes the command journal at startup, keeping only the per-document floor", async () => {
   await withTempDir("zhizhang-journal-prune-", async (dataDirectory) => {
     const dbPath = join(dataDirectory, "workspace.sqlite");

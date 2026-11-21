@@ -175,6 +175,9 @@ test("FE-07/FE-27: requests carry per-action timeouts and shortcuts skip IME com
   assert.equal(actionTimeoutMs("draft.save"), 30_000, "writes default to 30s");
   assert.equal(actionTimeoutMs("project.export_bundle"), 120_000);
   assert.equal(actionTimeoutMs("project.import_bundle"), 120_000);
+  assert.equal(actionTimeoutMs("selection.rewrite"), 120_000, "synchronous LLM rewrites must not be cut at 30s");
+  assert.equal(actionTimeoutMs("backup.create"), 120_000);
+  assert.equal(actionTimeoutMs("article.deliver"), 120_000);
 
   let receivedSignal = null;
   await withBrowserGlobals(

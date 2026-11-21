@@ -39,6 +39,12 @@ export interface DsHPluginConfig {
   readonly defaultProvider?: string;
   readonly defaultModel?: string;
   readonly enableAgentTools?: boolean;
+  /**
+   * Test/ops override for the shutdown drain budget. After it expires the
+   * plugin force-aborts and logs, but still waits for late receipts before
+   * closing SQLite (DSH-08).
+   */
+  readonly shutdownDrainMs?: number;
 }
 
 export interface WorkbenchPluginDeps {
@@ -138,6 +144,9 @@ export function applyWorkbench(
     throw new Error("织章缺少 dataDirectory");
   }
   const readAsset = deps?.readAsset ?? defaultReadAsset;
+  const drainMs = Number.isFinite(config.shutdownDrainMs) && (config.shutdownDrainMs ?? 0) >= 0
+    ? config.shutdownDrainMs!
+    : SHUTDOWN_DRAIN_MS;
   ctx.effect(() => {
     mkdirSync(config.dataDirectory, { recursive: true, mode: 0o700 });
     const exportsDir = join(config.dataDirectory, "deliveries");
@@ -170,9 +179,19 @@ export function applyWorkbench(
           writeLocalBundleToDir(join(bundleExportsRoot, sanitizePathSegment(projectId)), files).writtenDir,
       );
       workspaceOnClose = () => {
-        workspace.recoverGenerations();
-        workspace.recoverProposals();
-        workspace.recoverMicroCalls();
+        // Each recovery must run even if an earlier one throws; otherwise a
+        // failed generation recovery leaves micro calls stuck at inflight.
+        for (const recover of [
+          () => workspace.recoverGenerations(),
+          () => workspace.recoverProposals(),
+          () => workspace.recoverMicroCalls(),
+        ]) {
+          try {
+            recover();
+          } catch (error) {
+            ctx.logger.error("zhizhang: shutdown recovery failed", { reason: describeError(error) });
+          }
+        }
       };
       workspace.recoverStartup();
 
@@ -490,7 +509,7 @@ export function applyWorkbench(
       accepting = false;
       dbOpen = false;
       if (journalTimer !== undefined) clearInterval(journalTimer);
-      for (const dispose of disposers.reverse()) void dispose();
+      for (const dispose of [...disposers].reverse()) void dispose();
       db.close();
       throw error;
     }
@@ -512,13 +531,35 @@ export function applyWorkbench(
       ];
       if (inFlight.length > 0) {
         let timer: unknown;
-        await Promise.race([
-          Promise.allSettled(inFlight),
-          new Promise<void>((resolve) => {
-            timer = setTimeout(resolve, SHUTDOWN_DRAIN_MS);
+        const settled = Promise.allSettled(inFlight);
+        const drained = await Promise.race([
+          settled.then(() => true),
+          new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(false), drainMs);
           }),
         ]);
         if (timer !== undefined) clearTimeout(timer);
+        if (!drained) {
+          // The budget expired, but closing SQLite here would silently discard
+          // every `if (dbOpen)` receipt from a late task (DSH-08). Force a
+          // second abort, release the in-memory gates, log, and keep waiting.
+          // `writing.ts` has its own 180s LLM timeout, so this cannot hang
+          // forever.
+          for (const { controller } of [
+            ...generations.values(),
+            ...proposalJobs.values(),
+            ...microJobs.values(),
+          ]) controller.abort();
+          generations.clear();
+          proposalJobs.clear();
+          proposalLocks.clear();
+          microJobs.clear();
+          ctx.logger.error("zhizhang: shutdown drain exceeded budget; waiting for late receipts", {
+            drainMs,
+            pending: inFlight.length,
+          });
+          await settled;
+        }
       }
 
       try {

@@ -130,6 +130,32 @@ test("DSH-03: a run whose entire output was thinking reports thinking_exhausted 
   );
 });
 
+test("B2-5 DSH-03: a long thinking block does not consume the visible-text length budget", async () => {
+  const llm = createScriptedLlm([
+    {
+      chunks: [
+        // The upstream declares a block type only after all its deltas, so
+        // this thinking text arrives before we know it should be discarded.
+        { type: "text-delta", index: 0, text: "想".repeat(1_050_000) },
+        { type: "block-end", index: 0, block: { type: "thinking" } },
+        { type: "text-delta", index: 1, text: "可见正文" },
+        { type: "block-end", index: 1, block: { type: "text" } },
+        { type: "usage", usage: { inputTokens: 10, outputTokens: 10 } },
+        { type: "finish", reason: { kind: "stop" } },
+      ],
+    },
+  ]);
+  const caller = createSingleShotCaller(
+    llm,
+    { provider: "fixture", model: "test-model", reserved: 10_000 },
+    new AbortController().signal,
+    createReceiptLedger(),
+  );
+
+  const output = await caller.complete({ phase: "write", system: "SYS", prompt: "USR", maxOutputTokens: 2000 });
+  assert.equal(output, "可见正文");
+});
+
 test("single-shot caller enforces input reservation, actual usage budget, and MAX_CANDIDATE_LENGTH caps", async () => {
   const uncalledLlm = createScriptedLlm([{ text: "never" }]);
   await assertRejectsContract(

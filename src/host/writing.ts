@@ -171,7 +171,7 @@ export function createSingleShotCaller(
       let completed = false;
       let finishReasonKind: string | null = null;
       let sawThinkingBlock = false;
-      let length = 0;
+      let streamedChars = 0;
       let counts: number[] = [];
 
       try {
@@ -197,8 +197,12 @@ export function createSingleShotCaller(
                 // Late deltas for a block already declared as thinking/tool.
                 continue;
               }
-              length += chunk.text.length;
-              if (length > MAX_CANDIDATE_LENGTH) throw new Error("Candidate too long");
+              // DSH-03: block types are declared *after* their deltas, so the
+              // strict candidate limit cannot be applied here — a long thinking
+              // block used to consume the whole budget and reject short visible
+              // text. Only a loose memory bound belongs in the streaming loop.
+              streamedChars += chunk.text.length;
+              if (streamedChars > MAX_CANDIDATE_LENGTH * 4) throw new Error("Candidate too long");
               blocks.set(chunk.index, (blocks.get(chunk.index) ?? "") + chunk.text);
             }
             if (chunk.type === "block-end") {
@@ -237,9 +241,6 @@ export function createSingleShotCaller(
         throw error;
       }
 
-      if (!usage || counts.some((value) => !Number.isSafeInteger(value) || value < 0)) {
-        throw new ContractError("usage.uncertain", { reason: "missing-token-usage" });
-      }
       const body = [...blocks.entries()]
         .filter(([index]) => {
           const declaredType = blockTypes.get(index);
@@ -249,6 +250,12 @@ export function createSingleShotCaller(
         .sort(([a], [b]) => a - b)
         .map(([, value]) => value)
         .join("\n");
+      // Length is checked before usage so an oversized candidate still reports
+      // the cap rather than a downstream missing-token-usage error.
+      if (body.length > MAX_CANDIDATE_LENGTH) throw new Error("Candidate too long");
+      if (!usage || counts.some((value) => !Number.isSafeInteger(value) || value < 0)) {
+        throw new ContractError("usage.uncertain", { reason: "missing-token-usage" });
+      }
       if (signal.aborted) return body;
       if (budget.snapshot().usedTokens > run.reserved) {
         throw attachRecoveryKind(

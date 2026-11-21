@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   HOST_REQUIRED_SERVICES,
   HOST_SERVICE_CONTRACTS,
+  runInServiceScope,
 } from "../src/host/dsh-adapter.ts";
 import { assertHostToolDefinition, toHostToolDefinition } from "../src/host/dsh-tools-adapter.ts";
 import { applyWorkbench, inject } from "../src/host/plugin.ts";
@@ -90,6 +91,20 @@ test("DSH-01: malformed definitions are rejected by the adapter and a failed reg
   assert.throws(() => registerZhizhangTools(registrar, fakeWorkspace()), /registration rejected/);
   assert.equal(registrar.tools.length, 0, "a partial 7+3 surface must never survive");
   assert.deepEqual(registrar.disposed, ["zhizhang_read_chapter", "zhizhang_read_tree"]);
+});
+
+test("B2-5 DSH-02: the inject scope disposer is returned to the parent effect", () => {
+  let disposed = false;
+  const ctx = {
+    inject: (_deps, callback) => {
+      callback({ effect: () => () => {} });
+      return () => { disposed = true; };
+    },
+  };
+  const disposers = runInServiceScope(ctx, ["tools"], "zhizhang:test-scope", () => []);
+  assert.equal(disposers.length, 1, "a Cordis scope disposer must not be dropped");
+  disposers[0]();
+  assert.equal(disposed, true);
 });
 
 test("DSH-02: the service contract table and the declared inject list agree on required vs optional services", () => {

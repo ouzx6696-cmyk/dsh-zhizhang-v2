@@ -39,9 +39,21 @@ export interface ApiRequestOptions {
 const READ_TIMEOUT_MS = 15_000;
 const WRITE_TIMEOUT_MS = 30_000;
 const IO_TIMEOUT_MS = 120_000;
-const IO_ACTIONS: ReadonlySet<string> = new Set(["project.export_bundle", "project.import_bundle"]);
+// FE-07: these actions wait synchronously on an LLM call, a full-database
+// copy, or a bundle write, so a 30s budget would abort work the server is
+// still completing (and leave a half-finished save behind).
+const IO_ACTIONS: ReadonlySet<string> = new Set([
+  "project.export_bundle",
+  "project.import_bundle",
+  "selection.rewrite",
+  "backup.create",
+  "article.deliver",
+  "skill.import",
+  "project.bootstrap",
+  "revisions.compact",
+]);
 
-/** FE-07: reads 15s, writes 30s, whole-project import/export 120s. */
+/** FE-07: state reads 15s, ordinary writes 30s, long-running actions 120s. */
 export function actionTimeoutMs(action?: string): number {
   if (!action) return READ_TIMEOUT_MS;
   return IO_ACTIONS.has(action) ? IO_TIMEOUT_MS : WRITE_TIMEOUT_MS;

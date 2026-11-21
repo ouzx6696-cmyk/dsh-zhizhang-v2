@@ -163,10 +163,13 @@ export function runInServiceScope(
 
   if (typeof ctx.inject === "function") {
     try {
-      ctx.inject([...deps], (sub) => {
+      const disposeScope = ctx.inject([...deps], (sub) => {
         sub.effect(() => combineDisposers(guarded(sub)), effectName);
       });
-      return [];
+      // Cordis returns a scope disposer; without collecting it the parent
+      // effect never tears down the sub-scope on hot reload, leaving ten tools
+      // registered against a dead service.
+      return typeof disposeScope === "function" ? [disposeScope] : [];
     } catch (error) {
       onError?.(error);
       return [];
