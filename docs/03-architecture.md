@@ -211,4 +211,15 @@ flowchart TD
 3. **运维**：`createHotBackup` 使用 `node:sqlite` 的 `backup()`（回退 `VACUUM INTO`），保留策略 `planRetention` + `pruneBackups` 已实现并测试；`command_journal` 增加 `request_hash` 与 `pruneCommandJournal`（**尚未接入宿主定时调用**，属 DB-02 待办）。
 4. **用量口径**：`workflow/budget.ts` 的 `normalizeUsage` 把回执规范为四类互斥（未命中输入 / 缓存命中 / 缓存写入 / 输出），写作预算已改用。
 5. **前端**：Diff 改为句级切分 + Myers，并保留空行 spacer 归属与行尾风格还原；选段微改写新增捕获校验（切章拒绝、唯一匹配重定位）与 AI 撤销栈；虚拟列表行高改由 `--vrow-h` 驱动并用 `ResizeObserver` 重算；三套主题补齐 diff/success/warning token。
-6. **仍属自拟契约的部分**：`plugin.ts` 直接调用宿主 API，尚无 `dsh-adapter.ts` 收口；工具未声明 `output{schema,render}`；无 Actor/Peer 透传。这三项是 DSH-01/02/04/14 的内容，**不能据本文档推断已在真实 DsH 上验证**。
+6. **宿主适配层（DSH-01/02/03/14）**：`src/host/dsh-adapter.ts` 是唯一描述宿主 API 的模块；`src/host/dsh-tools-adapter.ts` 把内部工具规格翻译为上游 `{ name, description, parameters(additionalProperties:false), output{schema,render}, execute(args,exec) }` 形状，并在注册前自检、任一工具失败即整体回滚。可选服务一律 `ctx.get(name)` 解析；宿主支持 `ctx.inject` 时，工具与设置表单各挂独立子作用域，注册失败只记日志并把 `/diag.agentToolsRegistered` 置 `false`，不再拖垮工作台。流式生成按 `block-end` 的块类型回删 thinking 增量，思维链不会进入候选正文。
+
+**宿主服务契约表**（与 `HOST_SERVICE_CONTRACTS` 同步，`test/host-tools-v23.test.mjs` 校验必需项与 `inject` 完全一致）：
+
+| 服务 | 必需 | 用途 | 来源 |
+| --- | --- | --- | --- |
+| `connection` | 是 | 注册 `/api/zhizhang/*` 路由 | DsH 0.2.x plugin docs · `ctx.connection.fetch.register` |
+| `llm` | 是 | 候选稿、提案与微改写的流式调用 | DsH 0.2.x plugin docs · `ctx.llm.prepareCall` |
+| `tools` | 否 | 7 个只读工具 + 3 个提案工具 | DsH 0.2.x plugin docs · `ctx.tools.register`（**未录制**） |
+| `configForms` | 否 | 插件设置表单 | DsH 0.2.x plugin docs · `ctx.configForms.register`（**未录制**） |
+
+> 上述形状来自公开文档，尚未在隔离 profile 录制核对（决议 #5）。DSH-14 的①（单点收口）与④（契约表）已落地；②（固定上游类型）与③（录制样本）仍阻塞于 #5，因此 DSH-14 保持 ⚠️。

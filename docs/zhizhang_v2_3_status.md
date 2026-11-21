@@ -2,7 +2,7 @@
 
 > **本表是什么**：`docs/zhizhang_v2_3_full_optimization_plan.md` 中 123 条发现的**代码核对结果**。只记录"代码里到底有没有"，不含排期、人力与决策；排期与决议仍以计划正文为准。
 >
-> **核对基线**：2026-11-21 · HEAD `9567d00`（B2-1 收尾后） · `npm run check` 通过 · `npm test` = 41 文件 / 306 用例 · `npm run test:all` = 67 文件 / 479 用例（需 Node ≥ 24.15 全绿；Node 22 实测 478 执行 / 477 通过，`workflow-w01` 的 `using` 语法失败） · 源码 121 文件 / 30,318 行 TS（含注释与空行） · Schema 40 表 / 40 索引 / 14 触发器（见 [schema.md](schema.md)）
+> **核对基线**：2026-11-21 · HEAD `0475741`（B2-2 收尾后） · `npm run check` 通过 · `npm test` = 42 文件 / 315 用例 · `npm run test:v23` = 10 文件 / 69 用例 · `npm run test:all` = 68 文件 / 488 用例（需 Node ≥ 24.15 全绿；Node 22 实测 487 执行 / 486 通过，`workflow-w01` 的 `using` 语法失败） · 源码 123 文件 / 30,760 行 TS（含注释与空行） · Schema 40 表 / 40 索引 / 14 触发器（见 [schema.md](schema.md)）
 >
 > **状态定义**
 > - ✅ **已落地**：实现 + 测试，且真实调用链走通，可验收。
@@ -16,16 +16,16 @@
 | 模块 | ✅ 已落地 | ⚠️ 底座就位 | ❌ 未动 | 合计 |
 | --- | ---: | ---: | ---: | ---: |
 | 前端 UI 工作台（FE） | 9 | 6 | 19 | 34 |
-| DsH 插件逻辑（DSH） | 0 | 7 | 21 | 28 |
+| DsH 插件逻辑（DSH） | 3 | 8 | 17 | 28 |
 | 后端数据库逻辑（DB） | 16 | 5 | 6 | 27 |
 | 番茄小说工作线（FQ） | 8 | 7 | 19 | 34 |
-| **合计** | **33** | **25** | **65** | **123** |
+| **合计** | **36** | **26** | **61** | **123** |
 
-**结论**：数据库底座完成度最高（59%），番茄线 B2-1 三项已接线（P0 只剩 FQ-06/FQ-07），宿主层**整层未动（0/28）**。
+**结论**：数据库底座完成度最高（59%）；宿主层已能通过严格 registrar 启动（3/28），但身份边界、账本排空与 worker 化仍未动；番茄线 P0 只剩 FQ-06/FQ-07。
 
 ---
 
-## 2. P0 专项（24 条，14 ✅ / 3 ⚠️ / 7 ❌）
+## 2. P0 专项（24 条，17 ✅ / 3 ⚠️ / 4 ❌）
 
 | 编号 | 状态 | 现状 |
 | --- | --- | --- |
@@ -35,9 +35,9 @@
 | FE-07 | ❌ | `apiRequest` 无超时、无幂等键，挂起即锁死全部操作 |
 | FE-12 | ✅ | raw 模式保留已勾选 hunk，部分勾选显示 banner |
 | FE-27 | ⚠️ | 仅在保存按钮可用时 `preventDefault`；无 `isComposing` 保护 |
-| DSH-01 | ❌ | `tools.ts` 中 `output` 出现 0 次，真实宿主注册会抛错 |
-| DSH-02 | ❌ | 无 `ctx.get`/`ctx.inject`，可选服务仍是硬依赖 |
-| DSH-03 | ❌ | `text-delta` 不区分块类型，thinking 增量直接进 `blocks` |
+| DSH-01 | ✅ | 10 个工具全部声明 `output{schema,render}` 与 `additionalProperties:false`，`dsh-tools-adapter` 注册前自检、失败整体回滚 |
+| DSH-02 | ✅ | 可选服务走 `ctx.get`；有 `ctx.inject` 时工具与设置表单各挂独立子作用域，注册失败只记日志 |
+| DSH-03 | ✅ | `block-end` 按块类型回删 thinking 增量，正文不再混入思维链，长度上限只计可见文本 |
 | DSH-08 | ❌ | 排空期用 `if (!closing)` 丢弃真实用量回执 |
 | DSH-10 | ⚠️ | `author_micro_calls` 表与 3 个索引已建；无写入 API，`selection.rewrite` 仍不入账 |
 | DB-01 | ✅ | `normalizeUsage` 四类互斥，`writing-budget` 已改用 |
@@ -54,7 +54,7 @@
 | FQ-08 | ✅ | 补 `foreshadow.create/patch`，应用层统一调 `assertForeshadowTransition`；回收不再清空 `targetChapterId`/`plantedPoint`（`bd0763c`） |
 | FQ-10 | ✅ | 服务端生成 `fq-<uuid>` 并 remap 同载荷引用；`updates` 已消费且未知 id 明确拒绝；`retiredFacts` 上报 `unapplied`（`9567d00`） |
 
-**P0 退出标准达成情况**：跨模块 point 一致性、第 3 章知情第 10 章更新仍可见、跨项目 id 攻击被拒、严格 registrar 下 10 工具注册成功 —— **目前 2/4 可验收**（point 一致性、知情史回归已通过；跨项目 id 攻击拦截、严格 registrar 注册仍未通过），卡点即上表 3 条 ⚠️ 与 7 条 ❌（其中 FQ-06/FQ-07 属 B2-4，DSH 五项属 B2-2/B2-3）。
+**P0 退出标准达成情况**：跨模块 point 一致性、第 3 章知情第 10 章更新仍可见、严格 registrar 下 10 工具注册成功 —— **目前 3/4 可验收**（B2-2 后新增“严格 registrar 注册”）；剩余“跨项目 id 攻击被拒”由 FQ-06 决定，属 B2-4。上表剩 3 条 ⚠️（FE-27、DSH-10、DB-02）与 4 条 ❌（FE-07、DSH-08、FQ-06、FQ-07），DSH 两项属 B2-3，其余属 B2-4。
 
 ---
 
@@ -103,9 +103,9 @@
 
 | 编号 | 阶段 | 状态 | 现状与缺口 |
 | --- | --- | --- | --- |
-| DSH-01 | P0 | ❌ | 10 个工具无 `output{schema,render}` |
-| DSH-02 | P0 | ❌ | 无 `ctx.get`/嵌套 `ctx.inject`，无子作用域注册 |
-| DSH-03 | P0 | ❌ | thinking 增量混入候选正文；测试仍以错误值为期望 |
+| DSH-01 | P0 | ✅ | `dsh-tools-adapter` 统一补 `output{schema,render}`；严格 registrar 下 10 工具注册成功，任一失败整体回滚 |
+| DSH-02 | P0 | ✅ | `ctx.get('tools'/'configForms')` 解析 + 独立 `ctx.inject` 子作用域；无 `inject` 的旧宿主走属性回退 |
+| DSH-03 | P0 | ✅ | `blockTypes` 记录块类型，thinking 块 `block-end` 时删除该 index；候选正文与长度上限只含可见文本 |
 | DSH-04 | P1 | ❌ | 无 Peer/Actor，`command_journal` 无 `actor_id` |
 | DSH-05 | P1 | ❌ | 只读工具无动作白名单，无 `chapter.read` 精简 DTO |
 | DSH-06 | P1 | ⚠️ | `origin`/`origin_ref` 列已建；应用层不写 |
@@ -116,7 +116,7 @@
 | DSH-11 | P2 | ⚠️ | 已有 `AbortSignal.timeout(180_000)`；无上游超时/重试口径收敛 |
 | DSH-12 | P3 | ❌ | 运行检查器不展示 `cache_read / input` |
 | DSH-13 | P1 | ❌ | 错误码→HTTP 仅 404/400/409 三分支，无 403/422/503 |
-| DSH-14 | P2 | ❌ | 无 `dsh-adapter.ts`，宿主 API 直接散布在 `plugin.ts` |
+| DSH-14 | P2 | ⚠️ | `dsh-adapter.ts` 已单点收口宿主 API，`docs/03` 有服务契约表；**未**固定上游类型、未录制隔离 profile 样本（阻塞于决议 #5） |
 | DSH-15 | P2 | ❌ | 静态资源无 ETag/304 |
 | DSH-16 | P2 | ⚠️ | `planRetention` + `pruneBackups` 已实现并测试；宿主从不调用 |
 | DSH-17 | P2 | ⚠️ | `sandbox`/`referrerPolicy` 已定；baseURI 拼接与双实例未改 |
@@ -228,11 +228,25 @@
 | 批次 | 条目 | 产出 | 预估 |
 | --- | --- | --- | --- |
 | B2-1 连续性接线（✅ 已完成） | ~~FQ-01~~、~~FQ-02~~、~~FQ-03~~、~~FQ-08~~、~~FQ-10~~ | fact-sync 改用 `mergeFactVersion`；应用层统一 `splitChapterParagraphs`；提案校验 `base_revision_id` 并返回 `proposal-stale`；服务端生成 factId | 已完成 |
-| B2-2 宿主可启动 | DSH-01、DSH-02、DSH-03、DSH-14 | `dsh-adapter.ts` 单点收口；工具补 `output{schema,render}` 并进子作用域；thinking 增量过滤 | 3 天 |
+| B2-2 宿主可启动（✅ 已完成） | ~~DSH-01~~、~~DSH-02~~、~~DSH-03~~、DSH-14（①④） | `dsh-adapter.ts` 单点收口；工具补 `output{schema,render}` 并进子作用域；thinking 增量过滤；注册失败降级不拖垮工作台 | 已完成 |
 | B2-3 账本不丢 | DSH-08、DSH-10、DB-02 | 排空期继续写回执；微改写入账；`pruneCommandJournal` 定时调用 | 2 天 |
 | B2-4 写入安全 | FQ-06、FQ-07、FQ-09、FE-07、FE-27 | 跨项目 id 拒绝；`documentId` 必填；章序单真源（先定 schema）；前端超时+幂等键；保存键组字保护 | 3 天 |
 
 完成 B2-1 ~ B2-3 后 P0 可达 **20/24**；再加 B2-4 可达 **24/24**（P0 清零）。
+
+### B2-2 执行清单（✅ 全部完成）
+
+| # | 条目 | 改动点 | 完成判据 |
+| --- | --- | --- | --- |
+| 1 ✅ | DSH-01 | 新增 `host/dsh-tools-adapter.ts`：`{name,description,parameters(additionalProperties:false),output{schema,render},execute(args,exec)}` + 注册前自检 + 失败整体回滚；`support/` 新增 `createStrictToolRegistrar` 复刻上游校验 | `test/host-tools-v23.test.mjs` 用严格 registrar 注册 10 个工具全部通过；缺 `output` / 开放参数 / 非法 `timeoutMs` 均被拒 |
+| 2 ✅ | DSH-02 | 新增 `host/dsh-adapter.ts`：`HOST_SERVICE_CONTRACTS` 契约表、`getHostService`（`ctx.get` → 属性回退）、`runInServiceScope`；工具与设置表单改挂独立 `ctx.inject` 子作用域 | Cordis 型宿主下 `ctx.tools` 为空仍注册 10 工具；旧宿主走属性回退；契约表必需项与 `inject` 一致 |
+| 3 ✅ | DSH-03 | `writing.ts` 维护 `blockTypes`，`block-end='thinking'` 删除该 index；正文只拼 text 或未声明类型的块，`MAX_CANDIDATE_LENGTH` 只计可见文本 | thinking 增量不入正文；整段只有思考时返回 `thinking_exhausted` 而非空稿 |
+| 4 ✅ | DSH-14（①④） | 宿主 API 单点收口到 `dsh-adapter.ts`；`docs/03` 增补服务契约表（必需/可选/来源） | host 目录外无宿主类型引用；表与 `HOST_SERVICE_CONTRACTS` 有测试守护 |
+| 5 ✅ | 启动降级 | 工具/表单注册移出主 try 块；失败只 `logger.error` 并在 `/diag` 标 `agentToolsRegistered=false` / `agentToolsError` | 宿主拒绝注册时 `/workbench` 与 `/state` 仍 200，`/diag` 如实降级 |
+
+**验收**：`test:v23` 10 文件 / 69 用例全绿；`npm test` 42 文件 / 315 用例全绿；`test:all` 68 文件 / 488 用例（Node 24 全绿；Node 22 仅 `workflow-w01` 的 `using` 语法失败）。
+
+**遗留（阻塞于决议 #5）**：DSH-14 的②（固定上游类型/devDependency）与③（隔离 profile 录制一次 route/llm/tools 样本）未做。在拿到真实录制前，`dsh-adapter.ts` 的接口仍是“按公开文档推断”，不能标注为已在真实 DsH 验证。
 
 ### B2-1 执行清单（✅ 全部完成）
 
@@ -251,7 +265,7 @@
 - **D1 · 拒绝理由（已确认）**：`proposal-stale` 不新增错误码，作为 `gate.denied` 的 `reason` 实现，沿用 409；前端补一条文案。**不修改** `contracts/errors.ts` 与 HTTP 映射。
 - **D2 · 历史数据回填**：迁移会重算既有 `author_evidence.point`。按决议 #12，执行前必须先热备并输出 point 变化报告供作者核对，不可静默改数。
 
-**验收**：`test:v23` 9 文件 / 62 用例全绿；`npm test` 306 用例全绿；`test:all` 479 用例（Node 24 全绿，Node 22 的 `using` 语法失败项不计入本批）。"第 3 章知情 → 第 10 章更新 → 第 5 章可见"由 `fanqie-memory-merge-v23` 与 `sprint2-v2` 覆盖。
+**验收**：`test:v23` 10 文件 / 69 用例全绿；`npm test` 42 文件 / 315 用例全绿；`test:all` 68 文件 / 488 用例（Node 24 全绿；Node 22 仅 `workflow-w01` 的 `using` 语法失败）。"第 3 章知情 → 第 10 章更新 → 第 5 章可见"由 `fanqie-memory-merge-v23` 与 `sprint2-v2` 覆盖。
 
 ---
 
@@ -260,4 +274,4 @@
 - 每完成一批，**只改本表对应行的状态与"现状"**，并在提交信息里带上条目编号（如 `feat(fanqie): wire mergeFactVersion (FQ-01)`）。
 - 状态升级必须有测试支撑：⚠️ → ✅ 需在 `test/*-v23.test.mjs` 或对应分层测试中新增至少一个**走真实调用链**的用例。
 - 本表不复制计划正文、不记录决策；决议仍以计划 §6.0 为准。
-- 每次改动后跑 `npm run verify`（只读类型检查 + 306 个核心用例）与 `npm run test:all`（479 个全量用例，需 Node ≥ 24.15），数字写回本页顶部基线。
+- 每次改动后跑 `npm run verify`（只读类型检查 + 315 个核心用例）与 `npm run test:all`（488 个全量用例，需 Node ≥ 24.15），数字写回本页顶部基线。

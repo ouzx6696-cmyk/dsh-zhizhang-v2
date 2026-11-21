@@ -82,15 +82,15 @@ npm run dev
 | 命令 | 测试范围 | 文件数 | 用例数 | 覆盖职责与说明 |
 | --- | --- | :---: | :---: | --- |
 | `npm run test:contracts` | `*-d02`、`*-w02` | 14 | 147 | **冻结契约合规**：存储格式窗口、命令幂等账本、事件日志、冷启动恢复、运行状态机、预算守卫与交稿批准门 |
-| `npm run test:v2` | `*-v2`、`smoke` | 18 | 97 | **V2.2 应用与全栈测试**：工作区核心流程、Sprint 1–4 优化闭环（缓存/记忆/FTS5/SKILL 沙箱/体检/ diff/微改写/5000 章虚拟化/控制面/7+3 工具）、宿主插件 HTTP/SSE、灾备恢复与静态架构守卫 |
-| `npm run test:v23` | `*-v23` | 6 | 44 | **V2.3 底座测试**：段落切分/`mergeFactVersion`/伏笔与章节转换表、`normalizeUsage` 与 schema 迁移、热备/FTS 两段式、diff 与选段校验、虚拟列表行高 |
-| `npm run test:host` | `host-plugin-v2`、`generation-v2`、`backup-v2` | 3 | 16 | **宿主、传输与灾备专测**：`/workbench`/`/state`/`/diag`/`/mutate` CSP 与状态码映射、202 异步生成与取消、`export.conflict` 与重启恢复、SHA-256 整库备份还原与防篡改 |
+| `npm run test:v2` | `*-v2`、`smoke` | 18 | 99 | **V2.2 应用与全栈测试**：工作区核心流程、Sprint 1–4 优化闭环（缓存/记忆/FTS5/SKILL 沙箱/体检/ diff/微改写/5000 章虚拟化/控制面/7+3 工具）、宿主插件 HTTP/SSE、灾备恢复与静态架构守卫 |
+| `npm run test:v23` | `*-v23` | 10 | 69 | **V2.3 底座测试**：段落切分/`mergeFactVersion`/伏笔与章节转换表、`normalizeUsage` 与 schema 迁移、热备/FTS 两段式、diff 与选段校验、虚拟列表行高、提案漂移/事实 id、宿主工具适配与 thinking 过滤 |
+| `npm run test:host` | `host-plugin-v2`、`generation-v2`、`backup-v2` | 3 | 18 | **宿主、传输与灾备专测**：`/workbench`/`/state`/`/diag`/`/mutate` CSP 与状态码映射、202 异步生成与取消、thinking 块过滤、`export.conflict` 与重启恢复、SHA-256 整库备份还原与防篡改 |
 | `npm run test:client` | `client-v2` | 1 | 6 | **前端无浏览器单元测试**：`DraftVault` 多标签 owner 隔离与慢保存恢复、大型段落 LCS `computeParagraphDiff`、`apiRequest` 错误汉化、`slot.ts` 三槽位注入、`workbench.html` 全量 ID/页签/Manifest 静态契约校验 |
 | `npm run test:arch` | `smoke`、`refactor-v2` | 2 | 13 | **架构边界与布局守卫**：全仓库 `.ts` 递归依赖隔离（双产品线/宿主/存储/客户端零越界）、`workspace-dto.ts` 纯类型零运行时校验、`AGENTS.md` 目录纯净度、`manifest`/`package.json`/`cordis.patch.yml` 一致性 |
-| `npm test` | `test:contracts` + `test:v2` + `test:v23` | 38 | 288 | **日常核心回归** |
+| `npm test` | `test:contracts` + `test:v2` + `test:v23` | 42 | 315 | **日常核心回归** |
 | `npm run test:evidence` | `*-?01.test.mjs` | 26 | 173 | **历史规则取证**：固定录存 v1.x 规则裁决证据与原始对照行为 |
-| `npm run test:all` | `test/*.test.mjs` | 64 | 461 | **发版前全量验收**：核心 + 取证全覆盖（无跳过、总数精确等于 `test` + `test:evidence` + `test:v23`） |
-| `npm run verify` | `check` + `npm test` | 38 | 288 | **日常开发必跑门禁** |
+| `npm run test:all` | `test/*.test.mjs` | 68 | 488 | **发版前全量验收**：核心 + 取证全覆盖（无跳过） |
+| `npm run verify` | `check` + `npm test` | 42 | 315 | **日常开发必跑门禁** |
 
 > **测试目录布局规范（[AGENTS.md](../AGENTS.md)）**：`node --test` 默认把 `test/` 下所有 `.mjs` 文件计为测试文件，因此多夹具共享辅助工具严格位于 `support/` 下，且由 [test/refactor-v2.test.mjs](../test/refactor-v2.test.mjs) 自动化断言 `test/` 目录内仅存在 `*.test.mjs` 文件。
 

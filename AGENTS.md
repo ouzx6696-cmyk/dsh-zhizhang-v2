@@ -14,6 +14,7 @@ This file governs only this independent V2 workspace. It does not replace or mod
 
 - `contracts/` owns shared types and schemas after they are reviewed and frozen.
 - `host/` is the composition and verified Host adapter boundary; it must not own domain rules.
+- The DsH host surface is declared **only** in `host/dsh-adapter.ts`; the upstream tool shape lives **only** in `host/dsh-tools-adapter.ts`. Every other module depends on those narrow interfaces. Until decision #5 authorizes an isolated-profile recording, both files are explicitly marked "inferred from public docs" and must not be described as verified.
 - `storage/` owns persistence mechanics; domain packages must not import Host or Client code.
 - `workflow/` owns orchestration and run state, not author decisions or business state transitions.
 - `domain/shared/`, `domain/fanqie/`, and `domain/toutiao/` own separate business rules; the two product domains must not import each other.
