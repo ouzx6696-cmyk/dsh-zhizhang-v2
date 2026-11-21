@@ -148,31 +148,31 @@ test("Sprint 4 #2: DsH 7+3 tools, settings registration, and sanitized /api/zhiz
 
       const toolByName = new Map(registeredTools.map((tool) => [tool.name, tool]));
 
-      // Exercise all 7 read-only tools
-      assert.equal(toolByName.get("zhizhang_read_tree").execute({ projectId }).volumes.length, 1);
-      assert.equal(toolByName.get("zhizhang_read_chapter").execute({ projectId, documentId }).active.body, secretText);
-      assert.deepEqual(toolByName.get("zhizhang_read_known_facts").execute({ projectId, character: "林砚", chapterId: documentId }).entries, []);
-      assert.ok(toolByName.get("zhizhang_search_workspace").execute({ projectId, query: "翡翠兵符" }).length >= 1);
-      assert.ok(Array.isArray(toolByName.get("zhizhang_check_conflicts").execute({ projectId })));
-      assert.equal(toolByName.get("zhizhang_diagnose_chapter").execute({ documentId }).documentId, documentId);
-      assert.equal(toolByName.get("zhizhang_read_controls").execute({ projectId }).authorIntent, "只许提议不许直改");
+      // Exercise all 7 read-only tools (upstream execute is async and awaits the host signal)
+      assert.equal((await toolByName.get("zhizhang_read_tree").execute({ projectId })).volumes.length, 1);
+      assert.equal((await toolByName.get("zhizhang_read_chapter").execute({ projectId, documentId })).active.body, secretText);
+      assert.deepEqual((await toolByName.get("zhizhang_read_known_facts").execute({ projectId, character: "林砚", chapterId: documentId })).entries, []);
+      assert.ok((await toolByName.get("zhizhang_search_workspace").execute({ projectId, query: "翡翠兵符" })).length >= 1);
+      assert.ok(Array.isArray(await toolByName.get("zhizhang_check_conflicts").execute({ projectId })));
+      assert.equal((await toolByName.get("zhizhang_diagnose_chapter").execute({ documentId })).documentId, documentId);
+      assert.equal((await toolByName.get("zhizhang_read_controls").execute({ projectId })).authorIntent, "只许提议不许直改");
 
       // Exercise all 3 proposal tools and prove zero authoritative direct writes
-      toolByName.get("zhizhang_propose_setting").execute({
+      await toolByName.get("zhizhang_propose_setting").execute({
         projectId,
         documentId,
         factId: "jade-token",
         note: "翡翠兵符藏在暗格",
         source: "对话辅助提议",
       });
-      toolByName.get("zhizhang_propose_foreshadow").execute({
+      await toolByName.get("zhizhang_propose_foreshadow").execute({
         projectId,
         documentId,
         title: "暗格兵符伏笔",
         status: "planted",
         note: "第一章埋设",
       });
-      toolByName.get("zhizhang_propose_technique").execute({
+      await toolByName.get("zhizhang_propose_technique").execute({
         projectId,
         title: "暗格物证留白术",
         executionSteps: "先写触感再揭示物件身份",

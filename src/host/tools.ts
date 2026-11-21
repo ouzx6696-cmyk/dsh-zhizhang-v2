@@ -1,48 +1,43 @@
+import {
+  defineParameters,
+  openOutputSchema,
+  registerHostTools,
+  type AgentToolSpec,
+  type HostToolDefinition,
+} from "./dsh-tools-adapter.ts";
+import type { Disposer, HostToolRegistrar } from "./dsh-adapter.ts";
 import type { AuthorWorkspace } from "./workspace.ts";
 
-export interface ZhizhangAgentToolDefinition {
-  readonly name: string;
-  readonly description: string;
-  readonly readOnly: boolean;
-  readonly proposalOnly?: boolean;
-  readonly parameters: Readonly<Record<string, unknown>>;
-  execute(args: Readonly<Record<string, unknown>>): unknown;
-}
-
-export interface DsHToolRegistrar {
-  register(tool: ZhizhangAgentToolDefinition): () => void | Promise<void>;
-}
+/** Upstream-shaped tool definition; kept as an alias so existing imports stay valid. */
+export type ZhizhangAgentToolDefinition = HostToolDefinition;
 
 /**
  * Creates 7 strict read-only query tools and 3 author-sovereign proposal tools
  * for DeepSeek Harness conversations. Zero tools may directly mutate
  * authoritative revisions, approved lore, foreshadows, or library assets.
+ *
+ * Every spec carries an explicit `outputSchema`; `dsh-tools-adapter.ts` adds the
+ * `output.render` block required by the real ToolRuntime (DSH-01).
  */
-export function createZhizhangAgentTools(workspace: AuthorWorkspace): readonly ZhizhangAgentToolDefinition[] {
+export function createZhizhangAgentTools(workspace: AuthorWorkspace): readonly AgentToolSpec[] {
   return [
     {
       name: "zhizhang_read_tree",
       description: "Read the volume -> act -> chapter hierarchy, char counts, and rolling summaries of a Fanqie project.",
       readOnly: true,
-      parameters: {
-        type: "object",
-        required: ["projectId"],
-        properties: { projectId: { type: "string" } },
-      },
+      parameters: defineParameters({ projectId: { type: "string" } }, ["projectId"]),
+      outputSchema: openOutputSchema("Fanqie volume/act/chapter tree with char counts and rolling summaries."),
       execute: (args) => workspace.mutation("tree.get", { projectId: args.projectId }),
     },
     {
       name: "zhizhang_read_chapter",
       description: "Read a chapter's current working draft, state, planning metadata, and active context crumb.",
       readOnly: true,
-      parameters: {
-        type: "object",
-        required: ["projectId", "documentId"],
-        properties: {
-          projectId: { type: "string" },
-          documentId: { type: "string" },
-        },
-      },
+      parameters: defineParameters(
+        { projectId: { type: "string" }, documentId: { type: "string" } },
+        ["projectId", "documentId"],
+      ),
+      outputSchema: openOutputSchema("Chapter snapshot: draft body, state, planning metadata, and context crumb."),
       execute: (args) =>
         workspace.snapshot(
           typeof args.projectId === "string" ? args.projectId : undefined,
@@ -53,16 +48,16 @@ export function createZhizhangAgentTools(workspace: AuthorWorkspace): readonly Z
       name: "zhizhang_read_known_facts",
       description: "Check which approved lore facts a specific character knows at a given chapter and paragraph anchor.",
       readOnly: true,
-      parameters: {
-        type: "object",
-        required: ["projectId", "character", "chapterId"],
-        properties: {
+      parameters: defineParameters(
+        {
           projectId: { type: "string" },
           character: { type: "string" },
           chapterId: { type: "string" },
           point: { type: "number" },
         },
-      },
+        ["projectId", "character", "chapterId"],
+      ),
+      outputSchema: openOutputSchema("Settings view restricted to facts the character knows at the given anchor."),
       execute: (args) =>
         workspace.mutation("settings.read", {
           projectId: args.projectId,
@@ -74,15 +69,11 @@ export function createZhizhangAgentTools(workspace: AuthorWorkspace): readonly Z
       name: "zhizhang_search_workspace",
       description: "Full-text BM25+RRF search across chapters, approved lore, deconstructions, and techniques/skills.",
       readOnly: true,
-      parameters: {
-        type: "object",
-        required: ["projectId", "query"],
-        properties: {
-          projectId: { type: "string" },
-          query: { type: "string" },
-          limit: { type: "number" },
-        },
-      },
+      parameters: defineParameters(
+        { projectId: { type: "string" }, query: { type: "string" }, limit: { type: "number" } },
+        ["projectId", "query"],
+      ),
+      outputSchema: openOutputSchema("Ranked workspace search hits with source kind and snippet."),
       execute: (args) =>
         workspace.mutation("workspace.search", {
           projectId: args.projectId,
@@ -94,33 +85,24 @@ export function createZhizhangAgentTools(workspace: AuthorWorkspace): readonly Z
       name: "zhizhang_check_conflicts",
       description: "Run deterministic timeline & knownFrom conflict scan on approved Fanqie lore and foreshadows.",
       readOnly: true,
-      parameters: {
-        type: "object",
-        required: ["projectId"],
-        properties: { projectId: { type: "string" } },
-      },
+      parameters: defineParameters({ projectId: { type: "string" } }, ["projectId"]),
+      outputSchema: openOutputSchema("Deterministic lore conflict list (timeline and knowledge boundaries)."),
       execute: (args) => workspace.mutation("lore.conflicts", { projectId: args.projectId }),
     },
     {
       name: "zhizhang_diagnose_chapter",
       description: "Run zero-token offline Golden-3-chapters and AI-slop diagnostics on a Fanqie chapter.",
       readOnly: true,
-      parameters: {
-        type: "object",
-        required: ["documentId"],
-        properties: { documentId: { type: "string" } },
-      },
+      parameters: defineParameters({ documentId: { type: "string" } }, ["documentId"]),
+      outputSchema: openOutputSchema("Offline diagnostic findings and scores for one chapter."),
       execute: (args) => workspace.mutation("chapter.diagnose", { documentId: args.documentId }),
     },
     {
       name: "zhizhang_read_controls",
       description: "Read the project compass (authorIntent) and near-term writing focus (currentFocus).",
       readOnly: true,
-      parameters: {
-        type: "object",
-        required: ["projectId"],
-        properties: { projectId: { type: "string" } },
-      },
+      parameters: defineParameters({ projectId: { type: "string" } }, ["projectId"]),
+      outputSchema: openOutputSchema("Project compass and near-term focus controls."),
       execute: (args) => workspace.mutation("controls.get", { projectId: args.projectId }),
     },
     {
@@ -128,10 +110,8 @@ export function createZhizhangAgentTools(workspace: AuthorWorkspace): readonly Z
       description: "Submit a pending setting proposal into author_settings for explicit author approval (never auto-commits).",
       readOnly: false,
       proposalOnly: true,
-      parameters: {
-        type: "object",
-        required: ["projectId", "documentId", "factId", "note", "source"],
-        properties: {
+      parameters: defineParameters(
+        {
           projectId: { type: "string" },
           documentId: { type: "string" },
           factId: { type: "string" },
@@ -140,7 +120,9 @@ export function createZhizhangAgentTools(workspace: AuthorWorkspace): readonly Z
           point: { type: "number" },
           people: { type: "array" },
         },
-      },
+        ["projectId", "documentId", "factId", "note", "source"],
+      ),
+      outputSchema: openOutputSchema("Identifier and pending status of the created setting proposal."),
       execute: (args) =>
         workspace.mutation("setting.propose", {
           projectId: args.projectId,
@@ -157,10 +139,8 @@ export function createZhizhangAgentTools(workspace: AuthorWorkspace): readonly Z
       description: "Submit a pending foreshadow update proposal into author_ai_proposals inbox for author approval.",
       readOnly: false,
       proposalOnly: true,
-      parameters: {
-        type: "object",
-        required: ["projectId", "title"],
-        properties: {
+      parameters: defineParameters(
+        {
           projectId: { type: "string" },
           documentId: { type: "string" },
           id: { type: "string" },
@@ -169,7 +149,9 @@ export function createZhizhangAgentTools(workspace: AuthorWorkspace): readonly Z
           status: { type: "string" },
           note: { type: "string" },
         },
-      },
+        ["projectId", "title"],
+      ),
+      outputSchema: openOutputSchema("Identifier and pending status of the created foreshadow proposal."),
       execute: (args) =>
         workspace.mutation("proposal.create", {
           kind: "fact_sync",
@@ -195,10 +177,8 @@ export function createZhizhangAgentTools(workspace: AuthorWorkspace): readonly Z
       description: "Submit a pending writing technique card proposal into author_ai_proposals inbox for author approval.",
       readOnly: false,
       proposalOnly: true,
-      parameters: {
-        type: "object",
-        required: ["projectId", "title", "executionSteps"],
-        properties: {
+      parameters: defineParameters(
+        {
           projectId: { type: "string" },
           title: { type: "string" },
           category: { type: "string" },
@@ -208,7 +188,9 @@ export function createZhizhangAgentTools(workspace: AuthorWorkspace): readonly Z
           constraints: { type: "string" },
           antiPatterns: { type: "string" },
         },
-      },
+        ["projectId", "title", "executionSteps"],
+      ),
+      outputSchema: openOutputSchema("Identifier and pending status of the created technique proposal."),
       execute: (args) =>
         workspace.mutation("proposal.create", {
           kind: "technique",
@@ -229,15 +211,15 @@ export function createZhizhangAgentTools(workspace: AuthorWorkspace): readonly Z
   ];
 }
 
+/**
+ * Registers all-or-nothing: a partial tool surface is worse than none, because
+ * the model would silently lose write paths it was told about.
+ */
 export function registerZhizhangTools(
-  registrar: DsHToolRegistrar | undefined,
+  registrar: HostToolRegistrar<ZhizhangAgentToolDefinition> | undefined,
   workspace: AuthorWorkspace,
   enabled = true,
-): Array<() => void | Promise<void>> {
+): Disposer[] {
   if (!registrar || !enabled) return [];
-  const disposers: Array<() => void | Promise<void>> = [];
-  for (const tool of createZhizhangAgentTools(workspace)) {
-    disposers.push(registrar.register(tool));
-  }
-  return disposers;
+  return registerHostTools(registrar, createZhizhangAgentTools(workspace));
 }

@@ -273,10 +273,74 @@ export function createReceiptLedger() {
   };
 }
 
-export function createMockDsHHost({ llm, readAsset } = {}) {
+/**
+ * Mirrors the upstream `tools.register` preconditions (DSH-01): every tool must
+ * declare `output.schema` + `output.render`, an object parameter schema with
+ * `additionalProperties: false`, and a positive `timeoutMs`. Without this
+ * fixture a mock host accepts anything and hides real-host load failures.
+ */
+export function createStrictToolRegistrar({ failOn = null, failWith = null } = {}) {
+  const tools = [];
+  const disposed = [];
+  const register = (tool) => {
+    if (!tool || typeof tool !== "object") {
+      throw new TypeError("tool definition must be an object");
+    }
+    if (failOn === tool.name) {
+      throw failWith ?? new TypeError(`tool "${tool.name}" registration rejected by host`);
+    }
+    if (typeof tool.name !== "string" || !/^[a-z][a-z0-9_]{2,63}$/.test(tool.name)) {
+      throw new TypeError(`tool "${tool?.name}" must declare a lowercase snake_case name`);
+    }
+    if (typeof tool.description !== "string" || !tool.description.trim() || tool.description.length > 1024) {
+      throw new TypeError(`tool "${tool.name}" must declare a description`);
+    }
+    if (typeof tool.readOnly !== "boolean") {
+      throw new TypeError(`tool "${tool.name}" must declare readOnly`);
+    }
+    if (
+      !tool.parameters
+      || tool.parameters.type !== "object"
+      || !tool.parameters.properties
+      || tool.parameters.additionalProperties !== false
+    ) {
+      throw new TypeError(`tool "${tool.name}" must declare an object parameters schema with additionalProperties:false`);
+    }
+    if (!tool.output || typeof tool.output !== "object" || !tool.output.schema || typeof tool.output.render !== "function") {
+      throw new TypeError(`tool "${tool.name}" must declare output { schema, render }`);
+    }
+    if (typeof tool.execute !== "function") {
+      throw new TypeError(`tool "${tool.name}" must declare execute`);
+    }
+    if (!Number.isInteger(tool.timeoutMs) || tool.timeoutMs <= 0) {
+      throw new TypeError(`tool "${tool.name}" must declare a positive timeoutMs`);
+    }
+    tools.push(tool);
+    return () => {
+      const index = tools.indexOf(tool);
+      if (index >= 0) tools.splice(index, 1);
+      disposed.push(tool.name);
+    };
+  };
+  return {
+    tools,
+    disposed,
+    register,
+    async invoke(name, args, exec) {
+      const tool = tools.find((item) => item.name === name);
+      if (!tool) throw new Error(`tool not registered: ${name}`);
+      return tool.execute(args, exec);
+    },
+  };
+}
+
+export function createMockDsHHost({ llm, readAsset, tools, configForms, cordis = false } = {}) {
   const routes = new Map();
   const disposedPaths = [];
   const logs = [];
+  const injectedScopes = [];
+  const effectNames = [];
+  const scopeDisposers = [];
   let effectName = null;
   let effectDisposer = null;
   let closed = false;
@@ -308,9 +372,36 @@ export function createMockDsHHost({ llm, readAsset } = {}) {
     },
     effect(setup, name) {
       effectName = name;
+      effectNames.push(name);
       effectDisposer = setup();
     },
   };
+
+  if (!cordis && tools !== undefined) ctx.tools = tools;
+  if (!cordis && configForms !== undefined) ctx.configForms = configForms;
+
+  if (cordis) {
+    const services = { connection: ctx.connection, llm: ctx.llm, tools, configForms };
+    ctx.get = (name) => services[name];
+    ctx.inject = (deps, callback) => {
+      injectedScopes.push([...deps]);
+      if (!deps.every((dep) => services[dep] !== undefined)) return () => {};
+      const scoped = {
+        ...ctx,
+        effect(setup, name) {
+          effectNames.push(name);
+          scopeDisposers.push(setup());
+        },
+      };
+      callback(scoped);
+      return async () => {
+        while (scopeDisposers.length > 0) {
+          const dispose = scopeDisposers.pop();
+          if (typeof dispose === "function") await dispose();
+        }
+      };
+    };
+  }
 
   function route(subPath) {
     const fullPath = subPath.startsWith("/api/zhizhang") ? subPath : `/api/zhizhang${subPath}`;
@@ -375,6 +466,10 @@ export function createMockDsHHost({ llm, readAsset } = {}) {
   async function close() {
     if (closed) return;
     closed = true;
+    while (scopeDisposers.length > 0) {
+      const dispose = scopeDisposers.pop();
+      if (typeof dispose === "function") await dispose();
+    }
     if (typeof effectDisposer === "function") {
       await effectDisposer();
     }
@@ -385,6 +480,8 @@ export function createMockDsHHost({ llm, readAsset } = {}) {
     routes,
     disposedPaths,
     logs,
+    injectedScopes,
+    effectNames,
     readAsset: assetReader,
     get effectName() {
       return effectName;

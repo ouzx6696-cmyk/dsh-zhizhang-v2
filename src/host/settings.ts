@@ -31,6 +31,10 @@ export interface SanitizedDiagnosticsReport {
   readonly activeGenerations: number;
   readonly activeProposals: number;
   readonly agentToolsEnabled: boolean;
+  /** True only after all 7+3 tools were accepted by the host registrar (DSH-01). */
+  readonly agentToolsRegistered: boolean;
+  /** Error class name when registration failed; never a message, so no paths leak. */
+  readonly agentToolsError: string | null;
 }
 
 export function createZhizhangConfigSchema(initial?: {
@@ -99,6 +103,8 @@ export function buildSanitizedDiagnostics(
     readonly activeGenerations: number;
     readonly activeProposals: number;
     readonly agentToolsEnabled: boolean;
+    readonly agentToolsRegistered?: boolean;
+    readonly agentToolsError?: string | null;
   },
 ): SanitizedDiagnosticsReport {
   const journalRow = stmt(db, "PRAGMA journal_mode;").get() as { journal_mode?: string } | undefined;
@@ -143,5 +149,7 @@ export function buildSanitizedDiagnostics(
     activeGenerations: runtimeInfo.activeGenerations,
     activeProposals: runtimeInfo.activeProposals,
     agentToolsEnabled: runtimeInfo.agentToolsEnabled,
+    agentToolsRegistered: runtimeInfo.agentToolsRegistered ?? false,
+    agentToolsError: runtimeInfo.agentToolsError ?? null,
   };
 }

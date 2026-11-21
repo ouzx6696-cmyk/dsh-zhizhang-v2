@@ -12,15 +12,26 @@ import {
 } from "../storage/index.ts";
 import { assertStageOutput, WRITING_STAGE_IDS } from "../workflow/writing-stages.ts";
 import { writeDeliveryFile } from "./delivery-io.ts";
+import {
+  describeError,
+  getHostService,
+  HOST_REQUIRED_SERVICES,
+  registerHostRoute,
+  runInServiceScope,
+  type Disposer,
+  type DsHPluginContext,
+  type HostToolRegistrar,
+} from "./dsh-adapter.ts";
 import { buildSanitizedDiagnostics, registerZhizhangSettings, type DsHConfigFormRegistrar } from "./settings.ts";
-import { registerZhizhangTools, type DsHToolRegistrar } from "./tools.ts";
+import { registerZhizhangTools, type ZhizhangAgentToolDefinition } from "./tools.ts";
 import {
   buildRecoveryHints,
   createSingleShotCaller,
   executeGenerationWithRunner,
-  type LlmTransport,
 } from "./writing.ts";
 import { openAuthorWorkspace } from "./workspace.ts";
+
+export type { DsHPluginContext } from "./dsh-adapter.ts";
 
 export interface DsHPluginConfig {
   readonly dataDirectory: string;
@@ -29,33 +40,16 @@ export interface DsHPluginConfig {
   readonly enableAgentTools?: boolean;
 }
 
-interface DsHRouteRegistration {
-  readonly path: string;
-  readonly methods: readonly ("GET" | "POST")[];
-  readonly requestBody: "buffered" | "streaming";
-  readonly fetch: (request: Request) => Promise<Response>;
-}
-
-export interface DsHPluginContext {
-  readonly connection: {
-    readonly fetch: {
-      register(route: DsHRouteRegistration): () => void | Promise<void>;
-    };
-  };
-  readonly llm: LlmTransport;
-  readonly tools?: DsHToolRegistrar;
-  readonly configForms?: DsHConfigFormRegistrar;
-  readonly logger: {
-    error(message: string, details?: Record<string, unknown>): void;
-  };
-  effect(setup: () => () => Promise<void> | void, name: string): void;
-}
-
 export interface WorkbenchPluginDeps {
   readonly readAsset?: (kind: "html" | "css" | "js", path: string) => Uint8Array;
 }
 
-export const inject = ["connection", "llm"] as const;
+/**
+ * Cordis `inject`: required services only. `tools` and `configForms` are
+ * optional and are resolved lazily through `ctx.get()` in their own sub-scopes
+ * (DSH-02), so their absence never blocks the workbench routes.
+ */
+export const inject = HOST_REQUIRED_SERVICES;
 
 const BASE_PATH = "/api/zhizhang";
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
@@ -143,7 +137,7 @@ export function applyWorkbench(
     const database = join(config.dataDirectory, "workspace.sqlite");
     if (!existsSync(database)) createStore(database);
     const db = openStore(database);
-    const disposers: (() => void | Promise<void>)[] = [];
+    const disposers: Disposer[] = [];
     const generations = new Map<string, { controller: AbortController; task: Promise<void> }>();
     const proposalJobs = new Map<string, { controller: AbortController; task: Promise<void> }>();
     const proposalLocks = new Set<string>();
@@ -171,7 +165,7 @@ export function applyWorkbench(
         fetch: (request: Request) => Promise<Response>,
       ) => {
         disposers.push(
-          ctx.connection.fetch.register({
+          registerHostRoute(ctx, {
             path: BASE_PATH + path,
             methods,
             requestBody: methods.includes("GET") ? "buffered" : "streaming",
@@ -191,8 +185,42 @@ export function applyWorkbench(
       }
 
       const agentToolsEnabled = config.enableAgentTools ?? true;
-      disposers.push(...registerZhizhangTools(ctx.tools, workspace, agentToolsEnabled));
-      disposers.push(...registerZhizhangSettings(ctx.configForms, config));
+      let agentToolsRegistered = false;
+      let agentToolsError: string | null = null;
+      if (agentToolsEnabled) {
+        disposers.push(
+          ...runInServiceScope(
+            ctx,
+            ["tools"],
+            "zhizhang: agent tools",
+            (scoped) => {
+              const registrar = getHostService<HostToolRegistrar<ZhizhangAgentToolDefinition>>(scoped, "tools");
+              if (!registrar) return [];
+              const registered = registerZhizhangTools(registrar, workspace, true);
+              agentToolsRegistered = true;
+              return registered;
+            },
+            (error) => {
+              agentToolsError = describeError(error);
+              ctx.logger.error("zhizhang: agent tool registration failed", { reason: agentToolsError });
+            },
+          ),
+        );
+      }
+      disposers.push(
+        ...runInServiceScope(
+          ctx,
+          ["configForms"],
+          "zhizhang: settings form",
+          (scoped) => {
+            const configForms = getHostService<DsHConfigFormRegistrar>(scoped, "configForms");
+            return registerZhizhangSettings(configForms, config);
+          },
+          (error) => {
+            ctx.logger.error("zhizhang: settings form registration failed", { reason: describeError(error) });
+          },
+        ),
+      );
 
       route("/diag", ["GET"], async () => {
         if (closing) return new Response(null, { status: 503 });
@@ -201,6 +229,8 @@ export function applyWorkbench(
             activeGenerations: generations.size,
             activeProposals: proposalJobs.size,
             agentToolsEnabled,
+            agentToolsRegistered,
+            agentToolsError,
           });
           return json({ ok: true, result: report });
         } catch (error) {
