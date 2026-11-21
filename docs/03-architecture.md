@@ -182,13 +182,13 @@ flowchart TD
 | --- | --- |
 | **卷幕树 (7)** | `tree.get`、`volume.create`、`volume.update`、`volume.delete`、`act.create`、`act.update`、`act.delete` |
 | **章节与上下文 (4)** | `chapter.move`、`chapter.summary.save`、`chapter.diagnose`、`context.preview` |
-| **设定·伏笔·观察 (7)** | `lore.list`、`lore.conflicts`、`foreshadow.list`、`foreshadow.upsert`、`observation.create`、`observation.list`、`observation.update` |
+| **设定·伏笔·观察 (9)** | `lore.list`、`lore.conflicts`、`foreshadow.list`、`foreshadow.upsert`、`foreshadow.create`、`foreshadow.patch`、`observation.create`、`observation.list`、`observation.update` |
 | **提案与选段 (6)** | `proposal.create`、`proposal.decide`、`proposal.list`、`proposal.generate`、`proposal.cancel`、`selection.rewrite` |
 | **共享库与技能 (11)** | `library.mount`、`library.mounts`、`library.unmount`、`deconstruct.list`、`deconstruct.save`、`deconstruct.delete`、`technique.list`、`technique.save`、`technique.delete`、`technique.recommend`、`skill.import` |
 | **检索与工程包 (3)** | `workspace.search`、`project.export_bundle`、`project.import_bundle` |
 | **控制面与配置 (4)** | `controls.get`、`controls.save`、`slop.config.get`、`slop.config.save` |
 
-> **收口状态**：`contracts/workspace-dto.ts` 的 `ActionMap` 目前只声明 26 个动作，且包含 10 个尚未实现的占位（`project.bootstrap`、`chapter.read`、`chapter.creation_report`、`project.daily_stats`、`setting.revoke_known`、`foreshadow.create`、`foreshadow.patch`、`backup.create`、`backup.list`、`revisions.compact`）。FE-17 的目标是让 `ActionMap` 覆盖全部 74 个动作并删除占位，当前状态见 [V2.3 状态对照表](zhizhang_v2_3_status.md)。
+> **收口状态**：`contracts/workspace-dto.ts` 的 `ActionMap` 目前只声明 26 个动作，且包含 8 个尚未实现的占位（`project.bootstrap`、`chapter.read`、`chapter.creation_report`、`project.daily_stats`、`setting.revoke_known`、`backup.create`、`backup.list`、`revisions.compact`）。FE-17 的目标是让 `ActionMap` 覆盖全部 74 个动作并删除占位，当前状态见 [V2.3 状态对照表](zhizhang_v2_3_status.md)。
 
 ---
 

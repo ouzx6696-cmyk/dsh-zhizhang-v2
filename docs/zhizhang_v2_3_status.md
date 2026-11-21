@@ -2,7 +2,7 @@
 
 > **本表是什么**：`docs/zhizhang_v2_3_full_optimization_plan.md` 中 123 条发现的**代码核对结果**。只记录"代码里到底有没有"，不含排期、人力与决策；排期与决议仍以计划正文为准。
 >
-> **核对基线**：2026-11-21 · HEAD `c8750c6`（FE-16 收口后） · `npm run check` 通过 · `npm test` = 38 文件 / 288 用例 · `npm run test:all` = 64 文件 / 461 用例（需 Node ≥ 24.15 全绿；Node 22 会在 `workflow-w01` 的 `using` 语法失败） · 源码 119 文件 / 29,975 行 TS（含注释与空行） · Schema 40 表 / 40 索引 / 14 触发器（见 [schema.md](schema.md)）
+> **核对基线**：2026-11-21 · HEAD `9567d00`（B2-1 收尾后） · `npm run check` 通过 · `npm test` = 41 文件 / 306 用例 · `npm run test:all` = 67 文件 / 479 用例（需 Node ≥ 24.15 全绿；Node 22 实测 478 执行 / 477 通过，`workflow-w01` 的 `using` 语法失败） · 源码 121 文件 / 30,318 行 TS（含注释与空行） · Schema 40 表 / 40 索引 / 14 触发器（见 [schema.md](schema.md)）
 >
 > **状态定义**
 > - ✅ **已落地**：实现 + 测试，且真实调用链走通，可验收。
@@ -18,14 +18,14 @@
 | 前端 UI 工作台（FE） | 9 | 6 | 19 | 34 |
 | DsH 插件逻辑（DSH） | 0 | 7 | 21 | 28 |
 | 后端数据库逻辑（DB） | 16 | 5 | 6 | 27 |
-| 番茄小说工作线（FQ） | 5 | 10 | 19 | 34 |
-| **合计** | **30** | **28** | **65** | **123** |
+| 番茄小说工作线（FQ） | 8 | 7 | 19 | 34 |
+| **合计** | **33** | **25** | **65** | **123** |
 
-**结论**：数据库底座完成度最高（59%），番茄线大量逻辑停在"纯函数写完未接线"，宿主层**整层未动（0/28）**。
+**结论**：数据库底座完成度最高（59%），番茄线 B2-1 三项已接线（P0 只剩 FQ-06/FQ-07），宿主层**整层未动（0/28）**。
 
 ---
 
-## 2. P0 专项（24 条，11 ✅ / 6 ⚠️ / 7 ❌）
+## 2. P0 专项（24 条，14 ✅ / 3 ⚠️ / 7 ❌）
 
 | 编号 | 状态 | 现状 |
 | --- | --- | --- |
@@ -48,13 +48,13 @@
 | DB-21 | ✅ | `schema-doc.mjs` 生成确定性 schema 文档 + 测试 |
 | FQ-01 | ✅ | `commitFactBatch`、`knownFromUpdates`、`setting.decide` 均走 `mergeFactVersion`（`ed83ef9`） |
 | FQ-02 | ✅ | 证据、增量同步、诊断统一走 `pointAtOffset`；回填脚本 `migrate:evidence-point`（`07df82d`） |
-| FQ-03 | ⚠️ | schema 有 `base_revision_id`；`decideProposal` 不校验、无 `proposal-stale` |
-| FQ-06 | ❌ | 库条目/伏笔仍可按 id 跨项目覆写；AI payload 无字段白名单 |
+| FQ-03 | ✅ | 生成时写 `base_revision_id` + 全文 `source_sha256`；决策前校验，漂移返回 `proposal-stale` 并保持 pending/dirty（`854ccbf`） |
+| FQ-06 | ❌ | 库条目仍可按 id 跨项目覆写；AI payload 无字段白名单（伏笔 patch 已加 `project_id` 守卫，但不算本项收口） |
 | FQ-07 | ❌ | 提案 `documentId` 可为 null，无 `chapter-required` 拒绝 |
-| FQ-08 | ⚠️ | `FORESHADOW_TRANSITIONS` 已实现；`upsertForeshadow` 不调用断言 |
-| FQ-10 | ⚠️ | 提示词已拆 `newFacts`/`updates`；服务端未生成 `fq-<uuid>`、未校验 updates 存在性 |
+| FQ-08 | ✅ | 补 `foreshadow.create/patch`，应用层统一调 `assertForeshadowTransition`；回收不再清空 `targetChapterId`/`plantedPoint`（`bd0763c`） |
+| FQ-10 | ✅ | 服务端生成 `fq-<uuid>` 并 remap 同载荷引用；`updates` 已消费且未知 id 明确拒绝；`retiredFacts` 上报 `unapplied`（`9567d00`） |
 
-**P0 退出标准达成情况**：跨模块 point 一致性、第 3 章知情第 10 章更新仍可见、跨项目 id 攻击被拒、严格 registrar 下 10 工具注册成功 —— **目前 2/4 可验收**（point 一致性、知情史回归已通过；跨项目 id 攻击拦截、严格 registrar 注册仍未通过），卡点即上表 6 条 ⚠️ 与 7 条 ❌。
+**P0 退出标准达成情况**：跨模块 point 一致性、第 3 章知情第 10 章更新仍可见、跨项目 id 攻击被拒、严格 registrar 下 10 工具注册成功 —— **目前 2/4 可验收**（point 一致性、知情史回归已通过；跨项目 id 攻击拦截、严格 registrar 注册仍未通过），卡点即上表 3 条 ⚠️ 与 7 条 ❌（其中 FQ-06/FQ-07 属 B2-4，DSH 五项属 B2-2/B2-3）。
 
 ---
 
@@ -174,14 +174,14 @@
 | --- | --- | --- | --- |
 | FQ-01 | P0 | ✅ | `commitFactBatch`、`knownFromUpdates` 与 `setting.decide` 均走 `mergeFactVersion`；第 3 章知情、第 10 章更新后第 5 章仍可见 |
 | FQ-02 | P0 | ✅ | 证据、增量同步、诊断统一走 `splitChapterParagraphs`/`pointAtOffset`；回填脚本先出报告再热备执行 |
-| FQ-03 | P0 | ⚠️ | `base_revision_id` 列已有；决策时不校验 |
+| FQ-03 | P0 | ✅ | 生成时写 `base_revision_id` + 全文 `source_sha256`；决策前校验，漂移返回 `gate.denied` / `proposal-stale`；历史 NULL 提案放行并留 `proposal.decide.unpinned` 事件；compact 只钉 pending/inflight |
 | FQ-04 | P1 | ❌ | 无"按当前正文重新生成"与强制应用通道 |
 | FQ-05 | P1 | ❌ | 未挂载技法卡仍自动注入（决议：不注入） |
-| FQ-06 | P0 | ❌ | 跨项目按 id 覆写未拦；payload 无白名单 |
+| FQ-06 | P0 | ❌ | 库条目仍可按 id 跨项目覆写；伏笔写路径已加 `project_id` 守卫，但 AI payload 仍无字段白名单，整体不算收口 |
 | FQ-07 | P0 | ❌ | 提案可不带 `documentId` |
-| FQ-08 | P0 | ⚠️ | 转换表已有；`upsertForeshadow` 不调用断言 |
+| FQ-08 | P0 | ✅ | 补 `foreshadow.create`/`foreshadow.patch`，`upsert` 退化为兼容 shim；单条与批量写路径均校验状态迁移；前端“标记回收”改 patch，保留目标章与埋设段 |
 | FQ-09 | P1 | ❌ | 仍读 `author_chapter_order`，章序两个真源 |
-| FQ-10 | P0 | ⚠️ | 提示词已拆 `newFacts`/`updates`；factId 仍由模型给 |
+| FQ-10 | P0 | ✅ | `finishProposalGeneration` 规范化为 `fq-<uuid>` 并 remap `foreshadowUpdates`/`knownFromUpdates`；`updates` 走 `mergeFactVersion` 新版本，未知 id 返回 `unknown-fact-id`；`retiredFacts` 记入 `unapplied` |
 | FQ-11 | P1 | ❌ | 章节号仍 3 位固定，未按总数自适应宽度 |
 | FQ-12 | P3 | ❌ | 工程包仍 `format: zhizhang-novel-bundle/v1`，不含设定版本史 |
 | FQ-13 | P2 | ⚠️ | 续写/重写/定向修稿三模板常量已有；无选择逻辑 |
@@ -227,14 +227,14 @@
 
 | 批次 | 条目 | 产出 | 预估 |
 | --- | --- | --- | --- |
-| B2-1 连续性接线 | ~~FQ-01~~、~~FQ-02~~（已完成）、FQ-03、FQ-08、FQ-10 | fact-sync 改用 `mergeFactVersion`；应用层统一 `splitChapterParagraphs`；提案校验 `base_revision_id` 并返回 `proposal-stale`；服务端生成 factId | 3–4 天 |
+| B2-1 连续性接线（✅ 已完成） | ~~FQ-01~~、~~FQ-02~~、~~FQ-03~~、~~FQ-08~~、~~FQ-10~~ | fact-sync 改用 `mergeFactVersion`；应用层统一 `splitChapterParagraphs`；提案校验 `base_revision_id` 并返回 `proposal-stale`；服务端生成 factId | 已完成 |
 | B2-2 宿主可启动 | DSH-01、DSH-02、DSH-03、DSH-14 | `dsh-adapter.ts` 单点收口；工具补 `output{schema,render}` 并进子作用域；thinking 增量过滤 | 3 天 |
 | B2-3 账本不丢 | DSH-08、DSH-10、DB-02 | 排空期继续写回执；微改写入账；`pruneCommandJournal` 定时调用 | 2 天 |
 | B2-4 写入安全 | FQ-06、FQ-07、FQ-09、FE-07、FE-27 | 跨项目 id 拒绝；`documentId` 必填；章序单真源（先定 schema）；前端超时+幂等键；保存键组字保护 | 3 天 |
 
 完成 B2-1 ~ B2-3 后 P0 可达 **20/24**；再加 B2-4 可达 **24/24**（P0 清零）。
 
-### B2-1 执行清单（进行中：#1、#2 已完成，按依赖顺序）
+### B2-1 执行清单（✅ 全部完成）
 
 **目标**：把 Wave 1 已写好的五个纯函数接进真实写路径，让 P0 的前三条退出标准第一次可验收。
 
@@ -242,16 +242,16 @@
 | --- | --- | --- | --- |
 | 1 ✅ | FQ-02 | `fact-sync.ts:81` 与 `fanqie.ts:115` 的 `body.slice(0, start).split(/\r?\n/).length` 改为 `pointAtOffset(body, start)`；新增迁移 `2.3.1-evidence-point-backfill`，按 `quote_start` 重算 `author_evidence.point` | 含"段间空行"的样章中，证据、fact_sync、诊断三处 point 完全一致 |
 | 2 ✅ | FQ-01 | `commitFactBatch`（`fact-sync.ts:101`）改用 `mergeFactVersion`；`materializeApprovedLore` 同步；known-before-effective 由 error 降 warning | 第 3 章已知情 → 第 10 章更新 → 第 5 章查询仍可见 |
-| 3 | FQ-03 | `beginProposalGeneration` 写入 `base_revision_id` + `source_sha256`；`decideProposal` 在 kind 分发前校验当前 `revisionId`；漂移则 `refuse("proposal.decide","proposal-stale")` 并保持 dirty | 生成提案后改稿 → 确认被拒；未改稿 → 正常通过 |
-| 4 | FQ-08 | `commitForeshadowBatch` / `upsertForeshadow` 调 `assertForeshadowTransition` | `proposed → resolved` 的跳变被拒，合法路径逐条通过 |
-| 5 | FQ-10 | 服务端为 `newFacts` 生成 `fq-<uuid>`；`updates` 校验 `factId` 必须已存在 | 模型回传重复/未知 factId 时被服务端改写或明确拒绝 |
+| 3 ✅ | FQ-03 | `beginProposalGeneration` 写入 `base_revision_id` + `source_sha256`；`decideProposal` 在 kind 分发前校验当前 `revisionId`；漂移则 `refuse("proposal.decide","proposal-stale")` 并保持 dirty | 生成提案后改稿 → 确认被拒；未改稿 → 正常通过 |
+| 4 ✅ | FQ-08 | `commitForeshadowBatch` / `upsertForeshadow` 调 `assertForeshadowTransition`；补 `foreshadow.create/patch` 并让前端回收只传变更字段 | `proposed → resolved` 的跳变被拒，合法路径逐条通过；回收不丢目标章与埋设段 |
+| 5 ✅ | FQ-10 | 服务端为 `newFacts` 生成 `fq-<uuid>`；`updates` 校验 `factId` 必须已存在并消费为版本更新 | 模型回传重复/未知 factId 时被服务端改写或明确拒绝 |
 
 **开工前决策门（D1 已确认，D2 待执行）**：
 
 - **D1 · 拒绝理由（已确认）**：`proposal-stale` 不新增错误码，作为 `gate.denied` 的 `reason` 实现，沿用 409；前端补一条文案。**不修改** `contracts/errors.ts` 与 HTTP 映射。
 - **D2 · 历史数据回填**：迁移会重算既有 `author_evidence.point`。按决议 #12，执行前必须先热备并输出 point 变化报告供作者核对，不可静默改数。
 
-**验收**：`test:v23` 新增 ≥6 个走真实调用链的用例；`test:all` 从 461 继续增加且全绿；手工跑通"第 3 章知情 → 第 10 章更新 → 第 5 章可见"。
+**验收**：`test:v23` 9 文件 / 62 用例全绿；`npm test` 306 用例全绿；`test:all` 479 用例（Node 24 全绿，Node 22 的 `using` 语法失败项不计入本批）。"第 3 章知情 → 第 10 章更新 → 第 5 章可见"由 `fanqie-memory-merge-v23` 与 `sprint2-v2` 覆盖。
 
 ---
 
@@ -260,4 +260,4 @@
 - 每完成一批，**只改本表对应行的状态与"现状"**，并在提交信息里带上条目编号（如 `feat(fanqie): wire mergeFactVersion (FQ-01)`）。
 - 状态升级必须有测试支撑：⚠️ → ✅ 需在 `test/*-v23.test.mjs` 或对应分层测试中新增至少一个**走真实调用链**的用例。
 - 本表不复制计划正文、不记录决策；决议仍以计划 §6.0 为准。
-- 每次改动后跑 `npm run verify`（只读类型检查 + 288 个核心用例）与 `npm run test:all`（461 个全量用例），数字写回本页顶部基线。
+- 每次改动后跑 `npm run verify`（只读类型检查 + 306 个核心用例）与 `npm run test:all`（479 个全量用例，需 Node ≥ 24.15），数字写回本页顶部基线。
