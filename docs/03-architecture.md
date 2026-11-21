@@ -208,8 +208,8 @@ flowchart TD
 
 1. **受保护常量单点定义**：[src/contracts/protected-rules.ts](../src/contracts/protected-rules.ts) 是 `34 / 84 / 2 / 2 / 交稿尾句 / 状态词表` 的唯一来源，纯 `as const`、浏览器安全、零导入；`domain/fanqie/editorial.ts` 与 `domain/toutiao/rules.ts` 原值转出，数值不变。浏览器端改由镜像 [src/client/contracts/protected-rules.ts](../src/client/contracts/protected-rules.ts) 取值，`test/db-v23.test.mjs` 逐字校验镜像导出块与真源一致。
 2. **数据层**：读模型改为**每个项目一个 `ProjectionStore`** 共享一遍折叠（`author-reads.ts`）；FTS 改为两段式（先取 rowid 排序 `LIMIT`，仅对前 K 条取 snippet），1–2 字中文查询走 `author_chapter_entities` 倒排；语句缓存 LRU 上限 256；`PRAGMA busy_timeout` 前置于 WAL 切换，Windows 关闭 `mmap`。
-3. **运维**：`createHotBackup` 使用 `node:sqlite` 的 `backup()`（回退 `VACUUM INTO`），保留策略 `planRetention` + `pruneBackups` 已实现并测试；`command_journal` 增加 `request_hash` 与 `pruneCommandJournal`（**尚未接入宿主定时调用**，属 DB-02 待办）。
-4. **用量口径**：`workflow/budget.ts` 的 `normalizeUsage` 把回执规范为四类互斥（未命中输入 / 缓存命中 / 缓存写入 / 输出），写作预算已改用。
+3. **运维**：`createHotBackup` 使用 `node:sqlite` 的 `backup()`（回退 `VACUUM INTO`），保留策略 `planRetention` + `pruneBackups` 已实现并测试；`command_journal` 增加 `request_hash` 与 `pruneCommandJournal`，宿主启动即修剪一次、此后每 6 小时一次（DB-02）。
+4. **用量口径**：`workflow/budget.ts` 的 `normalizeUsage` 把回执规范为四类互斥（未命中输入 / 缓存命中 / 缓存写入 / 输出），写作预算已改用。`selection.rewrite` 的用量单独记入 `author_micro_calls`（决议 #7）：`inflight` 行的唯一索引同时充当文档级锁，`completed / failed / uncertain` 三态收尾，运行检查器与写作账单分栏显示。
 5. **前端**：Diff 改为句级切分 + Myers，并保留空行 spacer 归属与行尾风格还原；选段微改写新增捕获校验（切章拒绝、唯一匹配重定位）与 AI 撤销栈；虚拟列表行高改由 `--vrow-h` 驱动并用 `ResizeObserver` 重算；三套主题补齐 diff/success/warning token。
 6. **宿主适配层（DSH-01/02/03/14）**：`src/host/dsh-adapter.ts` 是唯一描述宿主 API 的模块；`src/host/dsh-tools-adapter.ts` 把内部工具规格翻译为上游 `{ name, description, parameters(additionalProperties:false), output{schema,render}, execute(args,exec) }` 形状，并在注册前自检、任一工具失败即整体回滚。可选服务一律 `ctx.get(name)` 解析；宿主支持 `ctx.inject` 时，工具与设置表单各挂独立子作用域，注册失败只记日志并把 `/diag.agentToolsRegistered` 置 `false`，不再拖垮工作台。流式生成按 `block-end` 的块类型回删 thinking 增量，思维链不会进入候选正文。
 
