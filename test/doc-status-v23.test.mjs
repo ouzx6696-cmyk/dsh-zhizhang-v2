@@ -40,7 +40,8 @@ function idsFromTable(text) {
 
 /**
  * Detail rows in the tracker carry exactly four cells (id, phase, mark, text).
- * The P0 summary table has three, so the arity check keeps it out of scope.
+ * The P0 summary table has three, so the arity check keeps it out of scope —
+ * it gets its own dedicated guard below instead of being ignored entirely.
  */
 function detailRows(text) {
   const rows = [];
@@ -129,4 +130,37 @@ test("the overview table agrees with the detail rows it summarises", () => {
   );
   assert.equal(totals.total, 123);
   assert.equal(totals.ok + totals.warn + totals.missing, 123);
+});
+
+test("the P0 summary table is complete, all-green, and agrees with detail rows", () => {
+  const section = (STATUS.split("## 2. P0 专项")[1] ?? "").split("\n---")[0];
+  const rows = [];
+  for (const line of section.split("\n")) {
+    if (!line.startsWith("|")) continue;
+    const row = cells(line);
+    if (row.length !== 3) continue;
+    if (!/^(?:FE|DSH|DB|FQ)-\d{2}$/.test(row[0])) continue;
+    rows.push({ id: row[0], mark: row[1], text: row[2] });
+  }
+
+  assert.equal(new Set(rows.map((row) => row.id)).size, rows.length, "P0 table has duplicate ids");
+  assert.equal(rows.length, 24, "P0 must cover exactly 24 findings");
+  for (const row of rows) {
+    assert.equal(row.mark, "✅", `${row.id} is not closed in the P0 table`);
+    assert.ok(row.text.length > 0, `${row.id} has an empty description`);
+  }
+
+  const headline = STATUS.match(/## 2\. P0 专项（24 条，(\d+) ✅ \/ (\d+) ⚠️ \/ (\d+) ❌）/);
+  assert.ok(headline, "the P0 headline must state its counts");
+  assert.deepEqual(
+    [Number(headline[1]), Number(headline[2]), Number(headline[3])],
+    [24, 0, 0],
+    "the P0 headline counts must match the table",
+  );
+
+  const detail = new Map(detailRows(STATUS).map((row) => [row.id, row]));
+  for (const row of rows) {
+    assert.equal(detail.get(row.id)?.mark, "✅", `${row.id} disagrees between the P0 table and detail rows`);
+    assert.equal(detail.get(row.id)?.phase, "P0", `${row.id} is not a P0 item`);
+  }
 });
