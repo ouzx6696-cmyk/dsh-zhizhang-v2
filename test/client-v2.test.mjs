@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { CLIENT_ENTRY_CSS, CLIENT_JS_MODULES } from "../src/client/manifest.ts";
-import { apiRequest, fetchWorkspaceState } from "../src/client/workbench/api.ts";
+import { apiRequest, actionTimeoutMs, fetchWorkspaceState } from "../src/client/workbench/api.ts";
 import { computeParagraphDiff } from "../src/client/workbench/diff.ts";
 import { createDraftVault } from "../src/client/workbench/draft-vault.ts";
 import { createRenderGate } from "../src/client/workbench/store.ts";
@@ -168,6 +168,42 @@ test("workbench API client builds URLs, rejects non-JSON logins or bad packets, 
       });
     },
   );
+});
+
+test("FE-07/FE-27: requests carry per-action timeouts and shortcuts skip IME composition", async () => {
+  assert.equal(actionTimeoutMs(undefined), 15_000, "reads default to 15s");
+  assert.equal(actionTimeoutMs("draft.save"), 30_000, "writes default to 30s");
+  assert.equal(actionTimeoutMs("project.export_bundle"), 120_000);
+  assert.equal(actionTimeoutMs("project.import_bundle"), 120_000);
+
+  let receivedSignal = null;
+  await withBrowserGlobals(
+    {
+      location: { href: "https://dsh.local/api/zhizhang/workbench" },
+      fetch: (_url, init) => {
+        receivedSignal = init.signal;
+        return new Promise((_resolve, reject) => {
+          // AbortSignal.timeout uses an unref'd timer in Node; keep the loop
+          // alive so the test observes the rejection instead of being cancelled.
+          const keepAlive = setTimeout(() => {}, 500);
+          init.signal.addEventListener("abort", () => {
+            clearTimeout(keepAlive);
+            reject(init.signal.reason);
+          }, { once: true });
+        });
+      },
+    },
+    async () => {
+      await assert.rejects(
+        apiRequest({ projectId: "", documentId: "" }, "draft.save", {}, undefined, { timeoutMs: 20 }),
+        /请求超过 .* 秒未响应。本地草稿已保留，请刷新确认服务器状态后再重试。/,
+      );
+    },
+  );
+  assert.ok(receivedSignal instanceof AbortSignal, "fetch must receive the timeout signal");
+
+  const shellSource = readFileSync(new URL("../src/client/workbench/shell.ts", import.meta.url), "utf8");
+  assert.match(shellSource, /if \(event\.isComposing \|\| composing\) return;/);
 });
 
 test("DsH slot entry module registers main, sidebar icon, and conversation view with relative iframe URL", async () => {

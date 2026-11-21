@@ -716,6 +716,9 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
   document.addEventListener("visibilitychange", () => { if (document.hidden) stash(); });
 
   window.addEventListener("keydown", (event) => {
+    // FE-27: shortcuts must never fire in the middle of an IME composition,
+    // otherwise Ctrl+S commits a half-typed Chinese word to the manuscript.
+    if (event.isComposing || composing) return;
     const modKey = event.metaKey || event.ctrlKey;
     const key = event.key.toLowerCase();
     if (modKey && key === "s") {

@@ -31,26 +31,58 @@ export interface WorkbenchRequestContext {
   readonly documentId: string;
 }
 
+export interface ApiRequestOptions {
+  /** Test/feature override; defaults to the per-action budget below. */
+  readonly timeoutMs?: number;
+}
+
+const READ_TIMEOUT_MS = 15_000;
+const WRITE_TIMEOUT_MS = 30_000;
+const IO_TIMEOUT_MS = 120_000;
+const IO_ACTIONS: ReadonlySet<string> = new Set(["project.export_bundle", "project.import_bundle"]);
+
+/** FE-07: reads 15s, writes 30s, whole-project import/export 120s. */
+export function actionTimeoutMs(action?: string): number {
+  if (!action) return READ_TIMEOUT_MS;
+  return IO_ACTIONS.has(action) ? IO_TIMEOUT_MS : WRITE_TIMEOUT_MS;
+}
+
+function timeoutMessage(timeoutMs: number): string {
+  return `请求超过 ${Math.round(timeoutMs / 1000)} 秒未响应。本地草稿已保留，请刷新确认服务器状态后再重试。`;
+}
+
 export async function apiRequest<T>(
   context: WorkbenchRequestContext,
   action?: string,
   input?: Record<string, unknown>,
   ifSequence?: number,
+  options: ApiRequestOptions = {},
 ): Promise<T> {
   const url = new URL(action ? "./mutate" : "./state", location.href);
   if (context.projectId) url.searchParams.set("projectId", context.projectId);
   if (context.documentId) url.searchParams.set("documentId", context.documentId);
   if (ifSequence !== undefined) url.searchParams.set("ifSequence", String(ifSequence));
 
-  const options: RequestInit = action
-    ? {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, ...input }),
-    }
-    : {};
+  const timeoutMs = options.timeoutMs ?? actionTimeoutMs(action);
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const fetchOptions: RequestInit = {
+    ...(action
+      ? {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, ...input }),
+      }
+      : {}),
+    signal: timeoutSignal,
+  };
 
-  const response = await fetch(url, options);
+  let response: Response;
+  try {
+    response = await fetch(url, fetchOptions);
+  } catch (error) {
+    if (timeoutSignal.aborted) throw new Error(timeoutMessage(timeoutMs));
+    throw error;
+  }
   if (!response.headers.get("content-type")?.startsWith("application/json")) {
     throw new Error("请从 DsH 已登录页面打开织章。");
   }
