@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { ContractError } from "../../../contracts/index.ts";
 import type { AiProposalDto, AiProposalKind, ProposalOrigin } from "../../../contracts/workspace-dto.ts";
 import { stmt, syncChapterFts } from "../../../storage/index.ts";
 import {
@@ -11,7 +10,9 @@ import {
   type Input,
   type WorkspaceContext,
 } from "../../context.ts";
+import { normalizeFactSyncPayload } from "../../../workflow/fact-sync-payload.ts";
 import { sha256Text } from "../../digest.ts";
+import { assertProposalFresh, pinProposalChapter } from "../../proposal-freshness.ts";
 import { isDocumentBoundProposalKind, sanitizeProposalPayload } from "../../proposal-kinds.ts";
 import { commitFactBatch, commitFactSyncProposal, commitForeshadowBatch } from "./fact-sync.ts";
 import { commitArcPlanProposal } from "./controls.ts";
@@ -37,49 +38,6 @@ interface ProposalRow {
   readonly baseRevisionId: string | null;
   readonly sourceSha256: string;
   readonly origin: ProposalOrigin;
-}
-
-const DRIFT_BOUND_KINDS: ReadonlySet<AiProposalKind> = new Set(["summary", "chapter_review", "fact_sync", "setting"]);
-
-type StaleCheck = "fresh" | "unpinned" | "not-bound";
-
-function staleError(row: ProposalRow, currentRevisionId: string | null): ContractError {
-  return new ContractError("gate.denied", {
-    action: "proposal.decide",
-    reason: "proposal-stale",
-    proposalId: row.id,
-    baseRevisionId: row.baseRevisionId,
-    currentRevisionId,
-  });
-}
-
-/**
- * Refuses to decide a proposal whose chapter moved after generation.
- *
- * Only AI-generated, document-bound proposals are gated. Manual proposals
- * (`origin = "author-ui"` or `"agent-tool"`) and legacy rows created before
- * 2.3.0 (null base revision) stay decidable so an author is never locked out
- * of an old inbox.
- */
-function assertProposalFresh(ctx: WorkspaceContext, row: ProposalRow): StaleCheck {
-  if (row.origin !== "ai-generate") return "not-bound";
-  if (!DRIFT_BOUND_KINDS.has(row.kind)) return "not-bound";
-  if (!row.baseRevisionId || !row.documentId) return "unpinned";
-
-  let doc: ReturnType<WorkspaceContext["document"]>;
-  try {
-    doc = ctx.document(row.documentId);
-  } catch (error) {
-    if (error instanceof ContractError && error.code === "input.not_found") {
-      throw staleError(row, null);
-    }
-    throw error;
-  }
-
-  const current = doc.revisionId ?? null;
-  if (current === row.baseRevisionId) return "fresh";
-  if (row.sourceSha256 && sha256Text(doc.body ?? "") === row.sourceSha256) return "fresh";
-  throw staleError(row, current);
 }
 
 function parseProposalKind(raw: unknown): AiProposalKind {
@@ -125,6 +83,11 @@ export function createManualProposal(ctx: WorkspaceContext, input: Input): AiPro
   const origin: ProposalOrigin = optionalText(input, "origin") === "agent-tool" ? "agent-tool" : "author-ui";
   const id = randomUUID();
   const now = Date.now();
+  // FQ-10: hand-written fact_sync proposals never pass through the AI finish
+  // hook, so normalise them here as well — the model must not choose fact ids.
+  const payload: Record<string, unknown> = kind === "fact_sync"
+    ? normalizeFactSyncPayload(input.payload as Record<string, unknown>)
+    : (input.payload as Record<string, unknown>);
   return ctx.atomic(() => {
     stmt(ctx.db, `
       INSERT INTO author_ai_proposals (
@@ -137,7 +100,7 @@ export function createManualProposal(ctx: WorkspaceContext, input: Input): AiPro
       documentId,
       kind,
       sourceRef,
-      JSON.stringify(input.payload),
+      JSON.stringify(payload),
       doc?.revisionId ?? null,
       doc ? sha256Text(doc.body ?? "") : "",
       origin,
@@ -154,7 +117,7 @@ export function createManualProposal(ctx: WorkspaceContext, input: Input): AiPro
       kind,
       status: "pending",
       sourceRef,
-      payload: input.payload as Record<string, unknown>,
+      payload,
       origin,
       provider: null,
       model: null,
@@ -239,13 +202,14 @@ export function decideProposal(ctx: WorkspaceContext, input: Input) {
     const rawEdited = input.editedPayload && typeof input.editedPayload === "object" && !Array.isArray(input.editedPayload)
       ? (input.editedPayload as Record<string, unknown>)
       : basePayload;
-    const edited = sanitizeProposalPayload(rawEdited);
+    const sanitized = sanitizeProposalPayload(rawEdited);
+    // FQ-10: editedPayload bypasses the generation hook, so normalise again.
+    // The function is idempotent for already-issued `fq-` ids.
+    const edited = row.kind === "fact_sync" ? normalizeFactSyncPayload(sanitized) : sanitized;
     // FQ-06: the stored row is the only source of project identity; callers and
     // payloads may not redirect the commit to another project.
     const projectId = row.projectId;
-    if (isDocumentBoundProposalKind(row.kind) && !row.documentId) {
-      invalid("documentId", "chapter-required");
-    }
+    const documentId = pinProposalChapter(ctx, row, input, now);
 
     let committed: unknown = null;
     if (row.kind === "deconstruct") {
@@ -255,7 +219,7 @@ export function decideProposal(ctx: WorkspaceContext, input: Input) {
           ...edited,
           scope: projectId ? "project" : "global",
           ...(projectId ? { projectId } : {}),
-          excerpt: edited.excerpt ?? (row.documentId ? (ctx.document(row.documentId).body ?? row.sourceRef) : row.sourceRef),
+          excerpt: edited.excerpt ?? (documentId ? (ctx.document(documentId).body ?? row.sourceRef) : row.sourceRef),
         },
         "ai-confirmed",
       );
@@ -270,7 +234,7 @@ export function decideProposal(ctx: WorkspaceContext, input: Input) {
         "ai-confirmed",
       );
     } else if (row.kind === "summary") {
-      const targetDocId = row.documentId;
+      const targetDocId = documentId;
       if (!targetDocId) invalid("documentId", "chapter-required");
       const doc = ctx.document(targetDocId);
       const summary = text(edited, "summary").trim();
@@ -290,7 +254,7 @@ export function decideProposal(ctx: WorkspaceContext, input: Input) {
       assertFanqieProject(ctx, projectId);
       // FQ-07: never fall back to the first chapter — that writes lore into a
       // chapter the author never reviewed.
-      const chapterId = row.documentId;
+      const chapterId = documentId;
       if (!chapterId) invalid("documentId", "chapter-required");
       const currentApproved = approvedFacts(ctx, projectId);
       const lockedSet = new Set(currentApproved.filter((f) => f.locked).map((f) => f.id));
@@ -312,12 +276,12 @@ export function decideProposal(ctx: WorkspaceContext, input: Input) {
       );
       committed = { approvedSettings, foreshadows };
     } else if (row.kind === "fact_sync") {
-      if (!row.documentId) invalid("documentId", "chapter-required");
-      committed = commitFactSyncProposal(ctx, row.documentId, projectId, edited, input);
+      if (!documentId) invalid("documentId", "chapter-required");
+      committed = commitFactSyncProposal(ctx, documentId, projectId, edited, input, staleCheck === "fresh");
     } else if (row.kind === "chapter_review") {
       if (!projectId) invalid("projectId", "project-required");
       assertFanqieProject(ctx, projectId);
-      const targetDocId = row.documentId;
+      const targetDocId = documentId;
       if (!targetDocId) invalid("documentId", "chapter-required");
       const doc = ctx.document(targetDocId);
       if (doc.projectId !== projectId) invalid("documentId", "project-mismatch");

@@ -24,7 +24,14 @@ export function isDocumentBoundProposalKind(kind: string): kind is typeof DOCUME
  * and letting the payload restate them opens cross-project / cross-scope writes
  * through `deconstruct.save` and `technique.save` (FQ-06).
  */
-const RESERVED_PAYLOAD_FIELDS = ["id", "scope", "projectId", "priority", "status"] as const;
+const RESERVED_PAYLOAD_FIELDS = [
+  "id",
+  "scope",
+  "projectId",
+  "priority",
+  "status",
+  "overrideOfId",
+] as const;
 
 export function sanitizeProposalPayload(payload: Record<string, unknown>): Record<string, unknown> {
   const copy = { ...payload };

@@ -132,7 +132,7 @@ test("FQ-10 an unknown updates factId refuses the whole decision", (t) => {
   assert.equal(ws.app.snapshot(chapter.projectId, chapter.documentId).activeContext.syncStatus, "dirty");
 });
 
-test("FQ-10 a colliding id is replaced while a unique legacy id is preserved", (t) => {
+test("FQ-10 every model-supplied fact id is replaced, including unique ones", (t) => {
   const ws = createTestWorkspace(t);
   const chapter = ws.createFanqieChapter({ body: "第一章正文" });
   seedFact(ws, chapter, "dup", "既有设定", "不得被覆写");
@@ -157,10 +157,45 @@ test("FQ-10 a colliding id is replaced while a unique legacy id is preserved", (
     proposalId: legacy,
     accept: true,
     editedPayload: {
-      newFacts: [{ factId: "legacy-id", category: "item", entityName: "旧提案事实", note: "保留原 id" }],
+      newFacts: [{ factId: "legacy-id", category: "item", entityName: "旧提案事实", note: "模型自造 id" }],
     },
   });
-  assert.ok(loreEntries(ws, chapter.projectId).some((row) => row.factId === "legacy-id"));
+  const finalEntries = loreEntries(ws, chapter.projectId);
+  assert.equal(finalEntries.some((row) => row.factId === "legacy-id"), false);
+  const rewritten = finalEntries.find((row) => row.entityName === "旧提案事实");
+  assert.ok(rewritten);
+  assert.match(rewritten.factId, /^fq-/);
+});
+
+test("B2-5 FQ-10: a hand-written fact_sync proposal gets server-issued ids", (t) => {
+  const ws = createTestWorkspace(t);
+  const chapter = ws.createFanqieChapter({ body: "第一章正文" });
+  const created = ws.app.mutation("proposal.create", {
+    kind: "fact_sync",
+    projectId: chapter.projectId,
+    documentId: chapter.documentId,
+    payload: {
+      newFacts: [{ factId: "model-id", category: "item", entityName: "手工提案实体", note: "模型自造 id" }],
+      foreshadowUpdates: [{ title: "引用", factId: "model-id", status: "planted", note: "" }],
+      knownFromUpdates: [],
+      updates: [],
+    },
+  });
+
+  const storedId = created.payload.newFacts[0].factId;
+  assert.match(storedId, /^fq-/);
+  assert.notEqual(storedId, "model-id");
+  assert.equal(
+    created.payload.foreshadowUpdates[0].factId,
+    storedId,
+    "intra-payload references must follow the server-issued id",
+  );
+
+  // Normalisation is idempotent: deciding the same proposal keeps that id.
+  ws.app.mutation("proposal.decide", { proposalId: created.id, accept: true });
+  const entries = loreEntries(ws, chapter.projectId);
+  assert.ok(entries.some((row) => row.factId === storedId && row.entityName === "手工提案实体"));
+  assert.equal(entries.some((row) => row.factId === "model-id"), false);
 });
 
 test("FQ-10 retiredFacts are surfaced as unapplied and selected indices filter new facts", (t) => {

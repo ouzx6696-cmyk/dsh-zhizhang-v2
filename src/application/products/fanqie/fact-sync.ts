@@ -249,12 +249,16 @@ export function commitFactSyncProposal(
   projectId: string | null,
   edited: Record<string, unknown>,
   input: Input,
+  markMemoryClean = true,
 ) {
   if (!projectId) invalid("projectId", "project-required");
   assertFanqieProject(ctx, projectId);
-  const targetDocId = optionalText(input, "documentId") ?? proposalDocId;
-  if (!targetDocId) invalid("documentId", "document-required");
-  const doc = ctx.document(targetDocId);
+  // FQ-07 / B2-5: the stored proposal row pins the chapter. Accepting a
+  // caller-supplied documentId would redirect lore, evidence, foreshadows and
+  // the memory-sync flag to another chapter while the FQ-03 drift gate still
+  // checks the original one.
+  if (!proposalDocId) invalid("documentId", "chapter-required");
+  const doc = ctx.document(proposalDocId);
   if (doc.projectId !== projectId) invalid("documentId", "project-mismatch");
 
   const currentApproved = approvedFacts(ctx, projectId);
@@ -362,9 +366,14 @@ export function commitFactSyncProposal(
     summaryUpdated = true;
   }
 
-  markChapterMemoryClean(ctx, projectId, doc.id, doc.body ?? "");
-  syncChapterMemoryAndEntities(ctx, projectId, doc.id, doc.body ?? "");
-  ctx.event(projectId, "setting", "chapter.memory.synced", { documentId: doc.id, syncStatus: "clean" });
+  // Only a decision whose chapter was proven unchanged may mark memory clean.
+  // An unpinned/hand-written proposal approved after an edit must leave the
+  // chapter dirty so the next incremental sync still sees the new text.
+  if (markMemoryClean) {
+    markChapterMemoryClean(ctx, projectId, doc.id, doc.body ?? "");
+  }
+  const syncStatus = syncChapterMemoryAndEntities(ctx, projectId, doc.id, doc.body ?? "");
+  ctx.event(projectId, "setting", "chapter.memory.synced", { documentId: doc.id, syncStatus });
 
   // FQ-20 owns the expiry semantics; until it lands, never let a retired fact
   // disappear silently from an approved proposal.
