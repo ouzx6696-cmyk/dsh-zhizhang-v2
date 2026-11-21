@@ -15,7 +15,7 @@ import {
 } from "../../../domain/fanqie/index.ts";
 import { deleteLibraryFts, stmt, syncLibraryFts } from "../../../storage/index.ts";
 import { count, invalid, optionalText, requiredRow, text, type Input, type WorkspaceContext } from "../../context.ts";
-import { assertFanqieProject, assertLibraryWriteScope } from "./shared.ts";
+import { assertFanqieProject, assertLibraryDeleteScope, assertLibraryWriteScope } from "./shared.ts";
 
 interface DeconstructRow {
   readonly id: string;
@@ -282,6 +282,7 @@ export function listDeconstructions(ctx: WorkspaceContext, input: Input): Decons
 
 export function deleteDeconstruction(ctx: WorkspaceContext, input: Input) {
   const id = text(input, "id");
+  assertLibraryDeleteScope(ctx, "library_deconstructions", id, input);
   return ctx.atomic(() => {
     const existing = requiredRow<{ projectId: string | null }>(
       stmt(ctx.db, "SELECT project_id AS projectId FROM library_deconstructions WHERE id = ?;").get(id),
@@ -329,6 +330,7 @@ export function listTechniques(ctx: WorkspaceContext, input: Input): TechniqueCa
 
 export function deleteTechnique(ctx: WorkspaceContext, input: Input) {
   const id = text(input, "id");
+  assertLibraryDeleteScope(ctx, "library_technique_cards", id, input);
   return ctx.atomic(() => {
     const existing = requiredRow<{ projectId: string | null }>(
       stmt(ctx.db, "SELECT project_id AS projectId FROM library_technique_cards WHERE id = ?;").get(id),

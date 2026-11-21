@@ -7,7 +7,7 @@ function insertLegacyProposal(db, { id, projectId, kind }) {
   db.prepare(`
     INSERT INTO author_ai_proposals (
       id, project_id, document_id, kind, status, source_ref, payload, origin, created_at, updated_at
-    ) VALUES (?, ?, NULL, ?, 'pending', '', '{}', 'author-ui', ?, ?);
+    ) VALUES (?, ?, NULL, ?, 'pending', '', '{}', 'ai-generate', ?, ?);
   `).run(id, projectId, kind, now, now);
 }
 
@@ -181,5 +181,86 @@ test("FQ-07: chapter-bound proposals require a document at creation, generation,
   assert.deepEqual(
     pending.map((row) => row.id).sort(),
     ["legacy-fact-sync", "legacy-setting"],
+  );
+});
+
+test("B2-5 FQ-06: deletes are scoped to the owning project and require explicit global scope", (t) => {
+  const ws = createTestWorkspace(t);
+  const chapterA = ws.createFanqieChapter({ projectName: "甲项目", body: "甲" });
+  const chapterB = ws.createFanqieChapter({ projectName: "乙项目", body: "乙" });
+  const saved = ws.app.mutation("deconstruct.save", {
+    scope: "project",
+    projectId: chapterA.projectId,
+    title: "甲项目拆解",
+    excerpt: "摘录",
+  });
+  const count = () => ws.db.prepare(
+    "SELECT COUNT(*) AS count FROM library_deconstructions WHERE id = ?;",
+  ).get(saved.id).count;
+
+  assertThrowsContract(
+    () => ws.app.mutation("deconstruct.delete", {
+      id: saved.id, scope: "project", projectId: chapterB.projectId,
+    }),
+    "input.invalid",
+    { field: "id", reason: "scope-mismatch" },
+  );
+  assert.equal(count(), 1);
+
+  const global = ws.app.mutation("deconstruct.save", {
+    scope: "global", title: "全局拆解", excerpt: "摘录",
+  });
+  assertThrowsContract(
+    () => ws.app.mutation("deconstruct.delete", { id: global.id }),
+    "input.invalid",
+    { field: "id", reason: "scope-mismatch" },
+  );
+
+  ws.app.mutation("deconstruct.delete", {
+    id: saved.id, scope: "project", projectId: chapterA.projectId,
+  });
+  assert.equal(count(), 0);
+});
+
+test("B2-5 FQ-07: a legacy row with no document can be pinned at decision time", (t) => {
+  const ws = createTestWorkspace(t);
+  const chapter = ws.createFanqieChapter({ body: "历史正文" });
+  const otherProject = ws.createFanqieChapter({ projectName: "乙项目", body: "乙正文" });
+
+  insertLegacyProposal(ws.db, { id: "legacy-pinnable", projectId: chapter.projectId, kind: "fact_sync" });
+  ws.db.prepare("UPDATE author_ai_proposals SET payload = ? WHERE id = 'legacy-pinnable';").run(
+    JSON.stringify({
+      newFacts: [],
+      updates: [],
+      knownFromUpdates: [],
+      foreshadowUpdates: [],
+      summaryDraft: "补绑章节后写入",
+    }),
+  );
+
+  assertThrowsContract(
+    () => ws.app.mutation("proposal.decide", {
+      proposalId: "legacy-pinnable",
+      accept: true,
+      documentId: otherProject.documentId,
+    }),
+    "input.invalid",
+    { field: "documentId", reason: "project-mismatch" },
+  );
+
+  const decided = ws.app.mutation("proposal.decide", {
+    proposalId: "legacy-pinnable",
+    accept: true,
+    documentId: chapter.documentId,
+  });
+  assert.equal(decided.status, "approved");
+  assert.equal(
+    ws.db.prepare("SELECT document_id AS documentId FROM author_ai_proposals WHERE id = 'legacy-pinnable';")
+      .get().documentId,
+    chapter.documentId,
+  );
+  assert.equal(
+    ws.db.prepare("SELECT summary FROM author_documents WHERE id = ?;").get(chapter.documentId).summary,
+    "补绑章节后写入",
   );
 });

@@ -97,7 +97,7 @@ test("Sprint 2 FTS5 External Content migrates legacy schemas, maintains integrit
 
   // Delete one technique card -> integrity check stays clean
   const techToDelete = ws.app.mutation("technique.list", { projectId })[0];
-  ws.app.mutation("technique.delete", { id: techToDelete.id });
+  ws.app.mutation("technique.delete", { id: techToDelete.id, scope: techToDelete.scope, projectId });
   verifyFtsIntegrity(ws.db);
 
   // rebuildProjectFts covers fts_library too
@@ -499,7 +499,7 @@ test("Sprint 2 keyset lore pagination handles >200 entries without truncation an
   ws.app.mutation("proposal.decide", { proposalId: mp.id, accept: false });
   assert.ok(ws.app.projectSeq(projectId) > seq); seq = ws.app.projectSeq(projectId);
 
-  ws.app.mutation("deconstruct.delete", { id: dec.id });
+  ws.app.mutation("deconstruct.delete", { id: dec.id, scope: "project", projectId });
   assert.ok(ws.app.projectSeq(projectId) > seq);
 });
 

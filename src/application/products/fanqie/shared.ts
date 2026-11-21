@@ -1,6 +1,6 @@
 import type { SettingFact } from "../../../domain/fanqie/index.ts";
 import { currentSeq, stmt, type SqliteDatabase } from "../../../storage/index.ts";
-import { invalid, requiredRow, text, type Input, type Product, type WorkspaceContext } from "../../context.ts";
+import { invalid, optionalText, requiredRow, text, type Input, type Product, type WorkspaceContext } from "../../context.ts";
 
 const factCache = new WeakMap<SqliteDatabase, Map<string, { readonly seq: number; readonly facts: SettingFact[] }>>();
 
@@ -33,6 +33,31 @@ export function assertLibraryWriteScope(
     invalid("id", "scope-mismatch");
   }
   return row?.createdAt;
+}
+
+/**
+ * FQ-06 also covers deletes: a project-scoped asset may only be removed by a
+ * caller from that same project. Global assets are intentionally shared, but
+ * an explicit `scope: "global"` is still required so a stray id cannot delete
+ * one from an unrelated workspace context.
+ */
+export function assertLibraryDeleteScope(
+  ctx: WorkspaceContext,
+  table: "library_deconstructions" | "library_technique_cards",
+  id: string,
+  input: Input,
+): void {
+  const row = stmt(
+    ctx.db,
+    `SELECT scope, project_id AS projectId FROM ${table} WHERE id = ?;`,
+  ).get(id) as { scope?: string; projectId?: string | null } | undefined;
+  if (!row) return; // requiredRow in the caller reports input.not_found
+  if (row.scope === "project" && optionalText(input, "projectId") !== row.projectId) {
+    invalid("id", "scope-mismatch");
+  }
+  if (row.scope === "global" && optionalText(input, "scope") !== "global") {
+    invalid("id", "scope-mismatch");
+  }
 }
 
 /**

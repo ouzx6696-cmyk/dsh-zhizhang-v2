@@ -363,7 +363,12 @@ export function createLibraryView(
               destructive: true,
             });
             if (!confirmed) return;
-            await host.request(kind === "deconstruct" ? "deconstruct.delete" : "technique.delete", { id: item.id });
+            const { projectId: activeProjectId } = host.getState();
+            await host.request(kind === "deconstruct" ? "deconstruct.delete" : "technique.delete", {
+              id: item.id,
+              scope: item.scope,
+              ...(activeProjectId ? { projectId: activeProjectId } : {}),
+            });
             await refresh();
           });
         actions.append(delBtn);
