@@ -2,7 +2,7 @@
 
 > **本表是什么**：`docs/zhizhang_v2_3_full_optimization_plan.md` 中 123 条发现的**代码核对结果**。只记录"代码里到底有没有"，不含排期、人力与决策；排期与决议仍以计划正文为准。
 >
-> **核对基线**：2026-11-21 · HEAD `0b4101a`（B2-3 收尾后） · `npm run check` 通过 · `npm test` = 43 文件 / 320 用例 · `npm run test:v23` = 11 文件 / 74 用例 · `npm run test:all` = 69 文件 / 493 用例（需 Node ≥ 24.15 全绿；Node 22 实测 492 执行 / 491 通过，`workflow-w01` 的 `using` 语法失败） · 源码 124 文件 / 31,039 行 TS（含注释与空行） · Schema 40 表 / 40 索引 / 14 触发器（见 [schema.md](schema.md)）
+> **核对基线**：2026-11-21 · HEAD `25ce2f3`（B2-4 收尾后，P0 清零） · `npm run check` 通过 · `npm test` = 44 文件 / 325 用例 · `npm run test:v23` = 12 文件 / 78 用例 · `npm run test:all` = 70 文件 / 498 用例（需 Node ≥ 24.15 全绿；Node 22 实测 497 执行 / 496 通过，`workflow-w01` 的 `using` 语法失败） · 源码 125 文件 / 31,154 行 TS（含注释与空行） · Schema 40 表 / 40 索引 / 14 触发器（见 [schema.md](schema.md)）
 >
 > **状态定义**
 > - ✅ **已落地**：实现 + 测试，且真实调用链走通，可验收。
@@ -15,26 +15,26 @@
 
 | 模块 | ✅ 已落地 | ⚠️ 底座就位 | ❌ 未动 | 合计 |
 | --- | ---: | ---: | ---: | ---: |
-| 前端 UI 工作台（FE） | 9 | 6 | 19 | 34 |
+| 前端 UI 工作台（FE） | 11 | 5 | 18 | 34 |
 | DsH 插件逻辑（DSH） | 5 | 7 | 16 | 28 |
 | 后端数据库逻辑（DB） | 17 | 4 | 6 | 27 |
-| 番茄小说工作线（FQ） | 8 | 7 | 19 | 34 |
-| **合计** | **39** | **24** | **60** | **123** |
+| 番茄小说工作线（FQ） | 10 | 7 | 17 | 34 |
+| **合计** | **43** | **23** | **57** | **123** |
 
-**结论**：数据库底座完成度最高（63%）；宿主层已有 5/28 落地（工具契约、可选服务、thinking 过滤、排空、微改写账本），身份边界与 worker 化仍未动；番茄线 P0 只剩 FQ-06/FQ-07。
+**结论**：数据库底座完成度最高（63%）；宿主层已有 5/28 落地（工具契约、可选服务、thinking 过滤、排空、微改写账本），身份边界与 worker 化仍未动；**P0 已清零（24/24）**，后续重心转入 P1（身份边界、同步模型、读写热点）。
 
 ---
 
-## 2. P0 专项（24 条，20 ✅ / 1 ⚠️ / 3 ❌）
+## 2. P0 专项（24 条，24 ✅ / 0 ⚠️ / 0 ❌）
 
 | 编号 | 状态 | 现状 |
 | --- | --- | --- |
 | FE-01 | ✅ | `resolveCapturedSelection`：切章拒绝、唯一匹配重定位、0/多命中拒绝 |
 | FE-02 | ✅ | `execCommand("insertText")` 优先 + 10 步 AI 撤销栈 |
 | FE-06 | ✅ | `--vrow-h` CSS 变量 + `ResizeObserver` 重算行高 |
-| FE-07 | ❌ | `apiRequest` 无超时、无幂等键，挂起即锁死全部操作 |
+| FE-07 | ✅ | `apiRequest` 按动作设超时（读 15s / 写 30s / 导入导出 120s），超时提示保留本地草稿；幂等键经评估对非幂等 `draft.save` 无效，未引入 |
 | FE-12 | ✅ | raw 模式保留已勾选 hunk，部分勾选显示 banner |
-| FE-27 | ⚠️ | 仅在保存按钮可用时 `preventDefault`；无 `isComposing` 保护 |
+| FE-27 | ✅ | 键盘处理器在 `event.isComposing` 或编辑器组字期间直接返回，输入法选词时不会触发 Ctrl+S |
 | DSH-01 | ✅ | 10 个工具全部声明 `output{schema,render}` 与 `additionalProperties:false`，`dsh-tools-adapter` 注册前自检、失败整体回滚 |
 | DSH-02 | ✅ | 可选服务走 `ctx.get`；有 `ctx.inject` 时工具与设置表单各挂独立子作用域，注册失败只记日志 |
 | DSH-03 | ✅ | `block-end` 按块类型回删 thinking 增量，正文不再混入思维链，长度上限只计可见文本 |
@@ -49,12 +49,12 @@
 | FQ-01 | ✅ | `commitFactBatch`、`knownFromUpdates`、`setting.decide` 均走 `mergeFactVersion`（`ed83ef9`） |
 | FQ-02 | ✅ | 证据、增量同步、诊断统一走 `pointAtOffset`；回填脚本 `migrate:evidence-point`（`07df82d`） |
 | FQ-03 | ✅ | 生成时写 `base_revision_id` + 全文 `source_sha256`；决策前校验，漂移返回 `proposal-stale` 并保持 pending/dirty（`854ccbf`） |
-| FQ-06 | ❌ | 库条目仍可按 id 跨项目覆写；AI payload 无字段白名单（伏笔 patch 已加 `project_id` 守卫，但不算本项收口） |
-| FQ-07 | ❌ | 提案 `documentId` 可为 null，无 `chapter-required` 拒绝 |
+| FQ-06 | ✅ | 库条目按 id 写入前校验 scope/project 一致；伏笔 upsert 跨项目拒绝；`decideProposal` 固定 `row.projectId` 并剥离 payload 保留字段 |
+| FQ-07 | ✅ | 章节绑定提案在创建、生成、决策三处强制 `documentId`，移除 `chapterOrder` 回落 |
 | FQ-08 | ✅ | 补 `foreshadow.create/patch`，应用层统一调 `assertForeshadowTransition`；回收不再清空 `targetChapterId`/`plantedPoint`（`bd0763c`） |
 | FQ-10 | ✅ | 服务端生成 `fq-<uuid>` 并 remap 同载荷引用；`updates` 已消费且未知 id 明确拒绝；`retiredFacts` 上报 `unapplied`（`9567d00`） |
 
-**P0 退出标准达成情况**：跨模块 point 一致性、第 3 章知情第 10 章更新仍可见、严格 registrar 下 10 工具注册成功 —— **目前 3/4 可验收**（B2-2 后新增“严格 registrar 注册”）；剩余“跨项目 id 攻击被拒”由 FQ-06 决定，属 B2-4。上表剩 1 条 ⚠️（FE-27）与 3 条 ❌（FE-07、FQ-06、FQ-07），全部属 B2-4；完成即 P0 清零。
+**P0 退出标准达成情况**：跨模块 point 一致性、第 3 章知情第 10 章更新仍可见、跨项目 id 攻击被拒、严格 registrar 下 10 工具注册成功 —— **4/4 全部可验收**（B2-4 补齐跨项目写入拦截）。P0 至此清零。
 
 ---
 
@@ -68,7 +68,7 @@
 | FE-04 | P1 | ❌ | `apiRequest` 已支持 `ifSequence`；后端无 `treeSeq`/`unchanged`，仍每次 `tree.get` |
 | FE-05 | P1 | ❌ | 大纲板/设定库无本地草稿，重绘覆盖正在输入的内容 |
 | FE-06 | P0 | ✅ | 虚拟列表行高变量化 + `ResizeObserver` |
-| FE-07 | P0 | ❌ | 无 `AbortSignal.timeout`、无幂等键 |
+| FE-07 | P0 | ✅ | 读 15s / 写 30s / IO 120s；超时文案提示本地稿已保留 |
 | FE-08 | P1 | ❌ | 导入仍单请求，无 `importId/part/commit` 分批协议 |
 | FE-09 | P1 | ❌ | 无 `project.bootstrap` 实现，向导仍多请求 |
 | FE-10 | P2 | ✅ | 三主题补齐 diff/success/warning 等 29 处 token |
@@ -88,7 +88,7 @@
 | FE-24 | P2 | ⚠️ | `defaultModel` 设置项已存在；运行表单仍回退字面量 `"default"` |
 | FE-25 | P3 | ❌ | 无只读模式/模板预览 |
 | FE-26 | P3 | ❌ | 仅外观面板有 aria；无焦点陷阱与全键盘路径 |
-| FE-27 | P0 | ⚠️ | Ctrl+S 仅在按钮可用时拦截；无输入法组字保护 |
+| FE-27 | P0 | ✅ | 组字期间跳过全部快捷键（`event.isComposing`） |
 | FE-28 | P3 | ❌ | 导入导出 UI 无 v2 预览与选择性恢复 |
 | FE-29 | P2 | ❌ | 无 `FakeLlmTransport` 录制回放夹具 |
 | FE-30 | P3 | ❌ | seed-packs 无主题/排版预设 |
@@ -177,8 +177,8 @@
 | FQ-03 | P0 | ✅ | 生成时写 `base_revision_id` + 全文 `source_sha256`；决策前校验，漂移返回 `gate.denied` / `proposal-stale`；历史 NULL 提案放行并留 `proposal.decide.unpinned` 事件；compact 只钉 pending/inflight |
 | FQ-04 | P1 | ❌ | 无"按当前正文重新生成"与强制应用通道 |
 | FQ-05 | P1 | ❌ | 未挂载技法卡仍自动注入（决议：不注入） |
-| FQ-06 | P0 | ❌ | 库条目仍可按 id 跨项目覆写；伏笔写路径已加 `project_id` 守卫，但 AI payload 仍无字段白名单，整体不算收口 |
-| FQ-07 | P0 | ❌ | 提案可不带 `documentId` |
+| FQ-06 | P0 | ✅ | 库/伏笔跨项目按 id 写入均拒绝；提案 payload 剥离 id/scope/projectId/priority/status |
+| FQ-07 | P0 | ✅ | 创建/生成/决策三处强制章节；历史空文档提案保持 pending 并拒绝 |
 | FQ-08 | P0 | ✅ | 补 `foreshadow.create`/`foreshadow.patch`，`upsert` 退化为兼容 shim；单条与批量写路径均校验状态迁移；前端“标记回收”改 patch，保留目标章与埋设段 |
 | FQ-09 | P1 | ❌ | 仍读 `author_chapter_order`，章序两个真源 |
 | FQ-10 | P0 | ✅ | `finishProposalGeneration` 规范化为 `fq-<uuid>` 并 remap `foreshadowUpdates`/`knownFromUpdates`；`updates` 走 `mergeFactVersion` 新版本，未知 id 返回 `unknown-fact-id`；`retiredFacts` 记入 `unapplied` |
@@ -230,9 +230,9 @@
 | B2-1 连续性接线（✅ 已完成） | ~~FQ-01~~、~~FQ-02~~、~~FQ-03~~、~~FQ-08~~、~~FQ-10~~ | fact-sync 改用 `mergeFactVersion`；应用层统一 `splitChapterParagraphs`；提案校验 `base_revision_id` 并返回 `proposal-stale`；服务端生成 factId | 已完成 |
 | B2-2 宿主可启动（✅ 已完成） | ~~DSH-01~~、~~DSH-02~~、~~DSH-03~~、DSH-14（①④） | `dsh-adapter.ts` 单点收口；工具补 `output{schema,render}` 并进子作用域；thinking 增量过滤；注册失败降级不拖垮工作台 | 已完成 |
 | B2-3 账本不丢（✅ 已完成） | ~~DSH-08~~、~~DSH-10~~、~~DB-02~~ | 排空期继续写回执；微改写入账；`pruneCommandJournal` 定时调用 | 已完成 |
-| B2-4 写入安全 | FQ-06、FQ-07、FQ-09、FE-07、FE-27 | 跨项目 id 拒绝；`documentId` 必填；章序单真源（先定 schema）；前端超时+幂等键；保存键组字保护 | 3 天 |
+| B2-4 写入安全（✅ 已完成） | ~~FQ-06~~、~~FQ-07~~、~~FE-07~~、~~FE-27~~（FQ-09 仍留 P1） | 跨项目 id 拒绝；`documentId` 三处必填；前端按动作超时；保存键组字保护 | 已完成 |
 
-完成 B2-1 ~ B2-3 后 P0 现为 **20/24**；完成 B2-4 即达 **24/24**（P0 清零）。
+B2-1 ~ B2-4 全部完成，P0 达 **24/24（清零）**。
 
 ### B2-2 执行清单（✅ 全部完成）
 
@@ -258,6 +258,22 @@
 | 4 ✅ | DB-02 | 宿主启动即调用 `pruneCommandJournal`，此后每 6 小时一次；定时器 `unref`，卸载清理；失败仅记日志 | 120 条 40 天前日志在启动后只剩每文档 50 条，且 payload 已压缩为空 |
 
 **验收**：`test:v23` 11 文件 / 74 用例全绿；`npm test` 43 文件 / 320 用例全绿；`test:all` 69 文件 / 493 用例（Node 24 全绿；Node 22 仅 `workflow-w01` 的 `using` 语法失败）。
+
+### B2-4 执行清单（✅ 全部完成）
+
+**目标**：关掉 P0 最后四条——跨项目写入、无章节提案、请求无超时、输入法误触保存。
+
+| # | 条目 | 改动点 | 完成判据 |
+| --- | --- | --- | --- |
+| 1 ✅ | FQ-06（库与伏笔） | `library-crud` 写入前调用 `assertLibraryWriteScope`，scope/project 不一致即 `invalid("id","scope-mismatch")`；`upsertForeshadow` 带 id 时要求 `projectId` 与既有行一致 | 跨项目、global↔project 覆写全部被拒，原行内容不变 |
+| 2 ✅ | FQ-06（提案） | `proposal-decide` 固定 `projectId = row.projectId`，并剥离 payload 的 `id/scope/projectId/priority/status`；deconstruct/technique 的 scope 只由提案行决定 | 伪造 `projectId` / `scope` / `id` / `priority` 均不生效；committed 落在原项目 |
+| 3 ✅ | FQ-07 | 章节绑定提案（`setting/summary/fact_sync/chapter_review`）在 `proposal.create`、`proposal.generate`、`proposal.decide` 三处强制 `documentId`；删除 `chapterOrder()[0]` 回落；智能体伏笔工具同步要求 `documentId` | 无文档提案在三个入口均返回 `chapter-required`；历史空文档提案保持 pending 并拒绝确认 |
+| 4 ✅ | FE-07 | `apiRequest` 按动作设超时（读 15s / 写 30s / 导入导出 120s），`AbortSignal.timeout` 触发后抛出“本地草稿已保留”的中文提示；`perform()` 的 finally 释放 UI 锁 | 服务端挂起时 UI 在预算内复位；DraftVault 中本地稿仍可复制/回填 |
+| 5 ✅ | FE-27 | 键盘处理器开头 `if (event.isComposing \|\| composing) return;` | 输入法组字期间 Ctrl+S / 切换快捷键均不触发 |
+
+**关于幂等键**：`draft.save` 在命令表里是 `idempotent: false`，前端传 key 会被服务端覆盖，重试仍可能撞 `version.conflict`。本批按已批准的“超时 + 本地稿兜底”实现，**未**引入幂等键；若后续要改，需先改命令表并同步 DB-02 审计语义。
+
+**验收**：`test:v23` 12 文件 / 78 用例全绿；`npm test` 44 文件 / 325 用例全绿；`test:all` 70 文件 / 498 用例（Node 24 全绿；Node 22 仅 `workflow-w01` 的 `using` 语法失败）。
 
 ### B2-1 执行清单（✅ 全部完成）
 
@@ -285,4 +301,4 @@
 - 每完成一批，**只改本表对应行的状态与"现状"**，并在提交信息里带上条目编号（如 `feat(fanqie): wire mergeFactVersion (FQ-01)`）。
 - 状态升级必须有测试支撑：⚠️ → ✅ 需在 `test/*-v23.test.mjs` 或对应分层测试中新增至少一个**走真实调用链**的用例。
 - 本表不复制计划正文、不记录决策；决议仍以计划 §6.0 为准。
-- 每次改动后跑 `npm run verify`（只读类型检查 + 320 个核心用例）与 `npm run test:all`（493 个全量用例，需 Node ≥ 24.15），数字写回本页顶部基线。
+- 每次改动后跑 `npm run verify`（只读类型检查 + 325 个核心用例）与 `npm run test:all`（498 个全量用例，需 Node ≥ 24.15），数字写回本页顶部基线。

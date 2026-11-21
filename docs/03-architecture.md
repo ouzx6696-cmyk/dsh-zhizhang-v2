@@ -210,7 +210,7 @@ flowchart TD
 2. **数据层**：读模型改为**每个项目一个 `ProjectionStore`** 共享一遍折叠（`author-reads.ts`）；FTS 改为两段式（先取 rowid 排序 `LIMIT`，仅对前 K 条取 snippet），1–2 字中文查询走 `author_chapter_entities` 倒排；语句缓存 LRU 上限 256；`PRAGMA busy_timeout` 前置于 WAL 切换，Windows 关闭 `mmap`。
 3. **运维**：`createHotBackup` 使用 `node:sqlite` 的 `backup()`（回退 `VACUUM INTO`），保留策略 `planRetention` + `pruneBackups` 已实现并测试；`command_journal` 增加 `request_hash` 与 `pruneCommandJournal`，宿主启动即修剪一次、此后每 6 小时一次（DB-02）。
 4. **用量口径**：`workflow/budget.ts` 的 `normalizeUsage` 把回执规范为四类互斥（未命中输入 / 缓存命中 / 缓存写入 / 输出），写作预算已改用。`selection.rewrite` 的用量单独记入 `author_micro_calls`（决议 #7）：`inflight` 行的唯一索引同时充当文档级锁，`completed / failed / uncertain` 三态收尾，运行检查器与写作账单分栏显示。
-5. **前端**：Diff 改为句级切分 + Myers，并保留空行 spacer 归属与行尾风格还原；选段微改写新增捕获校验（切章拒绝、唯一匹配重定位）与 AI 撤销栈；虚拟列表行高改由 `--vrow-h` 驱动并用 `ResizeObserver` 重算；三套主题补齐 diff/success/warning token。
+5. **前端**：Diff 改为句级切分 + Myers，并保留空行 spacer 归属与行尾风格还原；选段微改写新增捕获校验（切章拒绝、唯一匹配重定位）与 AI 撤销栈；虚拟列表行高改由 `--vrow-h` 驱动并用 `ResizeObserver` 重算；三套主题补齐 diff/success/warning token。请求层按动作设超时（读 15s / 写 30s / 导入导出 120s），超时后保留本地稿并释放 UI 锁；键盘快捷键在输入法组字期间不触发。
 6. **宿主适配层（DSH-01/02/03/14）**：`src/host/dsh-adapter.ts` 是唯一描述宿主 API 的模块；`src/host/dsh-tools-adapter.ts` 把内部工具规格翻译为上游 `{ name, description, parameters(additionalProperties:false), output{schema,render}, execute(args,exec) }` 形状，并在注册前自检、任一工具失败即整体回滚。可选服务一律 `ctx.get(name)` 解析；宿主支持 `ctx.inject` 时，工具与设置表单各挂独立子作用域，注册失败只记日志并把 `/diag.agentToolsRegistered` 置 `false`，不再拖垮工作台。流式生成按 `block-end` 的块类型回删 thinking 增量，思维链不会进入候选正文。
 
 **宿主服务契约表**（与 `HOST_SERVICE_CONTRACTS` 同步，`test/host-tools-v23.test.mjs` 校验必需项与 `inject` 完全一致）：
@@ -223,3 +223,5 @@ flowchart TD
 | `configForms` | 否 | 插件设置表单 | DsH 0.2.x plugin docs · `ctx.configForms.register`（**未录制**） |
 
 > 上述形状来自公开文档，尚未在隔离 profile 录制核对（决议 #5）。DSH-14 的①（单点收口）与④（契约表）已落地；②（固定上游类型）与③（录制样本）仍阻塞于 #5，因此 DSH-14 保持 ⚠️。
+
+7. **写入安全（FQ-06/FQ-07）**：库条目与伏笔按 id 写入前校验 `scope/project_id` 与既有行一致，跨项目或 global↔project 覆写直接 `invalid("id","scope-mismatch")`；提案决策固定 `projectId = row.projectId`，并从 payload 剔除 `id/scope/projectId/priority/status`；`setting/summary/fact_sync/chapter_review` 四类章节绑定提案在创建、生成、决策三处强制 `documentId`，不再回落到首章。
