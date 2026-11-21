@@ -1,9 +1,8 @@
 import type { CandidateQaReport, WorkspaceSnapshot } from "../../../contracts/workspace-dto.ts";
+import { QA_REFINEMENT_LIMIT, TITLE_MAX } from "../../contracts/protected-rules.ts";
 import { countUnicodeCodePoints } from "../diff.ts";
 import { byId } from "../dom.ts";
 import type { ProductLineUiModule, ProductLineUiSession, WorkbenchShellHost } from "./types.ts";
-
-const TITLE_MAX = 34;
 
 function syncTitleCount(field: HTMLInputElement, output: HTMLOutputElement, titled: boolean): void {
   const length = countUnicodeCodePoints(field.value);
@@ -208,7 +207,7 @@ export const toutiaoUiModule: ProductLineUiModule = {
         }
 
         byId<HTMLButtonElement>("qa-submit").disabled = !hasDraft || locked;
-        byId<HTMLButtonElement>("refine").disabled = !hasDraft || active.state !== "初稿待改" || active.qaRounds >= 2;
+        byId<HTMLButtonElement>("refine").disabled = !hasDraft || active.state !== "初稿待改" || active.qaRounds >= QA_REFINEMENT_LIMIT;
         const acceptDisabled = active.state !== "待验收";
         byId<HTMLButtonElement>("accept").disabled = acceptDisabled;
         byId<HTMLButtonElement>("reject").disabled = acceptDisabled;

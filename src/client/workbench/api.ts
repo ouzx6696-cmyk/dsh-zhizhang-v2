@@ -1,4 +1,5 @@
 import type { WorkspaceStateResponse } from "../../contracts/workspace-dto.ts";
+import { TITLE_MAX } from "../contracts/protected-rules.ts";
 
 interface ApiPacket<T> {
   readonly ok: boolean;
@@ -19,7 +20,7 @@ const REASON_MESSAGES: Readonly<Record<string, string>> = {
   "qa-refinement-limit": "已达两轮自动回改上限。",
   "qa-refinement-unavailable": "当前状态不可保存回改稿或已达回改上限。",
   "approval-missing": "请先批准当前版本后再交稿。",
-  "title-limit": "标题最多 34 个 Unicode 字符。",
+  "title-limit": `标题最多 ${TITLE_MAX} 个 Unicode 字符。`,
   "micro-has-no-title": "微头条不设标题。",
   "quote-must-match-exactly-once": "摘句必须在已保存正文中唯一匹配一次。",
 };

@@ -206,7 +206,7 @@ flowchart TD
 
 本节只记录**已在代码中生效**的增量；未落地的宿主契约、身份边界与 worker 化见 [状态对照表](zhizhang_v2_3_status.md)。
 
-1. **受保护常量单点定义**：[src/contracts/protected-rules.ts](../src/contracts/protected-rules.ts) 是 `34 / 84 / 2 / 2 / 交稿尾句 / 状态词表` 的唯一来源，纯 `as const`、浏览器安全、零导入；`domain/fanqie/editorial.ts` 与 `domain/toutiao/rules.ts` 原值转出，数值不变。前端 `client/plugins/toutiao.ts` 仍有一处本地 `34`，属 FE-16 待收口项。
+1. **受保护常量单点定义**：[src/contracts/protected-rules.ts](../src/contracts/protected-rules.ts) 是 `34 / 84 / 2 / 2 / 交稿尾句 / 状态词表` 的唯一来源，纯 `as const`、浏览器安全、零导入；`domain/fanqie/editorial.ts` 与 `domain/toutiao/rules.ts` 原值转出，数值不变。浏览器端改由镜像 [src/client/contracts/protected-rules.ts](../src/client/contracts/protected-rules.ts) 取值，`test/db-v23.test.mjs` 逐字校验镜像导出块与真源一致。
 2. **数据层**：读模型改为**每个项目一个 `ProjectionStore`** 共享一遍折叠（`author-reads.ts`）；FTS 改为两段式（先取 rowid 排序 `LIMIT`，仅对前 K 条取 snippet），1–2 字中文查询走 `author_chapter_entities` 倒排；语句缓存 LRU 上限 256；`PRAGMA busy_timeout` 前置于 WAL 切换，Windows 关闭 `mmap`。
 3. **运维**：`createHotBackup` 使用 `node:sqlite` 的 `backup()`（回退 `VACUUM INTO`），保留策略 `planRetention` + `pruneBackups` 已实现并测试；`command_journal` 增加 `request_hash` 与 `pruneCommandJournal`（**尚未接入宿主定时调用**，属 DB-02 待办）。
 4. **用量口径**：`workflow/budget.ts` 的 `normalizeUsage` 把回执规范为四类互斥（未命中输入 / 缓存命中 / 缓存写入 / 输出），写作预算已改用。

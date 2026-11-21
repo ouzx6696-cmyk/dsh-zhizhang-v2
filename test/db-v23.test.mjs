@@ -126,6 +126,17 @@ test("V2.3 protected-rules.ts matches domain protected constants verbatim with z
   );
   assert.doesNotMatch(rulesSrc, /^\s*import\b/m);
 
+  // FE-16: the browser-served mirror restates the canonical module verbatim.
+  const mirrorSrc = readFileSync(
+    fileURLToPath(new URL("../src/client/contracts/protected-rules.ts", import.meta.url)),
+    "utf8",
+  );
+  assert.doesNotMatch(mirrorSrc, /^\s*import\b/m);
+  const exportBlock = (text) => text.slice(text.indexOf("export const TITLE_MAX")).replace(/\r\n/g, "\n");
+  assert.equal(exportBlock(mirrorSrc), exportBlock(rulesSrc), "client mirror drifted from contracts/protected-rules.ts");
+  const mirror = await import("../src/client/contracts/protected-rules.ts");
+  assert.deepEqual({ ...mirror }, { ...protectedRules });
+
   // workspace-dto.ts remains strictly type-only
   const dtoRuntime = await import("../src/contracts/workspace-dto.ts");
   assert.deepEqual(Object.keys(dtoRuntime), []);

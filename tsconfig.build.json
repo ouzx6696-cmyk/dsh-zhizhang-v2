@@ -8,5 +8,5 @@
     "outDir": "dist/server"
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["dist", "node_modules", "test", "src/client/workbench/**/*.ts", "src/client/slot.ts"]
+  "exclude": ["dist", "node_modules", "test", "src/client/workbench/**/*.ts", "src/client/slot.ts", "src/client/contracts/**/*.ts"]
 }

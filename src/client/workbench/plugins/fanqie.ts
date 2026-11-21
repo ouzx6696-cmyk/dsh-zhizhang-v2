@@ -5,6 +5,7 @@ import type {
   SettingFactDto,
   WorkspaceSnapshot,
 } from "../../../contracts/workspace-dto.ts";
+import { EDITORIAL_REJECTION_LIMIT } from "../../contracts/protected-rules.ts";
 import { byId, el } from "../dom.ts";
 import { createContextPreviewPanel } from "../views/context-preview.ts";
 import { createDiagnosticsPanel } from "../views/diagnostics-panel.ts";
@@ -457,9 +458,10 @@ export const fanqieUiModule: ProductLineUiModule = {
         byId<HTMLButtonElement>("move-up").disabled = position < 1;
         byId<HTMLButtonElement>("move-down").disabled = position >= (snapshot.documents?.length ?? 0) - 1;
 
-        byId("reviews").textContent = `审稿打回 ${active.editorialRejections} / 2 次`;
+        byId("reviews").textContent = `审稿打回 ${active.editorialRejections} / ${EDITORIAL_REJECTION_LIMIT} 次`;
         byId<HTMLButtonElement>("review-pass").disabled = !hasDraft || locked || active.state === "reviewed";
-        byId<HTMLButtonElement>("review-reject").disabled = !hasDraft || locked || active.editorialRejections >= 2;
+        byId<HTMLButtonElement>("review-reject").disabled =
+          !hasDraft || locked || active.editorialRejections >= EDITORIAL_REJECTION_LIMIT;
         byId<HTMLButtonElement>("finalize").disabled = active.state !== "reviewed";
       },
 
