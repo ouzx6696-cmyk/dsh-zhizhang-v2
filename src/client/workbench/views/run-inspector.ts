@@ -101,6 +101,9 @@ export function renderRunInspector(target: HTMLElement, detail: RunDetailDto): v
   const cacheHitLabel = billing.cacheHitRate !== null
     ? `${(billing.cacheHitRate * 100).toFixed(1)}%`
     : "未知";
+  const savingsLabel = billing.estimatedSavingsRatio !== undefined && billing.estimatedSavingsRatio !== null
+    ? `${(billing.estimatedSavingsRatio * 100).toFixed(1)}%`
+    : "—";
 
   const header = el("div", { className: "inspector-section" });
   header.append(el("h3", { className: "inspector-heading", text: "冻结上下文" }));
@@ -109,7 +112,8 @@ export function renderRunInspector(target: HTMLElement, detail: RunDetailDto): v
     ["基准修订", detail.baseRevisionId.slice(0, 8)],
     ["预算账目", `已结算 ${detail.settled} / 总额 ${detail.reserved} token`],
     ["有效计费", billedLabel],
-    ["缓存命中率", cacheHitLabel],
+    ["缓存命中率", `${cacheHitLabel}（估算节省 ${savingsLabel}）`],
+    ...(billing.cacheDiagnosis ? ([["缓存归因", billing.cacheDiagnosis]] as readonly [string, string][]) : []),
     ["写作要求", frozen.instruction ?? "（无）"],
     [
       "知情设定",
@@ -177,7 +181,7 @@ export function renderRunInspector(target: HTMLElement, detail: RunDetailDto): v
     const table = el("table", { className: "token-table" });
     const thead = document.createElement("thead");
     const headRow = document.createElement("tr");
-    for (const col of ["阶段", "预留", "输入", "输出", "缓存读", "缓存写"]) {
+    for (const col of ["阶段", "预留", "输入", "输出", "缓存读", "缓存写", "策略", "前缀哈希"]) {
       headRow.append(el("th", { text: col }));
     }
     thead.append(headRow);
@@ -194,6 +198,8 @@ export function renderRunInspector(target: HTMLElement, detail: RunDetailDto): v
         el("td", { className: "num", text: tuple ? String(tuple[1] ?? 0) : "—" }),
         el("td", { className: "num", text: tuple ? String(tuple[2] ?? 0) : "—" }),
         el("td", { className: "num", text: tuple ? String(tuple[3] ?? 0) : "—" }),
+        el("td", { text: call.cacheStrategy ?? "—" }),
+        el("td", { className: "tabular", text: call.prefixSha256 ? call.prefixSha256.slice(0, 10) : "—" }),
       );
       tbody.append(tr);
     }

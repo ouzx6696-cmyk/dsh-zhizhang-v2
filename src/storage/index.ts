@@ -163,6 +163,7 @@ export {
 
 export {
   createJobLedger,
+  type CallCacheMeta,
   type CreateJobInput,
   type JobCallRecord,
   type JobLedger,

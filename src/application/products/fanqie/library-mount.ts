@@ -18,6 +18,7 @@ import {
 import { stmt } from "../../../storage/index.ts";
 import { count, invalid, optionalText, requiredRow, text, type DocumentRow, type Input, type WorkspaceContext } from "../../context.ts";
 import { queryDeconstructions, queryTechniques } from "./library-crud.ts";
+import { markBookPrefixDirty } from "./cache-snapshot.ts";
 import { assertFanqieProject } from "./shared.ts";
 
 function parseMountParams(input: Input): {
@@ -91,6 +92,7 @@ export function mountLibraryItem(ctx: WorkspaceContext, input: Input): LibraryMo
       WHERE project_id = ? AND target_type = ? AND target_id = ? AND item_kind = ? AND item_id = ?;
     `).get(projectId, targetType, targetId, itemKind, itemId) as LibraryMountDto;
     ctx.event(projectId, "setting", "library.mounted", { id: saved.id, targetType, targetId, itemKind, itemId, mode });
+    if (targetType === "project") markBookPrefixDirty(ctx, projectId);
     return saved;
   });
 }
@@ -105,6 +107,7 @@ export function unmountLibraryItem(ctx: WorkspaceContext, input: Input) {
     `).run(projectId, targetType, targetId, itemKind, itemId);
     if (res.changes > 0) {
       ctx.event(projectId, "setting", "library.unmounted", { targetType, targetId, itemKind, itemId });
+      if (targetType === "project") markBookPrefixDirty(ctx, projectId);
     }
     return { removed: res.changes > 0 };
   });

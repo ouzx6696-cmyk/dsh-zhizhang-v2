@@ -200,6 +200,9 @@ export function createCoreSchema(db: SqliteDatabase): void {
       input_reserve INTEGER NOT NULL,
       max_output INTEGER NOT NULL,
       usage TEXT,
+      prefix_sha256 TEXT,
+      l1_version INTEGER,
+      cache_strategy TEXT,
       created_at INTEGER NOT NULL DEFAULT 0
     ) STRICT;
 

@@ -38,6 +38,12 @@ export interface JobRecord {
   readonly updatedAt: number;
 }
 
+export interface CallCacheMeta {
+  readonly prefixSha256?: string | null;
+  readonly l1Version?: number | null;
+  readonly cacheStrategy?: string | null;
+}
+
 export interface JobCallRecord {
   readonly id: string;
   readonly jobId: string;
@@ -47,6 +53,9 @@ export interface JobCallRecord {
   readonly inputReserve: number;
   readonly maxOutput: number;
   readonly usage: string | null;
+  readonly prefixSha256: string | null;
+  readonly l1Version: number | null;
+  readonly cacheStrategy: string | null;
   readonly createdAt: number;
 }
 
@@ -177,7 +186,14 @@ export function createJobLedger(db: SqliteDatabase) {
       `).get(documentId, exceptRunId));
     },
 
-    beginCall(jobId: string, callId: string, phase: string, inputReserve: number, maxOutput: number): boolean {
+    beginCall(
+      jobId: string,
+      callId: string,
+      phase: string,
+      inputReserve: number,
+      maxOutput: number,
+      cacheMeta?: CallCacheMeta,
+    ): boolean {
       return withWriteTx(db, () => {
         const now = Date.now();
         const marked = stmt(db, `
@@ -186,9 +202,21 @@ export function createJobLedger(db: SqliteDatabase) {
         `).run(phase, now, jobId);
         if (!marked.changes) return false;
         stmt(db, `
-          INSERT INTO author_job_calls (id, job_id, phase, input_reserve, max_output, created_at)
-          VALUES (?, ?, ?, ?, ?, ?);
-        `).run(callId, jobId, phase, inputReserve, maxOutput, now);
+          INSERT INTO author_job_calls (
+            id, job_id, phase, input_reserve, max_output,
+            prefix_sha256, l1_version, cache_strategy, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+        `).run(
+          callId,
+          jobId,
+          phase,
+          inputReserve,
+          maxOutput,
+          cacheMeta?.prefixSha256 ?? null,
+          cacheMeta?.l1Version ?? null,
+          cacheMeta?.cacheStrategy ?? null,
+          now,
+        );
         return true;
       });
     },
@@ -313,7 +341,8 @@ export function createJobLedger(db: SqliteDatabase) {
       return stmt(db, `
         SELECT c.id, c.job_id AS jobId, c.job_id AS attemptId, c.phase,
                c.input_reserve AS inputReserve, c.max_output AS maxOutput,
-               c.usage, c.created_at AS createdAt
+               c.usage, c.prefix_sha256 AS prefixSha256, c.l1_version AS l1Version,
+               c.cache_strategy AS cacheStrategy, c.created_at AS createdAt
         FROM author_job_calls c
         JOIN author_jobs j ON j.id = c.job_id
         WHERE j.run_id = ? ORDER BY j.rowid DESC, c.rowid ASC;

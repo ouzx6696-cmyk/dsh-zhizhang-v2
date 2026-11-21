@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ProjectControlsDto } from "../../../contracts/workspace-dto.ts";
 import { stmt } from "../../../storage/index.ts";
 import { invalid, optionalText, text, type Input, type WorkspaceContext } from "../../context.ts";
+import { markBookPrefixDirty } from "./cache-snapshot.ts";
 import { assertFanqieProject } from "./shared.ts";
 
 export function loadProjectControls(ctx: WorkspaceContext, projectId: string): ProjectControlsDto {
@@ -41,6 +42,9 @@ export function saveProjectControls(ctx: WorkspaceContext, input: Input): Projec
         updated_at = excluded.updated_at;
     `).run(projectId, authorIntent, currentFocus, updatedAt);
     ctx.event(projectId, "chapter", "controls.saved", { projectId });
+    if (authorIntent !== existing.authorIntent) {
+      markBookPrefixDirty(ctx, projectId);
+    }
     return { projectId, authorIntent, currentFocus, updatedAt };
   });
 }

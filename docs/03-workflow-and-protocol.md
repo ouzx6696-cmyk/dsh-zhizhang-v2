@@ -17,11 +17,21 @@ Zhizhang 3.0 将此前分散的写作运行、局部改写与 AI 提案提取三
 ### 持久化、精确结算与有界排空
 
 - **`author_jobs`（STRICT 表）**：记录作业生命周期状态（`prepared` → `inflight` → `received` → `completed` / `failed` / `cancelled` / `uncertain` / `reconciled`）、冻结作用域键（`scope_key`）、预算预留（`reserved`）、已结算用量（`settled`）、取消后晚到回执累计（`late_usage`）、关联 `run_id` / `proposal_id` 与错误摘要。
-- **`author_job_calls`（STRICT 表）**：记录每一次底层模型调用回执（`phase`、`input_reserve`、`max_output`、`usage`），支撑 `verifyUsageConsistency()` 四类用量恒等校验（账实一致）与崩溃重启自动对账（`reconcile`）。
+- **`author_job_calls`（STRICT 表）**：记录每一次底层模型调用回执（`phase`、`input_reserve`、`max_output`、`usage`、`prefix_sha256`、`l1_version`、`cache_strategy`），支撑 `verifyUsageConsistency()` 四类用量恒等校验、缓存命中率与费用节省估算及前缀变更归因。
 - **三层分工**：
   1. `src/storage/job-ledger.ts`：原子建单、并发冲突拒绝、状态流转、回执记账与启动扫描。
-  2. `src/application/job-service.ts`：预算预估、并发/对账门禁、候选采纳、头条自动 QA 回改次数预留与统一作业摘要查询。
+  2. `src/application/job-service.ts`：预算预估、并发/对账门禁、候选采纳、头条自动 QA 回改次数预留、统一作业摘要查询与缓存归因诊断（`diagnoseCacheBehavior`）。
   3. `src/host/job-engine.ts`：`HostJobEngine` 负责模型调用编排、取消信号（`AbortController`）与插件卸载排空（`shutdownDrain()`）——当在途任务超出排空预算时自动中止并采用有界宽限期收尾，防止失联的模型传输阻塞宿主卸载。
+
+### 四层长篇 Prompt Cache 架构（L0–L3）
+
+长篇连载期间，`draft_generation`、`selection_rewrite` 与 `proposal_extraction` 三类作业统一复用同一套四层前缀结构（`src/workflow/cache-layer.ts` + `src/application/products/fanqie/cache-snapshot.ts`）：
+
+- **L0 共享系统内核（`SHARED_WORKBENCH_SYSTEM_KERNEL`）**：所有番茄作业共用 Token 0 逐字一致的系统提示词，具体任务角色与输出格式统一置于 L3 文末协议区。
+- **L1 版本钉住全书圣经（`author_book_prefix_cache`）**：按独立固定配额（默认 `8192` tokens，与单次 `tokenLimit` 及写作 `stage` 完全解耦）编译指南针、创作约定、客观世界观与全书级挂载技法；零散设定修改（`< 10` 次）仅走 L3 增量补丁而不破坏 L1 哈希，达到阈值、冷窗口（`> 25 min`）或作者手动触发 `cache.rebuild` 时才升级快照版本。
+- **L2 仅追加卷幕与十章里程碑**：归档已定稿卷幕摘要、每 10 章闭合里程碑块与按 `id` 确定性排序的活跃伏笔，禁止在前缀中段改写。
+- **L3 每次请求动态尾**：L1 增量补丁、POV 视角知情与严禁泄露边界、阶段/本章技法、当前十章窗口摘要、远期 Top-4 召回、工作稿与任务协议（规范化 Markdown，不再将原始 `JSON.stringify` 置于起始字节）。
+- **多供应商协议适配（`buildLayeredStreamPayload`）**：彻底移除非标准 `streamOptions.cachePrefix`，按 `(provider, model)` 自动路由至 DeepSeek 隐式前缀（`deepseek-implicit`）、Anthropic 显式断点（`anthropic-breakpoints` + `cache_control: { type: "ephemeral" }`）、OpenAI 隐式路由键（`openai-implicit` + `prompt_cache_key`）或本地小模型紧凑模式（`compact-local`）。
 
 ---
 

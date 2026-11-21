@@ -1,5 +1,6 @@
 import type {
   ContextBundleDto,
+  ContextSlotReportDto,
   DeconstructionDto,
   RelatedChapterScoreDto,
   TechniqueCardDto,
@@ -16,13 +17,81 @@ import {
 } from "../../../domain/fanqie/index.ts";
 import { anchor } from "../../../domain/shared/index.ts";
 import { searchRelatedChaptersByFts, stmt } from "../../../storage/index.ts";
+import {
+  buildTaskProtocolSection,
+  normalizeCacheText,
+  sha256Prefix,
+  SHARED_WORKBENCH_SYSTEM_KERNEL,
+  type LayeredPromptPayload,
+} from "../../../workflow/cache-layer.ts";
 import { assembleContextBundle, type ContextSlotInput } from "../../../workflow/context-slots.ts";
-import { WRITER_SYSTEM } from "../../../workflow/writing-budget.ts";
+import { estimateTokenCount, WRITER_SYSTEM } from "../../../workflow/writing-budget.ts";
+import type { WritingPhase } from "../../../workflow/writing-stages.ts";
 import { count, invalid, type DocumentRow, type Input, type WorkspaceContext } from "../../context.ts";
 import type { ProductGenerationRunner } from "../../product-line.ts";
+import {
+  buildVolumeMilestoneL2,
+  getOrRefreshBookPrefixSnapshot,
+  type BookPrefixSnapshotResult,
+  type VolumeMilestoneL2Result,
+} from "./cache-snapshot.ts";
 import { loadProjectControls } from "./controls.ts";
 import { queryTechniqueRecommendations, resolveMountedLibraryForChapter } from "./library.ts";
 import { approvedFacts } from "./shared.ts";
+
+export interface FanqieSharedLayeredPrefix {
+  readonly l1: BookPrefixSnapshotResult;
+  readonly l2: VolumeMilestoneL2Result;
+  readonly cachePartitionKey: string;
+}
+
+export function buildFanqieSharedLayeredPrefix(
+  ctx: WorkspaceContext,
+  projectId: string,
+  row?: DocumentRow,
+  options: { readonly readOnly?: boolean } = {},
+): FanqieSharedLayeredPrefix {
+  const l1 = getOrRefreshBookPrefixSnapshot(ctx, projectId, { readOnly: options.readOnly });
+  const l2 = buildVolumeMilestoneL2(ctx, projectId, row);
+  return {
+    l1,
+    l2,
+    cachePartitionKey: `zhizhang:${projectId}`,
+  };
+}
+
+/**
+ * Composes a 4-Tier LayeredPromptPayload (`L0 + L1 + L2 + L3`) so every Fanqie
+ * job kind (writing, micro-rewrite, review, fact-sync, summary, setting, arc-plan)
+ * shares the exact same L0+L1+L2 prefix byte-for-byte.
+ */
+export function buildFanqieLayeredPayload(
+  shared: FanqieSharedLayeredPrefix,
+  phase: WritingPhase,
+  dynamicSections: readonly string[],
+  extraDirectives?: string,
+): LayeredPromptPayload {
+  const tailParts: string[] = [];
+  if (shared.l1.pendingDeltaText) {
+    tailParts.push(`### 【L1 增量设定补丁（待合入圣经快照）】\n${shared.l1.pendingDeltaText}`);
+  }
+  for (const section of dynamicSections) {
+    const clean = section.trim();
+    if (clean) tailParts.push(clean);
+  }
+  tailParts.push(buildTaskProtocolSection(phase, extraDirectives));
+
+  return {
+    systemKernel: SHARED_WORKBENCH_SYSTEM_KERNEL,
+    bookPrefix: shared.l1.compiledText || undefined,
+    bookPrefixSha256: shared.l1.snapshot.prefixSha256 || undefined,
+    bookSnapshotVersion: shared.l1.snapshot.version,
+    volumePrefix: shared.l2.volumePrefix || undefined,
+    volumePrefixSha256: shared.l2.volumePrefixSha256 || undefined,
+    dynamicTail: normalizeCacheText(tailParts.join("\n\n")),
+    cachePartitionKey: shared.cachePartitionKey,
+  };
+}
 
 export function formatTechniquesBlock(cards: readonly TechniqueCardDto[]): string {
   if (cards.length === 0) return "";
@@ -60,9 +129,32 @@ function formatDeconstructionsBlock(samples: readonly DeconstructionDto[]): stri
     .join("\n\n");
 }
 
-function formatFactsBlock(facts: readonly SettingFact[]): string {
-  if (facts.length === 0) return "";
-  return facts.map((fact) => `- [${fact.id}] ${fact.note}（来源：${fact.source}）`).join("\n");
+function formatPovBoundaryBlock(
+  viewpoint: string | undefined,
+  knownFacts: readonly SettingFact[],
+  allFacts: readonly SettingFact[],
+): string {
+  if (!viewpoint) return "";
+  const knownIds = new Set(knownFacts.map((f) => f.id));
+  const lines: string[] = [];
+  if (knownFacts.length > 0) {
+    lines.push(
+      `当前视角人物「${viewpoint}」已获知设定（允许直接描写）：`,
+      ...knownFacts.map((fact) => `- [${fact.id}] ${fact.note}（来源：${fact.source}）`),
+    );
+  } else {
+    lines.push(`当前视角人物「${viewpoint}」暂无已获知专项设定。`);
+  }
+  const hiddenIds = allFacts
+    .filter((f) => f.kind !== "agreement" && !knownIds.has(f.id))
+    .map((f) => f.id)
+    .sort();
+  if (hiddenIds.length > 0) {
+    lines.push(
+      `【严禁泄露】以下 L1 客观设定在当前章节对「${viewpoint}」仍属未知，切勿通过内心独白或对话提前泄露：${hiddenIds.join("、")}`,
+    );
+  }
+  return lines.join("\n");
 }
 
 function formatOutlineBlock(plan: Input | null, title: string): string {
@@ -126,7 +218,9 @@ export function buildFanqieFrozenContext(
   ctx: WorkspaceContext,
   row: DocumentRow,
   input: Input,
+  options: { readonly readOnly?: boolean } = {},
 ): {
+  readonly projectId: string;
   readonly knownAt: { readonly chapterId: string; readonly point: number };
   readonly knownFacts: readonly SettingFact[];
   readonly relatedChapters: readonly RelatedChapterScoreDto[];
@@ -148,25 +242,13 @@ export function buildFanqieFrozenContext(
     : 16_000;
   const maxInputTokens = Math.max(512, Math.floor(tokenLimit * 0.72));
 
-  // 1. Agreements (stable project-wide rules, sorted deterministically for Prefix Cache)
-  const agreementRows = stmt(ctx.db, `
-    SELECT fact_id AS factId, value FROM author_lore_current
-    WHERE project_id = ? AND category = 'agreement'
-    ORDER BY fact_id ASC;
-  `).all(row.projectId) as readonly { factId: string; value: string }[];
-  const agreementText = agreementRows
-    .map((entry) => {
-      try {
-        const parsed = JSON.parse(entry.value) as { note?: string };
-        return `- [${entry.factId}] ${parsed.note ?? ""}`;
-      } catch {
-        return "";
-      }
-    })
-    .filter(Boolean)
-    .join("\n");
+  // L1 (Version-Pinned Book Bible) + L2 (Append-Only Volume/Act & 10-Chapter Milestones)
+  // Completely decoupled from per-run `tokenLimit` and `stage`!
+  const shared = buildFanqieSharedLayeredPrefix(ctx, row.projectId, row, { readOnly: options.readOnly });
+  const l1TechSet = new Set(shared.l1.projectMountedTechniqueIds);
+  const l1DeconstructSet = new Set(shared.l1.projectMountedDeconstructionIds);
 
-  // 2. Targeted author-selected qualitative observations (optional refine / deslop focus)
+  // Targeted author-selected qualitative observations (optional refine / deslop focus)
   const rawObsIds = Array.isArray(input.observationIds)
     ? input.observationIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
     : [];
@@ -196,19 +278,21 @@ export function buildFanqieFrozenContext(
     .map((obs) => `- [${obs.dimension}] ${obs.quote ? `原文「${obs.quote}」 → ` : ""}${obs.suggestion}`)
     .join("\n");
 
-  // 3. Stage-bound mounted & recommended technique/skill cards + deconstruction samples (sorted by stable ID)
+  // Stage-specific / chapter-scoped techniques & deconstructions NOT already pinned in L1 go to L3
   const pacing = typeof input.pacing === "string" ? input.pacing : "";
   const mounted = resolveMountedLibraryForChapter(ctx, row, instruction, pacing, stage);
-  const techniques = [...mounted.techniques].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  const deconstructions = [...mounted.deconstructions].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const allTechniques = [...mounted.techniques].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const allDeconstructions = [...mounted.deconstructions].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const l3Techniques = allTechniques.filter((card) => !l1TechSet.has(card.id) || stage !== "write");
+  const l3Deconstructions = allDeconstructions.filter((item) => !l1DeconstructSet.has(item.id));
 
-  // 3. Active foreshadows planted on or before current chapter
+  // 4D Zero-token related historical chapter recall (outside recent 5 chapters)
   const currentIdx = order.indexOf(row.id);
   const foreshadowRows = stmt(ctx.db, `
     SELECT title, planted_chapter_id AS plantedChapterId, target_chapter_id AS targetChapterId, status, note
     FROM author_foreshadows
     WHERE project_id = ? AND status IN ('planted', 'hinted')
-    ORDER BY updated_at DESC;
+    ORDER BY id ASC;
   `).all(row.projectId) as readonly {
     title: string;
     plantedChapterId: string | null;
@@ -216,16 +300,6 @@ export function buildFanqieFrozenContext(
     status: string;
     note: string;
   }[];
-  const activeForeshadows = foreshadowRows
-    .filter((fs) => {
-      if (!fs.plantedChapterId || currentIdx < 0) return true;
-      const plantedIdx = order.indexOf(fs.plantedChapterId);
-      return plantedIdx === -1 || plantedIdx <= currentIdx;
-    })
-    .map((fs) => `- [${fs.status === "hinted" ? "推进中" : "已埋设"}] ${fs.title}${fs.note ? `：${fs.note}` : ""}`)
-    .join("\n");
-
-  // 4. 4D Zero-token related historical chapter recall (outside recent 5 chapters)
   const chapterRows = stmt(ctx.db, `
     SELECT id AS chapterId, title, summary FROM author_documents WHERE project_id = ?;
   `).all(row.projectId) as readonly RelatedChapterCandidate[];
@@ -263,7 +337,7 @@ export function buildFanqieFrozenContext(
     topK: 4,
   });
 
-  // 5. Rolling summaries (up to 5 previous chapters) & previous chapter tail
+  // Recent unarchived rolling summaries (chapters after L2 archivedLimit, up to 9 chapters) & prev tail
   let prevChapterTail = "";
   const summaryLines: string[] = [];
   if (currentIdx > 0) {
@@ -277,10 +351,13 @@ export function buildFanqieFrozenContext(
     `).get(prevId) as { title: string; body: string | null } | undefined;
     if (prevRow?.body) {
       const tail = prevRow.body.trimEnd();
-      prevChapterTail = tail.length > 1200 ? `《${prevRow.title}》末尾衔接：\n…${tail.slice(-1200)}` : `《${prevRow.title}》末尾衔接：\n${tail}`;
+      prevChapterTail = tail.length > 1200
+        ? `《${prevRow.title}》末尾衔接：\n…${tail.slice(-1200)}`
+        : `《${prevRow.title}》末尾衔接：\n${tail}`;
     }
 
-    const prevSlice = order.slice(Math.max(0, currentIdx - 5), currentIdx);
+    const recentStart = Math.max(shared.l2.archivedLimit, currentIdx - 9);
+    const prevSlice = order.slice(recentStart, currentIdx);
     const getSummary = stmt(ctx.db, "SELECT title, summary FROM author_documents WHERE id = ?;");
     for (const id of prevSlice) {
       const ch = getSummary.get(id) as { title: string; summary: string } | undefined;
@@ -309,43 +386,61 @@ export function buildFanqieFrozenContext(
   }
   const focusContent = focusParts.join("\n");
 
-  const slots: readonly ContextSlotInput[] = [
+  // L3 Dynamic Slots only — L1 and L2 are immutable prefix layers never trimmed by `tokenLimit`.
+  const l3Slots: readonly ContextSlotInput[] = [
+    ...(shared.l1.pendingDeltaText
+      ? [
+          {
+            id: "l1DeltaPatch",
+            label: "L1 增量设定补丁（未合入圣经快照）",
+            group: "dynamic" as const,
+            tier: "l3" as const,
+            priority: "high" as const,
+            content: shared.l1.pendingDeltaText,
+            maxShare: 0.14,
+          },
+        ]
+      : []),
     {
-      id: "agreements",
-      label: "全书创作约定（Prefix 稳定区）",
-      group: "prefix",
+      id: "povBoundary",
+      label: viewpoint ? `L3 视角知情边界「${viewpoint}」` : "L3 视角知情边界",
+      group: "dynamic",
+      tier: "l3",
       priority: "high",
-      content: agreementText,
-      maxShare: 0.15,
+      content: formatPovBoundaryBlock(viewpoint, knownFacts, facts),
+      maxShare: 0.2,
     },
-    {
-      id: "authorIntent",
-      label: "全书指南针（创作意图与禁区）",
-      group: "prefix",
-      priority: "high",
-      content: controls.authorIntent,
-      maxShare: 0.12,
-    },
-    {
-      id: "techniques",
-      label: "挂载技法卡片",
-      group: "prefix",
-      priority: "medium",
-      content: formatTechniquesBlock(techniques),
-      maxShare: 0.18,
-    },
-    {
-      id: "deconstructions",
-      label: "挂载拆书范本",
-      group: "prefix",
-      priority: "optional",
-      content: formatDeconstructionsBlock(deconstructions),
-      maxShare: 0.16,
-    },
+    ...(l3Techniques.length > 0
+      ? [
+          {
+            id: "chapterTechniques",
+            label: `阶段与本章技法（${stage}）`,
+            group: "dynamic" as const,
+            tier: "l3" as const,
+            priority: "medium" as const,
+            content: formatTechniquesBlock(l3Techniques),
+            maxShare: 0.18,
+          },
+        ]
+      : []),
+    ...(l3Deconstructions.length > 0
+      ? [
+          {
+            id: "chapterDeconstructions",
+            label: "本章挂载拆书范本",
+            group: "dynamic" as const,
+            tier: "l3" as const,
+            priority: "optional" as const,
+            content: formatDeconstructionsBlock(l3Deconstructions),
+            maxShare: 0.14,
+          },
+        ]
+      : []),
     {
       id: "currentFocus",
       label: "当前写作焦点与卷弧目标",
       group: "dynamic",
+      tier: "l3",
       priority: "high",
       content: focusContent,
       maxShare: 0.1,
@@ -354,37 +449,24 @@ export function buildFanqieFrozenContext(
       id: "outline",
       label: "本章章纲与约束",
       group: "dynamic",
+      tier: "l3",
       priority: "critical",
       content: formatOutlineBlock(plan, row.title),
-    },
-    {
-      id: "knownFacts",
-      label: viewpoint ? `视角人物「${viewpoint}」知情设定` : "知情设定",
-      group: "dynamic",
-      priority: "high",
-      content: formatFactsBlock(knownFacts),
-      maxShare: 0.2,
-    },
-    {
-      id: "foreshadows",
-      label: "活跃伏笔提示",
-      group: "dynamic",
-      priority: "medium",
-      content: activeForeshadows,
-      maxShare: 0.1,
     },
     {
       id: "relatedHistory",
       label: "相关远期历史章召回（Top 4）",
       group: "dynamic",
+      tier: "l3",
       priority: "medium",
       content: formatRelatedChaptersBlock(relatedChapters),
-      maxShare: 0.14,
+      maxShare: 0.16,
     },
     {
       id: "rollingSummaries",
-      label: "前文滚动摘要（近5章）",
+      label: "当前十章窗口内前文摘要",
       group: "dynamic",
+      tier: "l3",
       priority: "optional",
       content: summaryLines.join("\n"),
       maxShare: 0.18,
@@ -394,6 +476,7 @@ export function buildFanqieFrozenContext(
       id: "prevTail",
       label: "上一章末尾衔接段",
       group: "dynamic",
+      tier: "l3",
       priority: "medium",
       content: prevChapterTail,
       maxShare: 0.2,
@@ -403,6 +486,7 @@ export function buildFanqieFrozenContext(
       id: "activeDraft",
       label: "当前章工作稿正文",
       group: "dynamic",
+      tier: "l3",
       priority: "critical",
       content: row.body ?? "",
     },
@@ -412,6 +496,7 @@ export function buildFanqieFrozenContext(
             id: "targetedObservations",
             label: "作者勾选的定向修改意见",
             group: "dynamic" as const,
+            tier: "l3" as const,
             priority: "high" as const,
             content: targetedObsText,
           },
@@ -421,27 +506,96 @@ export function buildFanqieFrozenContext(
       id: "instruction",
       label: "本轮写作指令",
       group: "dynamic",
+      tier: "l3",
       priority: "critical",
       content: instruction,
     },
   ];
 
-  const assembled = assembleContextBundle({
-    slots,
-    maxInputTokens,
-    activeTechniqueIds: techniques.map((t) => t.id),
-    activeDeconstructionIds: deconstructions.map((d) => d.id),
+  const l1Tokens = shared.l1.snapshot.tokenCount;
+  const l2Tokens = shared.l2.tokenCount;
+  const l3Budget = Math.max(512, maxInputTokens - l1Tokens - l2Tokens);
+  const assembledL3 = assembleContextBundle({
+    slots: l3Slots,
+    maxInputTokens: l3Budget,
+    activeTechniqueIds: allTechniques.map((t) => t.id),
+    activeDeconstructionIds: allDeconstructions.map((d) => d.id),
   });
 
+  const protocolFooter = buildTaskProtocolSection(stage === "refine" ? "refine" : "write");
+  const dynamicTail = normalizeCacheText(
+    [assembledL3.dynamicTail, protocolFooter].filter(Boolean).join("\n\n"),
+  );
+  const l3Tokens = estimateTokenCount(dynamicTail);
+  const l0Tokens = estimateTokenCount(SHARED_WORKBENCH_SYSTEM_KERNEL);
+  const prefixTokens = l1Tokens + l2Tokens;
+  const totalEstimatedTokens = prefixTokens + l3Tokens;
+  const combinedPrefix = [SHARED_WORKBENCH_SYSTEM_KERNEL, shared.l1.compiledText, shared.l2.volumePrefix]
+    .filter(Boolean)
+    .join("\n\n===\n\n");
+  const prefixSha256 = sha256Prefix(combinedPrefix);
+  const estimatedCacheableRatio = Math.round(((l0Tokens + prefixTokens) / Math.max(1, l0Tokens + totalEstimatedTokens)) * 1000) / 1000;
+
+  const prefixSlots: ContextSlotReportDto[] = [
+    {
+      id: "l1BookBible",
+      label: `L1 全书圣经快照 v${shared.l1.snapshot.version}`,
+      group: "prefix",
+      tier: "l1",
+      priority: "critical",
+      rawTokens: l1Tokens,
+      includedTokens: l1Tokens,
+      status: l1Tokens > 0 ? "included" : "empty",
+    },
+    {
+      id: "l2VolumeMilestones",
+      label: shared.l2.archivedLimit > 0
+        ? `L2 卷幕与前 ${shared.l2.archivedLimit} 章里程碑`
+        : "L2 卷幕与活跃伏笔账本",
+      group: "prefix",
+      tier: "l2",
+      priority: "high",
+      rawTokens: l2Tokens,
+      includedTokens: l2Tokens,
+      status: l2Tokens > 0 ? "included" : "empty",
+    },
+  ];
+
+  const stablePrefix = [shared.l1.compiledText, shared.l2.volumePrefix].filter(Boolean).join("\n\n===\n\n");
+
   return {
+    projectId: row.projectId,
     knownAt: at,
     knownFacts,
     relatedChapters,
     scenario: null,
     contextBundle: {
-      stablePrefix: assembled.stablePrefix,
-      dynamicTail: assembled.dynamicTail,
-      report: assembled.report,
+      stablePrefix,
+      bookPrefix: shared.l1.compiledText,
+      bookPrefixSha256: shared.l1.snapshot.prefixSha256,
+      bookSnapshotVersion: shared.l1.snapshot.version,
+      volumePrefix: shared.l2.volumePrefix,
+      volumePrefixSha256: shared.l2.volumePrefixSha256,
+      dynamicTail,
+      report: {
+        maxInputTokens,
+        totalEstimatedTokens,
+        prefixTokens,
+        dynamicTokens: l3Tokens,
+        l1Tokens,
+        l2Tokens,
+        l3Tokens,
+        l1Version: shared.l1.snapshot.version,
+        l1DirtyCount: shared.l1.snapshot.dirtyMutations,
+        l1Budget: shared.l1.snapshot.budgetTokens,
+        prefixSha256,
+        l2Sha256: shared.l2.volumePrefixSha256,
+        estimatedCacheableRatio,
+        overBudget: totalEstimatedTokens > maxInputTokens,
+        slots: [...prefixSlots, ...assembledL3.report.slots],
+        activeTechniqueIds: allTechniques.map((t) => t.id),
+        activeDeconstructionIds: allDeconstructions.map((d) => d.id),
+      },
     },
   };
 }
@@ -452,7 +606,7 @@ export function previewContext(ctx: WorkspaceContext, row: DocumentRow, input: I
   const instruction = typeof input.instruction === "string" ? input.instruction : "";
   const stage = input.stage !== undefined ? normalizeStageBindings([input.stage])[0] : undefined;
   return ctx.read(() => {
-    const built = buildFanqieFrozenContext(ctx, row, input);
+    const built = buildFanqieFrozenContext(ctx, row, input, { readOnly: true });
     const recommendations = queryTechniqueRecommendations(ctx, row, pacing, instruction, stage).slice(0, 8);
     return {
       knownAt: built.knownAt,
@@ -465,24 +619,36 @@ export function previewContext(ctx: WorkspaceContext, row: DocumentRow, input: I
 }
 
 /**
- * Fanqie single-shot generation runner that preserves Prefix-Caching stable
- * headers when `contextBundle` is present in `frozenInput`.
+ * Fanqie single-shot generation runner using the 4-Tier Prompt Cache Ladder
+ * (`L0 Shared Kernel` + `L1 Book Bible` + `L2 Volume Milestones` + `L3 Tail`).
  */
 export function createFanqieGenerationRunner(): ProductGenerationRunner {
   return async ({ caller, run }) => {
     let prompt = run.frozenInput;
-    let cachePrefix: string | undefined;
+    let layered: LayeredPromptPayload | undefined;
+    let system = WRITER_SYSTEM;
     try {
       const parsed = JSON.parse(run.frozenInput) as {
-        contextBundle?: { readonly stablePrefix?: string; readonly dynamicTail?: string };
+        projectId?: string;
+        contextBundle?: ContextBundleDto;
       };
       if (parsed.contextBundle) {
-        const joined = [parsed.contextBundle.stablePrefix, parsed.contextBundle.dynamicTail]
-          .filter(Boolean)
-          .join("\n\n---\n\n");
+        const bundle = parsed.contextBundle;
+        const tail = bundle.dynamicTail || "";
+        const joined = [bundle.stablePrefix, tail].filter(Boolean).join("\n\n---\n\n");
         if (joined.trim()) {
           prompt = joined;
-          cachePrefix = parsed.contextBundle.stablePrefix || undefined;
+          system = SHARED_WORKBENCH_SYSTEM_KERNEL;
+          layered = {
+            systemKernel: SHARED_WORKBENCH_SYSTEM_KERNEL,
+            bookPrefix: bundle.bookPrefix ?? (bundle.stablePrefix || undefined),
+            bookPrefixSha256: bundle.bookPrefixSha256,
+            bookSnapshotVersion: bundle.bookSnapshotVersion,
+            volumePrefix: bundle.volumePrefix || undefined,
+            volumePrefixSha256: bundle.volumePrefixSha256,
+            dynamicTail: tail,
+            cachePartitionKey: parsed.projectId ? `zhizhang:${parsed.projectId}` : undefined,
+          };
         }
       }
     } catch {
@@ -490,9 +656,9 @@ export function createFanqieGenerationRunner(): ProductGenerationRunner {
     }
     const body = await caller.complete({
       phase: "write",
-      system: WRITER_SYSTEM,
+      system,
       prompt,
-      cachePrefix,
+      layered,
     });
     return { body, tokens: caller.usedTokens() };
   };

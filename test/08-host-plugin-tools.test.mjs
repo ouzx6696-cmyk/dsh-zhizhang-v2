@@ -84,8 +84,10 @@ test("declarative product Agent tools register 11 strict tools (7+3 Fanqie, 1 To
     applyWorkbench(host.ctx, { dataDirectory }, { readAsset: host.readAsset });
 
     try {
-      const names = toolReg.tools.map((t) => t.name).sort();
-      assert.deepEqual(names, [
+      const registeredOrder = toolReg.tools.map((t) => t.name);
+      const sortedNames = [...registeredOrder].sort();
+      assert.deepEqual(registeredOrder, sortedNames, "DsH Agent tools must register in deterministic sorted order for KV-cache stability");
+      assert.deepEqual(registeredOrder, [
         "zhizhang_check_conflicts",
         "zhizhang_diagnose_chapter",
         "zhizhang_propose_foreshadow",
@@ -99,9 +101,11 @@ test("declarative product Agent tools register 11 strict tools (7+3 Fanqie, 1 To
         "zhizhang_search_workspace",
       ]);
 
-      // Upstream wire objects must never leak non-standard proposalOnly keys
+      // Upstream wire objects must never leak non-standard proposalOnly keys and must keep sorted property keys
       for (const tool of toolReg.tools) {
         assert.equal("proposalOnly" in tool, false, `Tool ${tool.name} leaked non-standard proposalOnly key`);
+        const propKeys = Object.keys(tool.parameters.properties);
+        assert.deepEqual(propKeys, [...propKeys].sort(), `Tool ${tool.name} properties must be canonically sorted`);
       }
 
       const writeTools = toolReg.tools.filter((t) => !t.readOnly).map((t) => t.name).sort();

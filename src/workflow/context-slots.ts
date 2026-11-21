@@ -9,6 +9,7 @@ export interface ContextSlotInput {
   readonly id: string;
   readonly label: string;
   readonly group: "prefix" | "dynamic";
+  readonly tier?: "l1" | "l2" | "l3";
   readonly priority: ContextSlotPriority;
   readonly content: string;
   /** Maximum fraction of the group's budget this non-critical slot may occupy. */
@@ -245,11 +246,25 @@ export function assembleContextBundle(params: {
     id: item.slot.id,
     label: item.slot.label,
     group: item.slot.group,
+    ...(item.slot.tier ? { tier: item.slot.tier } : {}),
     priority: item.slot.priority,
     rawTokens: item.rawTokens,
     includedTokens: item.includedTokens,
     status: item.status,
   }));
+
+  const l1Tokens = states
+    .filter((item) => (item.slot.tier ?? (item.slot.group === "prefix" ? "l1" : "l3")) === "l1")
+    .reduce((sum, item) => sum + item.includedTokens, 0);
+  const l2Tokens = states
+    .filter((item) => item.slot.tier === "l2")
+    .reduce((sum, item) => sum + item.includedTokens, 0);
+  const l3Tokens = states
+    .filter((item) => (item.slot.tier ?? (item.slot.group === "prefix" ? "l1" : "l3")) === "l3")
+    .reduce((sum, item) => sum + item.includedTokens, 0);
+  const estimatedCacheableRatio = totalEstimatedTokens > 0
+    ? Math.round((prefixTokens / totalEstimatedTokens) * 1000) / 1000
+    : 0;
 
   return {
     stablePrefix,
@@ -264,6 +279,10 @@ export function assembleContextBundle(params: {
       dynamicBudget,
       framingTokens,
       overBudget,
+      l1Tokens,
+      l2Tokens,
+      l3Tokens,
+      estimatedCacheableRatio,
       slots: slotReports,
       activeTechniqueIds: params.activeTechniqueIds ?? [],
       activeDeconstructionIds: params.activeDeconstructionIds ?? [],

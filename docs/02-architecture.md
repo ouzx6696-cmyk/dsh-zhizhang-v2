@@ -63,9 +63,9 @@
 - `initSchema(db)`：初始化该产品线专属的 SQLite 表与索引。
 - `actions`：按 `global` / `project` / `document` 作用域声明命令处理器。
 - `readModels`：向事件投影引擎注册专属读模型。
-- `buildFrozenContext` / `runGeneration`：构建带 Prefix-Caching 友好的冻结上下文与模型执行器。
-- `agentTools(facade)`：声明暴露给 DsH Agent 的只读/提案工具列表（严禁直接修改正文）。
-- `contributeSnapshot` / `onStartupRecover`：向统一工作台快照注入扩展字段与启动恢复钩子。
+- `buildFrozenContext` / `runGeneration`：构建四层前缀缓存友好上下文（L0 共享内核 + L1 版本钉住全书圣经 + L2 仅追加卷幕/十章里程碑 + L3 动态尾与任务协议）与模型执行器。
+- `agentTools(facade)`：声明暴露给 DsH Agent 的只读/提案工具列表（严禁直接修改正文；注册时按名称确定性排序并规范化 JSON 键顺序以稳定宿主 KV 缓存）。
+- `contributeSnapshot` / `onStartupRecover` / `onJobCacheHit`：向统一工作台快照注入扩展字段、启动恢复钩子与书级缓存保活时间戳。
 
 ---
 

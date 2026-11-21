@@ -1,3 +1,4 @@
+import { canonicalizeJsonKeys } from "../workflow/cache-layer.ts";
 import type { Disposer, HostToolRegistrar } from "./dsh-adapter.ts";
 
 /**
@@ -245,14 +246,15 @@ export function toHostToolDefinition(
   options?: HostToolAdapterOptions,
 ): HostToolDefinition {
   const format = options?.parameterFormat ?? "json-schema";
+  const rawParameters = format === "dsh-flat" ? toFlatParameterSpec(spec.parameters) : spec.parameters;
   const definition: HostToolDefinition = {
     name: spec.name,
     description: spec.description,
     readOnly: spec.readOnly,
     timeoutMs: spec.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS,
-    parameters: format === "dsh-flat" ? toFlatParameterSpec(spec.parameters) : spec.parameters,
+    parameters: canonicalizeJsonKeys(rawParameters),
     output: {
-      schema: spec.outputSchema,
+      schema: canonicalizeJsonKeys(spec.outputSchema),
       render: (_args, value) => [{ type: "text", text: serializeToolResult(value) }],
     },
     async execute(args, exec) {
@@ -267,17 +269,18 @@ export function toHostToolDefinition(
 }
 
 /**
- * Registers every tool or none of them: a partial registration would leave the
- * model with a silent subset of the promised product tool surface.
+ * Registers every tool or none of them in deterministic lexicographical order
+ * so DsH host tool prompt prefixes remain byte-stable across restarts.
  */
 export function registerHostTools(
   registrar: HostToolRegistrar<HostToolDefinition>,
   specs: readonly AgentToolSpec[],
   options?: HostToolAdapterOptions,
 ): Disposer[] {
+  const sortedSpecs = [...specs].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   const disposers: Disposer[] = [];
   try {
-    for (const spec of specs) {
+    for (const spec of sortedSpecs) {
       disposers.push(registrar.register(toHostToolDefinition(spec, options)));
     }
   } catch (error) {

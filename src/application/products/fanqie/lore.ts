@@ -28,6 +28,7 @@ import {
   type WorkspaceContext,
 } from "../../context.ts";
 import { approvedFacts, assertChapterInProject, assertFanqieProject, reorderRelations } from "./shared.ts";
+import { markBookPrefixDirty } from "./cache-snapshot.ts";
 import { refreshEntityMentionsForFact } from "./memory-sync.ts";
 
 function settingAnchor(input: Input, field: string, order: readonly string[]): Anchor {
@@ -147,6 +148,7 @@ export function materializeApprovedLore(
     params.entityName,
     normalizedCategory,
   );
+  markBookPrefixDirty(ctx, params.projectId);
 }
 
 export function handleContinuity(action: string, ctx: WorkspaceContext, input: Input) {

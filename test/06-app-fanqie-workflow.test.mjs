@@ -128,3 +128,74 @@ test("Fanqie full author workflow: hierarchy -> draft -> continuity -> library -
     "gate.denied",
   );
 });
+
+test("Fanqie L1 Book Bible stays byte-identical across tokenLimit/stage changes and small lore edits until cache.rebuild", (t) => {
+  const ws = createTestWorkspace(t);
+  const { projectId, documentId, baseRevisionId } = ws.createFanqieChapter({
+    projectName: "缓存稳态长篇",
+    title: "第一章 启程",
+    body: "主角踏上北境官道。",
+  });
+
+  ws.app.mutation("controls.save", { projectId, authorIntent: "冷峻写实，禁止剧透。" });
+  ws.app.mutation("setting.propose", {
+    projectId,
+    documentId,
+    factId: "hero-origin",
+    note: "主角曾是北境斥候。",
+    source: "初稿",
+    from: { chapterId: documentId, point: 1 },
+  });
+  const s1 = ws.app.snapshot(projectId, documentId).settings[0].id;
+  ws.app.mutation("setting.decide", { projectId, documentId, proposalId: s1, accept: true });
+
+  // Materialize initial L1 v1 snapshot via run.start
+  const run1 = ws.app.mutation("run.start", {
+    documentId,
+    baseRevisionId,
+    instruction: "初稿推进",
+    tokenLimit: 12000,
+  });
+  ws.app.mutation("run.cancel", { runId: run1.id });
+
+  const snap1 = ws.app.mutation("cache.snapshot", { projectId });
+  assert.equal(snap1.version, 1);
+  assert.equal(snap1.dirtyMutations, 0);
+
+  // 1. Changing tokenLimit (12000 -> 24000) or stage (write -> refine) MUST NOT alter L1 SHA-256!
+  const p12k = ws.app.mutation("context.preview", { documentId, instruction: "写", tokenLimit: 12000, stage: "write" });
+  const p24k = ws.app.mutation("context.preview", { documentId, instruction: "精修", tokenLimit: 24000, stage: "refine" });
+  assert.equal(p12k.report.prefixSha256, p24k.report.prefixSha256);
+  assert.equal(p12k.report.l1Tokens, p24k.report.l1Tokens);
+  assert.equal(p12k.report.l1Version, 1);
+
+  // 2. Approving 1 new lore item (< 10 threshold) marks L1 dirty and routes new lore to L3 delta while L1 hash stays pinned!
+  ws.app.mutation("setting.propose", {
+    projectId,
+    documentId,
+    factId: "sword-name",
+    note: "佩剑名为断霜。",
+    source: "第一章",
+    from: { chapterId: documentId, point: 1 },
+  });
+  const s2 = ws.app.snapshot(projectId, documentId).settings[0].id;
+  ws.app.mutation("setting.decide", { projectId, documentId, proposalId: s2, accept: true });
+
+  const afterLore = ws.app.mutation("context.preview", { documentId, instruction: "写", tokenLimit: 12000 });
+  assert.equal(afterLore.report.prefixSha256, p12k.report.prefixSha256);
+  assert.equal(afterLore.report.l1Version, 1);
+  assert.equal(afterLore.report.l1DirtyCount, 1);
+  assert.ok(afterLore.report.slots.some((slot) => slot.id === "l1DeltaPatch" && slot.status === "included"));
+
+  // 3. Manual cache.rebuild folds delta into L1 v2, clears dirtyMutations, and updates prefixSha256
+  const rebuilt = ws.app.mutation("cache.rebuild", { projectId });
+  assert.equal(rebuilt.version, 2);
+  assert.equal(rebuilt.dirtyMutations, 0);
+  assert.notEqual(rebuilt.prefixSha256, snap1.prefixSha256);
+
+  const afterRebuild = ws.app.mutation("context.preview", { documentId, instruction: "写", tokenLimit: 12000 });
+  assert.equal(afterRebuild.report.l1Version, 2);
+  assert.equal(afterRebuild.report.l1DirtyCount, 0);
+  assert.equal(afterRebuild.report.slots.some((slot) => slot.id === "l1DeltaPatch"), false);
+});
+

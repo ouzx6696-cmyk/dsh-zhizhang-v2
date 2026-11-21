@@ -6,7 +6,8 @@ import type {
   SelectionRewriteMode,
 } from "../contracts/workspace-dto.ts";
 import type { AuthorReadUnitFactory } from "../workflow/author-reads.ts";
-import type { SingleShotLlmCaller } from "../workflow/writing-stages.ts";
+import type { LayeredPromptPayload } from "../workflow/cache-layer.ts";
+import type { SingleShotLlmCaller, WritingPhase } from "../workflow/writing-stages.ts";
 import type { DocumentRow, Input, WorkspaceContext } from "./context.ts";
 
 export interface ActionDefinition {
@@ -94,23 +95,35 @@ export interface ProductLineModule {
     ctx: WorkspaceContext,
     params: {
       readonly kind: AiProposalKind;
+      readonly phase: WritingPhase;
       readonly projectId: string | null;
       readonly documentId: string | null;
+      readonly sourceText: string;
+      readonly sourceRef: string;
+      readonly instruction: string;
       readonly input: Input;
     },
   ): {
     readonly sourceText?: string;
     readonly sourceRef?: string;
     readonly extra?: Readonly<Record<string, unknown>>;
+    readonly layered?: LayeredPromptPayload;
   };
   buildSelectionContext?(
     ctx: WorkspaceContext,
     row: DocumentRow,
-    mode: SelectionRewriteMode,
+    params: {
+      readonly mode: SelectionRewriteMode;
+      readonly instruction: string;
+      readonly beforeContext: string;
+      readonly selectedText: string;
+      readonly afterContext: string;
+    },
   ): {
-    readonly cachePrefix?: string;
     readonly extra?: Readonly<Record<string, unknown>>;
+    readonly layered?: LayeredPromptPayload;
   };
+  onJobCacheHit?(ctx: WorkspaceContext, projectId: string): void;
   contributeSnapshot(
     ctx: WorkspaceContext,
     projectId: string,

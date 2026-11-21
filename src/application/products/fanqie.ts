@@ -26,10 +26,17 @@ import {
 import type { ActionDefinition, ProductLineModule } from "../product-line.ts";
 import {
   buildFanqieFrozenContext,
+  buildFanqieLayeredPayload,
+  buildFanqieSharedLayeredPrefix,
   createFanqieGenerationRunner,
   formatTechniquesBlock,
   previewContext,
 } from "./fanqie/context.ts";
+import {
+  getBookCacheSnapshotAction,
+  rebuildBookCacheSnapshotAction,
+  touchBookCacheHit,
+} from "./fanqie/cache-snapshot.ts";
 import { getProjectControls, loadProjectControls, saveProjectControls } from "./fanqie/controls.ts";
 import {
   createObservation,
@@ -296,6 +303,8 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
     "observation.update": { scope: "project", handler: (ctx, input) => updateObservation(ctx, input) },
     "controls.get": { scope: "project", handler: (ctx, input) => getProjectControls(ctx, input) },
     "controls.save": { scope: "project", handler: (ctx, input) => saveProjectControls(ctx, input) },
+    "cache.snapshot": { scope: "project", handler: (ctx, input) => getBookCacheSnapshotAction(ctx, input) },
+    "cache.rebuild": { scope: "project", handler: (ctx, input) => rebuildBookCacheSnapshotAction(ctx, input) },
   };
 
   return {
@@ -332,32 +341,55 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
         syncStatus: getChapterSyncStatus(ctx, active.id),
       };
     },
-    buildProposalContext(ctx, { kind, projectId, documentId, input }) {
+    buildProposalContext(ctx, { kind, phase, projectId, documentId, sourceText: initialSourceText, sourceRef: initialSourceRef, instruction, input }) {
       if (!projectId) return {};
+      const doc = documentId ? ctx.document(documentId) : undefined;
+      const shared = buildFanqieSharedLayeredPrefix(ctx, projectId, doc, { readOnly: false });
+
       const existingLoreHints = stmt(ctx.db, `
         SELECT fact_id AS factId, category, entity_name AS entityName
         FROM author_lore_current
         WHERE project_id = ?
-        ORDER BY decided_seq DESC LIMIT 40;
+        ORDER BY fact_id ASC LIMIT 60;
       `).all(projectId) as readonly { factId: string; category: string; entityName: string }[];
+      const loreHintLines = existingLoreHints.length > 0
+        ? existingLoreHints.map((h) => `- [${h.factId}] (${h.category}) ${h.entityName || "未命名"}`).join("\n")
+        : "（暂无）";
 
       if (kind === "setting") {
-        return { extra: { existingLoreHints } };
+        const finalSource = initialSourceText;
+        const sections = [
+          `### 提案类型：设定与伏笔提炼（${initialSourceRef || "设定原文"}）`,
+          instruction ? `### 补充要求\n${instruction}` : "",
+          `### 既有设定编号参考\n${loreHintLines}`,
+          `### 待提炼正文\n${finalSource}`,
+        ];
+        return {
+          extra: { existingLoreHints },
+          layered: buildFanqieLayeredPayload(shared, phase, sections),
+        };
       }
-      if (kind === "fact_sync" && documentId) {
-        const doc = ctx.document(documentId);
+      if (kind === "fact_sync" && doc) {
         const body = doc.body ?? "";
-        const syncRecord = getChapterMemorySyncRecord(ctx, documentId);
+        const syncRecord = getChapterMemorySyncRecord(ctx, doc.id);
         const delta = computeParagraphDelta(syncRecord?.syncedBody ?? "", body);
         const existingForeshadows = stmt(ctx.db, `
           SELECT id, title, fact_id AS factId, status, note
           FROM author_foreshadows
           WHERE project_id = ? AND status IN ('planted', 'hinted')
-          ORDER BY updated_at DESC LIMIT 30;
-        `).all(projectId);
+          ORDER BY id ASC LIMIT 30;
+        `).all(projectId) as readonly { id: string; title: string; factId: string | null; status: string; note: string }[];
         const manualSource = optionalText(input, "sourceText");
+        const finalSource = manualSource ?? (body.trim() ? delta.deltaText : "");
+        const sections = [
+          `### 提案类型：章节记忆与事实增量同步《${doc.title}》`,
+          `同步基线：${delta.hasBaseline ? `存在基线（变更段落 ${delta.changedParagraphCount} 段）` : "首次全章同步"}`,
+          instruction ? `### 补充要求\n${instruction}` : "",
+          `### 既有设定编号参考\n${loreHintLines}`,
+          `### 本章变更文本\n${finalSource}`,
+        ];
         return {
-          sourceText: manualSource ?? (body.trim() ? delta.deltaText : ""),
+          sourceText: finalSource,
           sourceRef: doc.title,
           extra: {
             hasBaseline: delta.hasBaseline,
@@ -365,10 +397,10 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
             existingLoreHints,
             existingForeshadows,
           },
+          layered: buildFanqieLayeredPayload(shared, phase, sections),
         };
       }
-      if (kind === "chapter_review" && documentId) {
-        const doc = ctx.document(documentId);
+      if (kind === "chapter_review" && doc) {
         const order = ctx.chapterOrder(projectId);
         const plan = ctx.planning(doc.id);
         const viewpoint = typeof plan?.viewpoint === "string" ? plan.viewpoint : undefined;
@@ -380,10 +412,23 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
           SELECT id, title, fact_id AS factId, status, note
           FROM author_foreshadows
           WHERE project_id = ? AND status IN ('planted', 'hinted')
-          ORDER BY updated_at DESC LIMIT 30;
+          ORDER BY id ASC LIMIT 30;
         `).all(projectId);
+        const finalSource = optionalText(input, "sourceText") ?? (doc.body ?? "");
+        const sections = [
+          `### 提案类型：章节定性审稿《${doc.title}》`,
+          viewpoint ? `当前视角人物：${viewpoint}` : "",
+          typeof plan?.lockedFacts === "string" && plan.lockedFacts.trim() ? `本章锁定事实：${plan.lockedFacts.trim()}` : "",
+          knownFacts.length > 0
+            ? `### 视角知情设定\n${knownFacts.map((f) => `- [${f.id}] ${f.note}`).join("\n")}`
+            : "",
+          reviewMethodology ? `### 审稿方法论\n${reviewMethodology}` : "",
+          `### 本地预诊断信号\n字数 ${doc.charCount} · AI套话命中 ${diagnostics.aiSlop.totalHits} · 黄金三章提醒 ${diagnostics.goldenThree.warnings.length}`,
+          instruction ? `### 补充审稿重点\n${instruction}` : "",
+          `### 待审章节正文\n${finalSource}`,
+        ];
         return {
-          sourceText: optionalText(input, "sourceText") ?? (doc.body ?? ""),
+          sourceText: finalSource,
           sourceRef: doc.title,
           extra: {
             viewpoint: viewpoint ?? "",
@@ -394,6 +439,7 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
             diagnostics,
             reviewMethodology,
           },
+          layered: buildFanqieLayeredPayload(shared, phase, sections),
         };
       }
       if (kind === "arc_plan") {
@@ -426,9 +472,17 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
           controls.currentFocus ? `[焦点] ${controls.currentFocus}` : "",
           controls.authorIntent ? `[指南针] ${controls.authorIntent}` : "",
         ].filter(Boolean).join("\n") || "（新书初期，暂无卷幕历史，请规划第一幕）";
+        const finalSource = optionalText(input, "sourceText") ?? fallbackSummaryText;
+        const finalRef = targetAct?.title ?? volumes[0]?.title ?? "全书卷幕规划";
+        const sections = [
+          `### 提案类型：卷幕滚动规划（${finalRef}）`,
+          controls.currentFocus ? `当前焦点：${controls.currentFocus}` : "",
+          instruction ? `### 补充规划指令\n${instruction}` : "",
+          `### 近期卷幕与章节进展\n${finalSource}`,
+        ];
         return {
-          sourceText: optionalText(input, "sourceText") ?? fallbackSummaryText,
-          sourceRef: targetAct?.title ?? volumes[0]?.title ?? "全书卷幕规划",
+          sourceText: finalSource,
+          sourceRef: finalRef,
           extra: {
             authorIntent: controls.authorIntent,
             currentFocus: controls.currentFocus,
@@ -437,32 +491,38 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
             acts,
             recentChapters: [...chapters].reverse(),
           },
+          layered: buildFanqieLayeredPayload(shared, phase, sections),
         };
       }
-      return {};
+      if (kind === "summary" && doc) {
+        const finalSource = initialSourceText || (doc.body ?? "");
+        const sections = [
+          `### 提案类型：章节摘要提炼《${doc.title}》`,
+          instruction ? `### 补充要求\n${instruction}` : "",
+          `### 章节正文\n${finalSource}`,
+        ];
+        return {
+          sourceText: finalSource,
+          sourceRef: doc.title,
+          layered: buildFanqieLayeredPayload(shared, phase, sections),
+        };
+      }
+      // Project-bound deconstruct / technique still reuses the book's L0+L1+L2 prefix.
+      const fallbackSections = [
+        `### 提案类型：${kind}（${initialSourceRef || "项目素材"}）`,
+        instruction ? `### 补充要求\n${instruction}` : "",
+        `### 输入文本\n${initialSourceText}`,
+      ];
+      return {
+        layered: buildFanqieLayeredPayload(shared, phase, fallbackSections),
+      };
     },
-    buildSelectionContext(ctx, row, mode) {
-      const agreements = stmt(ctx.db, `
-        SELECT fact_id AS factId, value FROM author_lore_current
-        WHERE project_id = ? AND category = 'agreement'
-        ORDER BY fact_id ASC;
-      `).all(row.projectId) as readonly { factId: string; value: string }[];
-      const agreementText = agreements
-        .map((entry) => {
-          try {
-            const parsed = JSON.parse(entry.value) as { note?: string };
-            return `- [${entry.factId}] ${parsed.note ?? ""}`;
-          } catch {
-            return "";
-          }
-        })
-        .filter(Boolean)
-        .join("\n");
+    buildSelectionContext(ctx, row, { mode, instruction, beforeContext, selectedText, afterContext }) {
+      const shared = buildFanqieSharedLayeredPrefix(ctx, row.projectId, row, { readOnly: true });
       const stage = mode === "polish" ? "deslop" : "refine";
-      const mounted = resolveMountedLibraryForChapter(ctx, row, "", "", stage);
+      const mounted = resolveMountedLibraryForChapter(ctx, row, instruction, "", stage);
       const sortedSkills = [...mounted.techniques].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       const skillText = formatTechniquesBlock(sortedSkills);
-      const cachePrefix = [agreementText, skillText].filter(Boolean).join("\n\n---\n\n") || undefined;
 
       const plan = ctx.planning(row.id);
       const viewpoint = typeof plan?.viewpoint === "string" ? plan.viewpoint : undefined;
@@ -471,18 +531,38 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
       const slopHints = mode === "polish"
         ? scanAiSlop(row.body ?? "", loadSlopConfig(ctx, row.projectId)).topPhrases
         : [];
+
+      const sections = [
+        `### 局部选区改写目标\n章节：《${row.title}》 · 模式：${mode}${viewpoint ? ` · 视角人物：${viewpoint}` : ""}`,
+        typeof plan?.lockedFacts === "string" && plan.lockedFacts.trim() ? `本章锁定事实：${plan.lockedFacts.trim()}` : "",
+        knownFacts.length > 0
+          ? `### 视角人物「${viewpoint}」知情设定\n${knownFacts.map((f) => `- [${f.id}] ${f.note}`).join("\n")}`
+          : "",
+        skillText ? `### 本次微改写技法（${stage}）\n${skillText}` : "",
+        slopHints.length > 0
+          ? `### 建议规避的 AI 高频套话\n${slopHints.map((h) => `- 「${h.phrase}」（已出现 ${h.count} 次）`).join("\n")}`
+          : "",
+        instruction ? `### 改写指令\n${instruction}` : "",
+        beforeContext ? `### 选区前文衔接\n${beforeContext}` : "",
+        `### 待改写选区原文\n${selectedText}`,
+        afterContext ? `### 选区后文衔接\n${afterContext}` : "",
+      ];
+
       return {
-        cachePrefix,
         extra: {
           viewpoint: viewpoint ?? "",
           lockedFacts: typeof plan?.lockedFacts === "string" ? plan.lockedFacts : "",
           knownFacts,
           aiSlopHints: slopHints,
         },
+        layered: buildFanqieLayeredPayload(shared, "selectionRewrite", sections),
       };
     },
+    onJobCacheHit(ctx, projectId) {
+      touchBookCacheHit(ctx, projectId);
+    },
     buildFrozenContext(ctx, row, input) {
-      return buildFanqieFrozenContext(ctx, row, input);
+      return buildFanqieFrozenContext(ctx, row, input, { readOnly: false });
     },
     runGeneration,
     actions,

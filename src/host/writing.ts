@@ -1,5 +1,6 @@
 import { ContractError } from "../contracts/index.ts";
 import type { RecoveryHintDto, RecoveryHintKind } from "../contracts/workspace-dto.ts";
+import { buildLayeredStreamPayload } from "../workflow/cache-layer.ts";
 import {
   createWritingBudgetGuard,
   estimateWritingInput,
@@ -52,8 +53,19 @@ export interface GenerationRunInput {
   readonly frozenInput: string;
 }
 
+export interface GenerationCallCacheMeta {
+  readonly prefixSha256?: string | null;
+  readonly l1Version?: number | null;
+  readonly cacheStrategy?: string | null;
+}
+
 export interface GenerationReceiptLedger {
-  begin(phase: SingleShotCallRequest["phase"], inputReserve: number, maxOutput: number): string;
+  begin(
+    phase: SingleShotCallRequest["phase"],
+    inputReserve: number,
+    maxOutput: number,
+    cacheMeta?: GenerationCallCacheMeta,
+  ): string;
   receive(callId: string, usage: readonly number[]): void;
 }
 
@@ -139,8 +151,12 @@ export function createSingleShotCaller(
       return budget.snapshot().usedTokens;
     },
 
-    async complete({ phase, system, prompt, maxOutputTokens = Infinity, cachePrefix, disableThinking }) {
-      const inputReserve = estimateWritingInput(system, prompt);
+    async complete({ phase, system, prompt, maxOutputTokens = Infinity, layered, disableThinking }) {
+      const wire = buildLayeredStreamPayload({ system, prompt, layered }, run.provider, run.model);
+      const inputReserve = estimateWritingInput(
+        wire.estimatedTextForReserve.systemText,
+        wire.estimatedTextForReserve.promptText,
+      );
       const snap = budget.snapshot();
       const remainingBefore = run.reserved - snap.usedTokens - snap.inflightTokens - inputReserve;
       const maxTokens = Math.min(remainingBefore, maxOutputTokens);
@@ -180,15 +196,19 @@ export function createSingleShotCaller(
           requestSignal,
         );
         requestSignal.throwIfAborted();
-        const callId = receipts.begin(phase, inputReserve, maxTokens);
+        const callId = receipts.begin(phase, inputReserve, maxTokens, {
+          prefixSha256: wire.prefixSha256,
+          l1Version: wire.l1Version,
+          cacheStrategy: wire.strategy,
+        });
         try {
           const streamOptions: Record<string, unknown> = {
             ...call.config,
-            system,
+            ...wire.extraOptions,
+            system: wire.system,
             signal: requestSignal,
-            messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
+            messages: wire.messages,
           };
-          if (cachePrefix) streamOptions.cachePrefix = cachePrefix;
           if (disableThinking === true) streamOptions.thinking = false;
           for await (const chunk of call.stream(streamOptions)) {
             if (chunk.type === "text-delta") {

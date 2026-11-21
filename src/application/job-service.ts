@@ -7,7 +7,12 @@ import type {
   UnifiedJobKind,
   UnifiedJobSummaryDto,
 } from "../contracts/workspace-dto.ts";
-import { createCandidate, stmt, type JobRecord, type LedgerJobKind } from "../storage/index.ts";
+import { createCandidate, stmt, type CallCacheMeta, type JobRecord, type LedgerJobKind } from "../storage/index.ts";
+import {
+  diagnoseCacheBehavior,
+  SHARED_WORKBENCH_SYSTEM_KERNEL,
+  type LayeredPromptPayload,
+} from "../workflow/cache-layer.ts";
 import { normalizeFactSyncPayload } from "../workflow/fact-sync-payload.ts";
 import {
   ARC_PLAN_SYSTEM,
@@ -103,7 +108,7 @@ export interface SelectionRewriteRequest {
   readonly reserved: number;
   readonly system: string;
   readonly prompt: string;
-  readonly cachePrefix?: string;
+  readonly layered?: LayeredPromptPayload;
 }
 
 /**
@@ -188,14 +193,28 @@ export function createJobService(
     readonly contextReport: unknown;
   } {
     const parsed = JSON.parse(frozen) as {
-      contextBundle?: { stablePrefix?: string; dynamicTail?: string; report?: unknown };
+      contextBundle?: {
+        stablePrefix?: string;
+        bookPrefix?: string;
+        volumePrefix?: string;
+        dynamicTail?: string;
+        report?: unknown;
+      };
     };
-    const promptForReserve = parsed.contextBundle
-      ? [parsed.contextBundle.stablePrefix, parsed.contextBundle.dynamicTail].filter(Boolean).join("\n\n---\n\n")
-      : frozen;
+    if (parsed.contextBundle) {
+      const b = parsed.contextBundle;
+      const systemForReserve = [SHARED_WORKBENCH_SYSTEM_KERNEL, b.bookPrefix ?? b.stablePrefix ?? "", b.volumePrefix ?? ""]
+        .filter(Boolean)
+        .join("\n\n===\n\n");
+      const promptForReserve = b.dynamicTail ?? "";
+      return {
+        inputReserve: estimateWritingInput(systemForReserve, promptForReserve),
+        contextReport: b.report ?? null,
+      };
+    }
     return {
-      inputReserve: estimateWritingInput(WRITER_SYSTEM, promptForReserve),
-      contextReport: parsed.contextBundle?.report ?? null,
+      inputReserve: estimateWritingInput(WRITER_SYSTEM, frozen),
+      contextReport: null,
     };
   }
 
@@ -325,17 +344,24 @@ export function createJobService(
         ? stmt(db, "SELECT body FROM candidates WHERE candidate_id = ?;").get(detail.candidateId)
         : null;
       const calls = jobs.callsForRun(detail.id);
-      const billing = computeRunBilling(
-        calls.map((call) => {
-          if (!call.usage) return null;
-          try {
-            const parsed = JSON.parse(call.usage) as unknown;
-            return Array.isArray(parsed) ? parsed.map((v) => Number(v)) : null;
-          } catch {
-            return null;
-          }
-        }),
+      const parsedUsages = calls.map((call) => {
+        if (!call.usage) return null;
+        try {
+          const parsed = JSON.parse(call.usage) as unknown;
+          return Array.isArray(parsed) ? parsed.map((v) => Number(v)) : null;
+        } catch {
+          return null;
+        }
+      });
+      const baseBilling = computeRunBilling(parsedUsages);
+      const diagnosis = diagnoseCacheBehavior(
+        calls.map((call, idx) => ({
+          prefixSha256: call.prefixSha256,
+          l1Version: call.l1Version,
+          usage: parsedUsages[idx],
+        })),
       );
+      const billing = { ...baseBilling, ...diagnosis };
       let contextTrace: unknown = null;
       if (meta?.contextTrace) {
         try {
@@ -439,7 +465,25 @@ export function createJobService(
     });
   }
 
-  function beginJobCall(jobId: string, phase: string, inputReserve: number, maxOutput: number): string {
+  function notifyProjectCacheActivity(jobId: string): void {
+    const row = stmt(db, `
+      SELECT p.id AS projectId, p.product
+      FROM author_jobs j
+      JOIN author_projects p ON p.id = j.project_id
+      WHERE j.id = ?;
+    `).get(jobId) as { projectId: string; product: Product } | undefined;
+    if (row) {
+      registry.get(row.product)?.onJobCacheHit?.(ctx, row.projectId);
+    }
+  }
+
+  function beginJobCall(
+    jobId: string,
+    phase: string,
+    inputReserve: number,
+    maxOutput: number,
+    cacheMeta?: CallCacheMeta,
+  ): string {
     return ctx.atomic(() => {
       const job = jobs.openJob(jobId);
       if (!job) refuse("job.call", "job-no-longer-open");
@@ -447,7 +491,7 @@ export function createJobService(
         refuse("run.generate", "run-no-longer-running");
       }
       const callId = randomUUID();
-      if (!jobs.beginCall(jobId, callId, phase, inputReserve, maxOutput)) {
+      if (!jobs.beginCall(jobId, callId, phase, inputReserve, maxOutput, cacheMeta)) {
         refuse("job.call", "job-in-progress");
       }
       return callId;
@@ -457,6 +501,7 @@ export function createJobService(
   function recordJobReceipt(jobId: string, callId: string, usage: readonly number[]): void {
     ctx.atomic(() => {
       jobs.receiveCall(jobId, callId, usage);
+      notifyProjectCacheActivity(jobId);
     });
   }
 
@@ -568,7 +613,10 @@ export function createJobService(
         refuse("proposal.generate", "proposal-in-progress");
       }
 
+      const spec = PROPOSAL_SPECS[kind];
+      const instruction = optionalText(input, "instruction") ?? "";
       let extraContext: Readonly<Record<string, unknown>> = {};
+      let layered: LayeredPromptPayload | undefined;
       if (resolvedProjectId) {
         const project = stmt(db, "SELECT product FROM author_projects WHERE id = ?;").get(resolvedProjectId) as
           | { product: Product }
@@ -576,26 +624,34 @@ export function createJobService(
         const mod = project ? registry.get(project.product) : undefined;
         const built = mod?.buildProposalContext?.(ctx, {
           kind,
+          phase: spec.phase,
           projectId: resolvedProjectId,
           documentId,
+          sourceText,
+          sourceRef,
+          instruction,
           input,
         });
         if (built) {
           if (built.sourceText !== undefined) sourceText = built.sourceText;
           if (built.sourceRef !== undefined && !sourceRef) sourceRef = built.sourceRef;
           if (built.extra) extraContext = built.extra;
+          if (built.layered) layered = built.layered;
         }
       }
       if (!sourceText.trim()) invalid("sourceText", "source-text-required");
 
-      const spec = PROPOSAL_SPECS[kind];
-      const prompt = JSON.stringify({
-        kind,
-        sourceRef,
-        instruction: optionalText(input, "instruction") ?? "",
-        ...extraContext,
-        sourceText,
-      });
+      const system = layered ? SHARED_WORKBENCH_SYSTEM_KERNEL : spec.system;
+      const prompt = layered
+        ? layered.dynamicTail
+        : [
+            `### 提案类型：${kind}${sourceRef ? `（${sourceRef}）` : ""}`,
+            instruction ? `### 补充要求\n${instruction}` : "",
+            Object.keys(extraContext).length > 0 ? `### 补充上下文\n${JSON.stringify(extraContext)}` : "",
+            `### 输入文本\n${sourceText}`,
+          ]
+            .filter(Boolean)
+            .join("\n\n");
 
       const id = randomUUID();
       const now = Date.now();
@@ -644,8 +700,9 @@ export function createJobService(
         jobId: id,
         kind,
         phase: spec.phase,
-        system: spec.system,
+        system,
         prompt,
+        layered,
         provider,
         model,
         reserved,
@@ -660,6 +717,7 @@ export function createJobService(
   function recordProposalReceipt(proposalId: string, callId: string, usage: readonly number[]): void {
     ctx.atomic(() => {
       jobs.receiveCall(proposalId, callId, usage);
+      notifyProjectCacheActivity(proposalId);
       const tokens = sumUsageTuple(usage);
       stmt(db, `
         UPDATE author_ai_proposals
@@ -753,17 +811,27 @@ export function createJobService(
       const afterContext = typeof input.afterContext === "string" ? input.afterContext.slice(0, 400) : "";
       const instruction = optionalText(input, "instruction") ?? "";
       const mod = registry.require(row.product);
-      const selectionCtx = mod.buildSelectionContext?.(ctx, row, mode);
-
-      const prompt = JSON.stringify({
-        title: row.title,
+      const selectionCtx = mod.buildSelectionContext?.(ctx, row, {
         mode,
         instruction,
-        ...(selectionCtx?.extra ?? {}),
         beforeContext,
         selectedText,
         afterContext,
       });
+
+      const layered = selectionCtx?.layered;
+      const system = layered ? SHARED_WORKBENCH_SYSTEM_KERNEL : SELECTION_REWRITE_SYSTEM;
+      const prompt = layered
+        ? layered.dynamicTail
+        : [
+            `### 选区改写：${row.title}（模式：${mode}）`,
+            instruction ? `### 改写指令\n${instruction}` : "",
+            beforeContext ? `### 选区前文\n${beforeContext}` : "",
+            `### 待改写选区\n${selectedText}`,
+            afterContext ? `### 选区后文\n${afterContext}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n\n");
       return {
         documentId: row.id,
         projectId: row.projectId,
@@ -771,9 +839,9 @@ export function createJobService(
         provider,
         model,
         reserved,
-        system: SELECTION_REWRITE_SYSTEM,
+        system,
         prompt,
-        cachePrefix: selectionCtx?.cachePrefix,
+        layered,
       };
     });
   }

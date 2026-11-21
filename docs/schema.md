@@ -9,7 +9,7 @@
 
 | Object Type | Count |
 | --- | ---: |
-| Tables (non-shadow) | 38 |
+| Tables (non-shadow) | 39 |
 | FTS5 Virtual Tables | 3 |
 | FTS5 Shadow Tables | 12 |
 | Views | 3 |
@@ -84,6 +84,23 @@ Foreign keys: `document_id` -> `author_documents(id)`
 | `created_at` | `INTEGER` | YES |  |  |
 
 Foreign keys: `document_id` -> `author_documents(id)`, `project_id` -> `author_projects(id)`
+
+### `author_book_prefix_cache`
+
+| Column | Type | Not Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `project_id` | `TEXT` | NO |  | 1 |
+| `snapshot_version` | `INTEGER` | YES | 1 |  |
+| `compiled_text` | `TEXT` | YES | '' |  |
+| `prefix_sha256` | `TEXT` | YES | '' |  |
+| `token_count` | `INTEGER` | YES | 0 |  |
+| `budget_tokens` | `INTEGER` | YES | 8192 |  |
+| `compiled_lore_seq` | `INTEGER` | YES | 0 |  |
+| `dirty_mutations` | `INTEGER` | YES | 0 |  |
+| `last_cache_hit_at` | `INTEGER` | YES | 0 |  |
+| `updated_at` | `INTEGER` | YES | 0 |  |
+
+Foreign keys: `project_id` -> `author_projects(id)`
 
 ### `author_candidate_qa`
 
@@ -232,6 +249,9 @@ Foreign keys: `project_id` -> `author_projects(id)`
 | `input_reserve` | `INTEGER` | YES |  |  |
 | `max_output` | `INTEGER` | YES |  |  |
 | `usage` | `TEXT` | NO |  |  |
+| `prefix_sha256` | `TEXT` | NO |  |  |
+| `l1_version` | `INTEGER` | NO |  |  |
+| `cache_strategy` | `TEXT` | NO |  |  |
 | `created_at` | `INTEGER` | YES | 0 |  |
 
 Foreign keys: `job_id` -> `author_jobs(id)`

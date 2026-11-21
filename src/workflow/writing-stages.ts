@@ -1,4 +1,5 @@
 import { ContractError } from "../contracts/errors.ts";
+import type { LayeredPromptPayload } from "./cache-layer.ts";
 import { createStageRegistry, registerStage, type StageRegistry } from "./stages.ts";
 
 export const WRITING_STAGE_IDS = {
@@ -37,6 +38,8 @@ export interface SingleShotCallRequest {
   readonly system: string;
   readonly prompt: string;
   readonly maxOutputTokens?: number;
+  readonly layered?: LayeredPromptPayload;
+  /** @deprecated Superseded by `layered` 4-tier prefix structure; never emitted on the wire. */
   readonly cachePrefix?: string;
   readonly disableThinking?: boolean;
 }

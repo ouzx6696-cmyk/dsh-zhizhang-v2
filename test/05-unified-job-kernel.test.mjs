@@ -211,3 +211,139 @@ test("unknown job kind on /jobs/start returns 400 input.invalid", async () => {
     }
   });
 });
+
+test("4-tier prompt cache shares byte-identical L0+L1+L2 prefix across draft, proposal, and rewrite with zero cachePrefix on wire", async () => {
+  const { buildLayeredStreamPayload, SHARED_WORKBENCH_SYSTEM_KERNEL } = await import("../src/workflow/cache-layer.ts");
+
+  // 1. Provider-aware wire adaptation: DeepSeek / Anthropic / OpenAI / Local
+  const sampleLayered = {
+    systemKernel: SHARED_WORKBENCH_SYSTEM_KERNEL,
+    bookPrefix: "### 【L1 全书冻结设定圣经】\n- [rule-1] 严禁剧透",
+    bookPrefixSha256: "aaa111",
+    bookSnapshotVersion: 2,
+    volumePrefix: "### 【L2 卷幕里程碑】\n- [卷] 第一卷",
+    volumePrefixSha256: "bbb222",
+    dynamicTail: "### 本轮指令\n推进冲突",
+    cachePartitionKey: "zhizhang:proj-1",
+  };
+  const dsWire = buildLayeredStreamPayload({ system: "", prompt: "", layered: sampleLayered }, "deepseek", "deepseek-chat");
+  assert.equal(dsWire.strategy, "deepseek-implicit");
+  assert.equal(typeof dsWire.system, "string");
+  assert.ok(dsWire.system.startsWith(SHARED_WORKBENCH_SYSTEM_KERNEL));
+  assert.equal("cachePrefix" in dsWire.extraOptions, false);
+
+  const claudeWire = buildLayeredStreamPayload({ system: "", prompt: "", layered: sampleLayered }, "anthropic", "claude-3-7-sonnet");
+  assert.equal(claudeWire.strategy, "anthropic-breakpoints");
+  assert.ok(Array.isArray(claudeWire.system));
+  assert.equal(claudeWire.system.length, 3);
+  assert.deepEqual(claudeWire.system[1].cache_control, { type: "ephemeral" });
+  assert.deepEqual(claudeWire.system[2].cache_control, { type: "ephemeral" });
+
+  const openaiWire = buildLayeredStreamPayload({ system: "", prompt: "", layered: sampleLayered }, "openai", "gpt-4o");
+  assert.equal(openaiWire.strategy, "openai-implicit");
+  assert.equal(openaiWire.extraOptions.prompt_cache_key, "zhizhang:proj-1");
+
+  const localWire = buildLayeredStreamPayload({ system: "", prompt: "", layered: sampleLayered }, "ollama", "qwen2.5:14b");
+  assert.equal(localWire.strategy, "compact-local");
+  assert.equal(localWire.system, SHARED_WORKBENCH_SYSTEM_KERNEL);
+
+  // 2. End-to-end cross-job prefix sharing on HostJobEngine
+  const llm = createScriptedLlm([
+    {
+      text: "候选正文：冷雨拍打青石板。",
+      usage: { inputTokens: 1200, outputTokens: 180, cacheReadTokens: 0, cacheWriteTokens: 900 },
+    },
+    {
+      text: JSON.stringify({ observations: [{ dimension: "pacing", quote: "冷雨", suggestion: "开场可直接切入对话" }] }),
+      usage: { inputTokens: 1250, outputTokens: 90, cacheReadTokens: 950, cacheWriteTokens: 0 },
+    },
+    {
+      text: "暴雨斜劈青石板，水花四溅。",
+      usage: { inputTokens: 1180, outputTokens: 60, cacheReadTokens: 950, cacheWriteTokens: 0 },
+    },
+  ]);
+
+  await withTempDir("zhizhang-cache-e2e-", async (dataDirectory) => {
+    const host = createMockDsHHost({ llm });
+    applyWorkbench(host.ctx, { dataDirectory }, { readAsset: host.readAsset });
+    try {
+      const projectId = (await host.command("project.create", { product: "fanqie", name: "雪夜问剑" })).body.result.id;
+      const ch1 = (await host.command("document.create", { projectId, title: "第一章" })).body.result.id;
+      const rev1 = (await host.command("draft.save", {
+        documentId: ch1,
+        baseRevisionId: null,
+        body: "冷雨拍打青石板，巷尾传来铁靴踩水声。",
+      })).body.result.revisionId;
+      await host.command("controls.save", { projectId, authorIntent: "冷峻写实武侠，禁止系统面板。" });
+      await host.command("setting.propose", {
+        projectId,
+        documentId: ch1,
+        factId: "rule-no-system",
+        kind: "agreement",
+        note: "全书不出现穿越系统。",
+        source: "总纲",
+        from: { chapterId: ch1, point: 1 },
+      });
+      const settingId = (await host.getState({ projectId, documentId: ch1 })).body.result.settings[0].id;
+      await host.command("setting.decide", { projectId, documentId: ch1, proposalId: settingId, accept: true });
+
+      // Job 1: draft_generation
+      const runId = (await host.command("run.start", {
+        documentId: ch1,
+        baseRevisionId: rev1,
+        instruction: "续写对峙开场",
+        tokenLimit: 12000,
+      })).body.result.id;
+      await host.startJob("draft_generation", { runId, provider: "deepseek", model: "deepseek-chat" });
+      await host.waitFor(async () => {
+        const st = await host.getState({ projectId, documentId: ch1 });
+        return st.body.result.runs[0]?.state === "awaiting-author";
+      });
+
+      // Job 2: proposal_extraction (chapter_review)
+      await host.startJob("proposal_extraction", {
+        proposalKind: "chapter_review",
+        projectId,
+        documentId: ch1,
+        provider: "deepseek",
+        model: "deepseek-chat",
+      });
+      await host.waitFor(async () => {
+        const jobs = await host.getJobs({ projectId, kind: "proposal_extraction" });
+        return jobs.body.result[0]?.state === "completed";
+      });
+
+      // Job 3: selection_rewrite
+      await host.startJob("selection_rewrite", {
+        documentId: ch1,
+        mode: "polish",
+        selectedText: "冷雨拍打青石板，巷尾传来铁靴踩水声。",
+        provider: "deepseek",
+        model: "deepseek-chat",
+      });
+
+      assert.equal(llm.calls.length, 3);
+      // Every single call must share the EXACT SAME byte-identical L0+L1+L2 `system` prefix!
+      assert.equal(llm.calls[0].options.system, llm.calls[1].options.system);
+      assert.equal(llm.calls[1].options.system, llm.calls[2].options.system);
+      assert.ok(String(llm.calls[0].options.system).includes("【L1 全书冻结设定圣经】"));
+      // Non-standard `cachePrefix` must NEVER appear on streamOptions!
+      for (const call of llm.calls) {
+        assert.equal("cachePrefix" in call.options, false);
+        const userText = call.options.messages[0].content[0].text;
+        assert.equal(userText.trimStart().startsWith("{"), false, "L3 prompt must be canonical Markdown, not raw JSON");
+      }
+
+      // Run detail persists prefixSha256, l1Version, cacheStrategy, and cacheDiagnosis
+      const detail = (await host.command("run.detail", { documentId: ch1, runId })).body.result;
+      assert.equal(detail.calls.length, 1);
+      assert.ok(detail.calls[0].prefixSha256);
+      assert.equal(detail.calls[0].l1Version, 1);
+      assert.equal(detail.calls[0].cacheStrategy, "deepseek-implicit");
+      assert.ok(typeof detail.billing.cacheDiagnosis === "string" && detail.billing.cacheDiagnosis.length > 0);
+    } finally {
+      await host.close();
+    }
+  });
+});
+

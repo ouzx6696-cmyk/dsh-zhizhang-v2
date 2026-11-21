@@ -111,6 +111,22 @@ export interface RunBillingSummaryDto {
   readonly totalCacheWrite: number;
   readonly effectiveBilledTokens: number | null;
   readonly cacheHitRate: number | null;
+  readonly estimatedSavingsRatio?: number | null;
+  readonly prefixTransitions?: number;
+  readonly cacheDiagnosis?: string | null;
+}
+
+export interface BookCacheSnapshotDto {
+  readonly projectId: string;
+  readonly version: number;
+  readonly prefixSha256: string;
+  readonly tokenCount: number;
+  readonly budgetTokens: number;
+  readonly dirtyMutations: number;
+  readonly dirtyThreshold: number;
+  readonly compiledLoreSeq: number;
+  readonly lastCompiledAt: number;
+  readonly lastCacheHitAt: number;
 }
 
 export interface MicroUsageSummaryDto {
@@ -196,15 +212,20 @@ export interface GenerationCallDto {
   readonly inputReserve: number;
   readonly maxOutput: number;
   readonly usage: string | null;
+  readonly prefixSha256?: string | null;
+  readonly l1Version?: number | null;
+  readonly cacheStrategy?: string | null;
 }
 export type GenerationCallRecord = GenerationCallDto;
 
 export type ContextSlotPriority = "critical" | "high" | "medium" | "optional";
+export type ContextCacheTier = "l1" | "l2" | "l3";
 
 export interface ContextSlotReportDto {
   readonly id: string;
   readonly label: string;
   readonly group: "prefix" | "dynamic";
+  readonly tier?: ContextCacheTier;
   readonly priority: ContextSlotPriority;
   readonly rawTokens: number;
   readonly includedTokens: number;
@@ -220,6 +241,15 @@ export interface ContextAssemblyReportDto {
   readonly dynamicBudget?: number;
   readonly framingTokens?: number;
   readonly overBudget?: boolean;
+  readonly l1Tokens?: number;
+  readonly l2Tokens?: number;
+  readonly l3Tokens?: number;
+  readonly l1Version?: number;
+  readonly l1DirtyCount?: number;
+  readonly l1Budget?: number;
+  readonly prefixSha256?: string;
+  readonly l2Sha256?: string;
+  readonly estimatedCacheableRatio?: number;
   readonly slots: readonly ContextSlotReportDto[];
   readonly activeTechniqueIds: readonly string[];
   readonly activeDeconstructionIds: readonly string[];
@@ -228,6 +258,11 @@ export interface ContextAssemblyReportDto {
 export interface ContextBundleDto {
   readonly stablePrefix: string;
   readonly dynamicTail: string;
+  readonly bookPrefix?: string;
+  readonly bookPrefixSha256?: string;
+  readonly bookSnapshotVersion?: number;
+  readonly volumePrefix?: string;
+  readonly volumePrefixSha256?: string;
   readonly report: ContextAssemblyReportDto;
 }
 
@@ -488,7 +523,9 @@ export type WorkspaceAction =
   | "setting.revoke_known"
   | "chapter.creation_report"
   | "project.daily_stats"
-  | "revisions.compact";
+  | "revisions.compact"
+  | "cache.snapshot"
+  | "cache.rebuild";
 
 export interface ActionEntry<I = Readonly<Record<string, unknown>>, O = unknown> {
   readonly input: I;
@@ -622,5 +659,10 @@ export type ActionMap = {
       readonly tokenLimit?: number;
     },
     SelectionRewriteResultDto
+  >;
+  readonly "cache.snapshot": ActionEntry<{ readonly projectId: string }, BookCacheSnapshotDto>;
+  readonly "cache.rebuild": ActionEntry<
+    { readonly projectId: string; readonly budgetTokens?: number },
+    BookCacheSnapshotDto
   >;
 };

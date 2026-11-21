@@ -223,6 +223,19 @@ export function initFanqieSchema(db: SqliteDatabase): void {
       updated_at INTEGER NOT NULL DEFAULT 0
     );
 
+    CREATE TABLE IF NOT EXISTS author_book_prefix_cache (
+      project_id TEXT PRIMARY KEY REFERENCES author_projects(id),
+      snapshot_version INTEGER NOT NULL DEFAULT 1,
+      compiled_text TEXT NOT NULL DEFAULT '',
+      prefix_sha256 TEXT NOT NULL DEFAULT '',
+      token_count INTEGER NOT NULL DEFAULT 0,
+      budget_tokens INTEGER NOT NULL DEFAULT 8192,
+      compiled_lore_seq INTEGER NOT NULL DEFAULT 0,
+      dirty_mutations INTEGER NOT NULL DEFAULT 0,
+      last_cache_hit_at INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL DEFAULT 0
+    );
+
     CREATE INDEX IF NOT EXISTS author_volumes_by_project ON author_volumes(project_id, sort_order);
     CREATE INDEX IF NOT EXISTS author_acts_by_volume ON author_acts(project_id, volume_id, sort_order);
     CREATE INDEX IF NOT EXISTS author_settings_by_project ON author_settings(project_id);

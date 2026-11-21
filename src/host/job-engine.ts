@@ -96,8 +96,8 @@ export function createHostJobEngine(options: HostJobEngineOptions) {
         workspace.reserveRefinement(run.id);
       },
       {
-        begin(phase, inputReserve, maxOutput) {
-          return workspace.beginJobCall(jobId, phase, inputReserve, maxOutput);
+        begin(phase, inputReserve, maxOutput, cacheMeta) {
+          return workspace.beginJobCall(jobId, phase, inputReserve, maxOutput, cacheMeta);
         },
         receive(callId, usage) {
           if (isDbOpen()) workspace.recordJobReceipt(jobId, callId, usage);
@@ -161,8 +161,8 @@ export function createHostJobEngine(options: HostJobEngineOptions) {
       { provider: job.provider, model: job.model, reserved: job.reserved },
       controller.signal,
       {
-        begin(phase, inputReserve, maxOutput) {
-          return workspace.beginJobCall(job.jobId, phase, inputReserve, maxOutput);
+        begin(phase, inputReserve, maxOutput, cacheMeta) {
+          return workspace.beginJobCall(job.jobId, phase, inputReserve, maxOutput, cacheMeta);
         },
         receive(callId, usage) {
           if (isDbOpen()) workspace.recordProposalReceipt(job.id, callId, usage);
@@ -174,6 +174,7 @@ export function createHostJobEngine(options: HostJobEngineOptions) {
         phase: job.phase,
         system: job.system,
         prompt: job.prompt,
+        layered: job.layered,
         maxOutputTokens: 2400,
         disableThinking: job.disableThinking,
       })
@@ -234,8 +235,8 @@ export function createHostJobEngine(options: HostJobEngineOptions) {
       { provider: req.provider, model: req.model, reserved: req.reserved },
       signal,
       {
-        begin(phase, inputReserve, maxOutput) {
-          return workspace.beginJobCall(job.id, phase, inputReserve, maxOutput);
+        begin(phase, inputReserve, maxOutput, cacheMeta) {
+          return workspace.beginJobCall(job.id, phase, inputReserve, maxOutput, cacheMeta);
         },
         receive(callId, usage) {
           if (isDbOpen()) workspace.recordJobReceipt(job.id, callId, usage);
@@ -249,8 +250,8 @@ export function createHostJobEngine(options: HostJobEngineOptions) {
             phase: "selectionRewrite",
             system: req.system,
             prompt: req.prompt,
+            layered: req.layered,
             maxOutputTokens: 2000,
-            cachePrefix: req.cachePrefix,
             disableThinking: true,
           })
         ).trim();

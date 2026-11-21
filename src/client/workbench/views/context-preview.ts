@@ -13,6 +13,12 @@ const STATUS_LABELS: Readonly<Record<string, string>> = {
   empty: "无内容",
 };
 
+const TIER_TAGS: Readonly<Record<string, string>> = {
+  l1: "[L1] ",
+  l2: "[L2] ",
+  l3: "[L3] ",
+};
+
 export interface ContextPreviewResult {
   readonly report: ContextAssemblyReportDto;
   readonly recommendations: readonly TechniqueRecommendationDto[];
@@ -54,10 +60,23 @@ export function createContextPreviewPanel(container: HTMLElement, host: Workbenc
 
   function paint(data: ContextPreviewResult): void {
     const { report, recommendations } = data;
+    const { projectId } = host.getState();
     container.replaceChildren();
 
     const header = el("div", "", "context-header");
-    header.append(el("h3", "上下文槽位装配器", "sub-heading"));
+    header.append(el("h3", "四层上下文装配与缓存预览", "sub-heading"));
+    const actions = el("div", "", "context-actions");
+    const rebuildBtn = createButton({
+      label: "重建圣经快照",
+      variant: "secondary",
+      size: "sm",
+      className: "notice-dismiss",
+      onClick: () =>
+        void host.perform(async () => {
+          await host.request("cache.rebuild", { projectId });
+          await refresh();
+        }),
+    });
     const refreshBtn = createButton({
       label: "刷新装配预览",
       variant: "ghost",
@@ -65,17 +84,35 @@ export function createContextPreviewPanel(container: HTMLElement, host: Workbenc
       className: "notice-dismiss",
       onClick: () => void refresh(),
     });
-    header.append(refreshBtn);
+    actions.append(rebuildBtn, refreshBtn);
+    header.append(actions);
     container.append(header);
 
     const ratioPct = Math.min(100, Math.round((report.totalEstimatedTokens / Math.max(1, report.maxInputTokens)) * 100));
+    const l1Tokens = report.l1Tokens ?? report.prefixTokens;
+    const l2Tokens = report.l2Tokens ?? 0;
+    const l3Tokens = report.l3Tokens ?? report.dynamicTokens;
+    const cacheablePct = report.estimatedCacheableRatio !== undefined
+      ? `${(report.estimatedCacheableRatio * 100).toFixed(1)}%`
+      : "—";
+
     container.append(
       el(
         "p",
-        `输入总估算 ${report.totalEstimatedTokens.toLocaleString("zh-Hans")} / 配额 ${report.maxInputTokens.toLocaleString("zh-Hans")} token（${ratioPct}%）· Prefix 稳定区 ${report.prefixTokens} · 动态尾 ${report.dynamicTokens}`,
+        `输入总估算 ${report.totalEstimatedTokens.toLocaleString("zh-Hans")} / 配额 ${report.maxInputTokens.toLocaleString("zh-Hans")} token（${ratioPct}%）· L1 ${l1Tokens} · L2 ${l2Tokens} · L3 ${l3Tokens}`,
         "muted-copy tabular",
       ),
     );
+
+    if (report.l1Version !== undefined || report.prefixSha256) {
+      const versionLabel = report.l1Version !== undefined ? `L1 圣经快照 v${report.l1Version}` : "L1 圣经快照";
+      const hashLabel = report.prefixSha256 ? `前缀哈希 ${report.prefixSha256.slice(0, 10)}` : "";
+      const dirtyLabel = report.l1DirtyCount !== undefined ? `待合入变更 ${report.l1DirtyCount}/10` : "";
+      const cacheSummary = [versionLabel, hashLabel, dirtyLabel, `理论可缓存占比 ${cacheablePct}`]
+        .filter(Boolean)
+        .join(" · ");
+      container.append(el("p", cacheSummary, "muted-copy tabular"));
+    }
 
     const bar = el("div", "", "context-bar");
     const prefixShare = Math.min(100, Math.round((report.prefixTokens / Math.max(1, report.maxInputTokens)) * 100));
@@ -90,7 +127,15 @@ export function createContextPreviewPanel(container: HTMLElement, host: Workbenc
     const list = el("ul", "", "context-slot-list");
     for (const slot of report.slots) {
       const row = el("li", "", `context-slot-item slot-status-${slot.status}`);
-      const left = el("span", `${slot.group === "prefix" ? "[Prefix] " : ""}${slot.label}`, "slot-name");
+      const tierTag = slot.tier
+        ? (TIER_TAGS[slot.tier] ?? "")
+        : slot.group === "prefix"
+          ? "[Prefix] "
+          : "";
+      const cleanLabel = slot.tier
+        ? slot.label.replace(/^L[123]\s+/, "")
+        : slot.label;
+      const left = el("span", `${tierTag}${cleanLabel}`, "slot-name");
       const right = el(
         "span",
         `${STATUS_LABELS[slot.status] ?? slot.status} · ${slot.includedTokens}/${slot.rawTokens}`,
@@ -104,7 +149,7 @@ export function createContextPreviewPanel(container: HTMLElement, host: Workbenc
     if (recommendations.length > 0) {
       container.append(el("h4", "本章技法推荐与挂载状态", "inspector-heading"));
       const recList = el("div", "", "rec-list");
-      const { projectId, documentId } = host.getState();
+      const { documentId } = host.getState();
       for (const rec of recommendations.slice(0, 5)) {
         const card = el("div", "", "rec-item");
         const title = el("p", `${rec.card.title}（${rec.score}分）`, "setting-title");

@@ -1681,10 +1681,21 @@ label > textarea {
 
 .context-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: stretch;
   gap: 8px;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
+}
+
+.context-header .sub-heading {
+  margin: 0;
+}
+
+.context-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .context-bar {
@@ -1717,8 +1728,19 @@ label > textarea {
 .context-slot-item {
   display: flex;
   justify-content: space-between;
+  align-items: baseline;
   gap: 8px;
   font-variant-numeric: tabular-nums;
+}
+
+.context-slot-item .slot-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.context-slot-item .slot-tokens {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .slot-status-empty {
