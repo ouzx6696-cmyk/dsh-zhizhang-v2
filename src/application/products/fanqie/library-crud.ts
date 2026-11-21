@@ -15,7 +15,7 @@ import {
 } from "../../../domain/fanqie/index.ts";
 import { deleteLibraryFts, stmt, syncLibraryFts } from "../../../storage/index.ts";
 import { count, invalid, optionalText, requiredRow, text, type Input, type WorkspaceContext } from "../../context.ts";
-import { assertFanqieProject } from "./shared.ts";
+import { assertFanqieProject, assertLibraryWriteScope } from "./shared.ts";
 
 interface DeconstructRow {
   readonly id: string;
@@ -153,10 +153,8 @@ export function persistDeconstruction(
     if (existingOverride?.id) id = existingOverride.id;
   }
   id ??= randomUUID();
-  const existing = stmt(ctx.db, "SELECT created_at AS createdAt FROM library_deconstructions WHERE id = ?;")
-    .get(id) as { createdAt?: number } | undefined;
   const now = Date.now();
-  const createdAt = existing?.createdAt ?? now;
+  const createdAt = assertLibraryWriteScope(ctx, "library_deconstructions", id, scope, projectId) ?? now;
 
   stmt(ctx.db, `
     INSERT INTO library_deconstructions (
@@ -215,10 +213,8 @@ export function persistTechniqueCard(
     if (existingOverride?.id) id = existingOverride.id;
   }
   id ??= randomUUID();
-  const existing = stmt(ctx.db, "SELECT created_at AS createdAt FROM library_technique_cards WHERE id = ?;")
-    .get(id) as { createdAt?: number } | undefined;
   const now = Date.now();
-  const createdAt = existing?.createdAt ?? now;
+  const createdAt = assertLibraryWriteScope(ctx, "library_technique_cards", id, scope, projectId) ?? now;
 
   stmt(ctx.db, `
     INSERT INTO library_technique_cards (

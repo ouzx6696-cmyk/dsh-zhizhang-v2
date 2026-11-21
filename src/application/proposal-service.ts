@@ -15,6 +15,7 @@ import { normalizeFactSyncPayload } from "../workflow/fact-sync-payload.ts";
 import type { WritingPhase } from "../workflow/writing-stages.ts";
 import { count, invalid, optionalText, text, type Input, type Product, type WorkspaceContext } from "./context.ts";
 import { sha256Text } from "./digest.ts";
+import { isDocumentBoundProposalKind } from "./proposal-kinds.ts";
 import type { ProductLineRegistry } from "./product-line.ts";
 
 interface ProposalSpec {
@@ -55,6 +56,9 @@ export function createProposalService(ctx: WorkspaceContext, registry: ProductLi
     const model = text(input, "model");
     const projectId = optionalText(input, "projectId") ?? null;
     const documentId = optionalText(input, "documentId") ?? null;
+    // FQ-07: chapter-bound proposals must name their chapter up front; a null
+    // document forces the decision path to guess and can write into the wrong one.
+    if (isDocumentBoundProposalKind(kind) && !documentId) invalid("documentId", "chapter-required");
     const reserved = input.tokenLimit === undefined ? 12_000 : count(input, "tokenLimit");
     if (reserved === 0) invalid("tokenLimit", "positive-budget-required");
 

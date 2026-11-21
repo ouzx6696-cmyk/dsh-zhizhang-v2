@@ -543,7 +543,16 @@ export function patchForeshadow(ctx: WorkspaceContext, input: Input): Foreshadow
  */
 export function upsertForeshadow(ctx: WorkspaceContext, input: Input): ForeshadowDto {
   const id = optionalText(input, "id");
-  if (id && readForeshadowRow(ctx, id)) return patchForeshadow(ctx, input);
+  if (id) {
+    const existing = readForeshadowRow(ctx, id);
+    if (existing) {
+      // FQ-06: an upsert carrying another project's foreshadow id must fail
+      // loudly instead of editing that project's row.
+      const projectId = text(input, "projectId");
+      if (projectId !== existing.projectId) invalid("projectId", "project-mismatch");
+      return patchForeshadow(ctx, input);
+    }
+  }
   return createForeshadow(ctx, input);
 }
 

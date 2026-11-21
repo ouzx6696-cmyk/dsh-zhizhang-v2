@@ -14,6 +14,28 @@ export function assertFanqieProject(ctx: WorkspaceContext, projectId: string): v
 }
 
 /**
+ * Resolves the existing library row for `id` and refuses a cross-project or
+ * cross-scope overwrite (FQ-06), returning the original `created_at` so an
+ * update keeps its creation timestamp.
+ */
+export function assertLibraryWriteScope(
+  ctx: WorkspaceContext,
+  table: "library_deconstructions" | "library_technique_cards",
+  id: string,
+  scope: string,
+  projectId: string | null,
+): number | undefined {
+  const row = stmt(
+    ctx.db,
+    `SELECT created_at AS createdAt, scope, project_id AS projectId FROM ${table} WHERE id = ?;`,
+  ).get(id) as { createdAt?: number; scope?: string; projectId?: string | null } | undefined;
+  if (row && (row.scope !== scope || row.projectId !== (projectId ?? null))) {
+    invalid("id", "scope-mismatch");
+  }
+  return row?.createdAt;
+}
+
+/**
  * Returns approved setting facts ordered by `(decided_seq ASC, sequence ASC)`
  * with a per-connection `(projectId, currentSeq)` memo cache that stays coherent
  * across multiple WAL connections.

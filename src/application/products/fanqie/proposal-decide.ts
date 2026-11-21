@@ -12,6 +12,7 @@ import {
   type WorkspaceContext,
 } from "../../context.ts";
 import { sha256Text } from "../../digest.ts";
+import { isDocumentBoundProposalKind, sanitizeProposalPayload } from "../../proposal-kinds.ts";
 import { commitFactBatch, commitFactSyncProposal, commitForeshadowBatch } from "./fact-sync.ts";
 import { commitArcPlanProposal } from "./controls.ts";
 import { insertObservationsBatch } from "./diagnostics.ts";
@@ -111,6 +112,9 @@ export function createManualProposal(ctx: WorkspaceContext, input: Input): AiPro
   const projectId = optionalText(input, "projectId") ?? null;
   if (projectId) assertFanqieProject(ctx, projectId);
   const documentId = optionalText(input, "documentId") ?? null;
+  // FQ-07: a chapter-bound proposal without a chapter can only be committed by
+  // guessing, so reject it at the inbox door instead of at decision time.
+  if (isDocumentBoundProposalKind(kind) && !documentId) invalid("documentId", "chapter-required");
   const sourceRef = optionalText(input, "sourceRef") ?? "";
   if (!input.payload || typeof input.payload !== "object" || Array.isArray(input.payload)) {
     invalid("payload", "object-required");
@@ -232,10 +236,16 @@ export function decideProposal(ctx: WorkspaceContext, input: Input) {
     }
 
     const basePayload = mapProposalRow(row).payload;
-    const edited = input.editedPayload && typeof input.editedPayload === "object" && !Array.isArray(input.editedPayload)
+    const rawEdited = input.editedPayload && typeof input.editedPayload === "object" && !Array.isArray(input.editedPayload)
       ? (input.editedPayload as Record<string, unknown>)
       : basePayload;
-    const projectId = optionalText(input, "projectId") ?? row.projectId ?? optionalText(edited, "projectId") ?? null;
+    const edited = sanitizeProposalPayload(rawEdited);
+    // FQ-06: the stored row is the only source of project identity; callers and
+    // payloads may not redirect the commit to another project.
+    const projectId = row.projectId;
+    if (isDocumentBoundProposalKind(row.kind) && !row.documentId) {
+      invalid("documentId", "chapter-required");
+    }
 
     let committed: unknown = null;
     if (row.kind === "deconstruct") {
@@ -243,7 +253,7 @@ export function decideProposal(ctx: WorkspaceContext, input: Input) {
         ctx,
         {
           ...edited,
-          scope: edited.scope ?? (projectId ? "project" : "global"),
+          scope: projectId ? "project" : "global",
           ...(projectId ? { projectId } : {}),
           excerpt: edited.excerpt ?? (row.documentId ? (ctx.document(row.documentId).body ?? row.sourceRef) : row.sourceRef),
         },
@@ -254,14 +264,14 @@ export function decideProposal(ctx: WorkspaceContext, input: Input) {
         ctx,
         {
           ...edited,
-          scope: edited.scope ?? (projectId ? "project" : "global"),
+          scope: projectId ? "project" : "global",
           ...(projectId ? { projectId } : {}),
         },
         "ai-confirmed",
       );
     } else if (row.kind === "summary") {
-      const targetDocId = optionalText(input, "documentId") ?? row.documentId;
-      if (!targetDocId) invalid("documentId", "document-required");
+      const targetDocId = row.documentId;
+      if (!targetDocId) invalid("documentId", "chapter-required");
       const doc = ctx.document(targetDocId);
       const summary = text(edited, "summary").trim();
       stmt(ctx.db, "UPDATE author_documents SET summary = ?, updated_at = ? WHERE id = ?;")
@@ -278,14 +288,16 @@ export function decideProposal(ctx: WorkspaceContext, input: Input) {
     } else if (row.kind === "setting") {
       if (!projectId) invalid("projectId", "project-required");
       assertFanqieProject(ctx, projectId);
-      const fallbackChapterId = row.documentId ?? ctx.chapterOrder(projectId)[0];
-      if (!fallbackChapterId) invalid("documentId", "chapter-required");
+      // FQ-07: never fall back to the first chapter — that writes lore into a
+      // chapter the author never reviewed.
+      const chapterId = row.documentId;
+      if (!chapterId) invalid("documentId", "chapter-required");
       const currentApproved = approvedFacts(ctx, projectId);
       const lockedSet = new Set(currentApproved.filter((f) => f.locked).map((f) => f.id));
       const factById = new Map(currentApproved.map((f) => [f.id, f]));
       const { approvedSettings } = commitFactBatch(ctx, {
         projectId,
-        chapterId: fallbackChapterId,
+        chapterId,
         defaultSource: "AI章末提取（作者确认）",
         items: Array.isArray(edited.settings) ? (edited.settings as Input[]) : [],
         lockedSet,
@@ -294,18 +306,19 @@ export function decideProposal(ctx: WorkspaceContext, input: Input) {
       const foreshadows = commitForeshadowBatch(
         ctx,
         projectId,
-        fallbackChapterId,
+        chapterId,
         Array.isArray(edited.foreshadows) ? (edited.foreshadows as Input[]) : [],
         false,
       );
       committed = { approvedSettings, foreshadows };
     } else if (row.kind === "fact_sync") {
+      if (!row.documentId) invalid("documentId", "chapter-required");
       committed = commitFactSyncProposal(ctx, row.documentId, projectId, edited, input);
     } else if (row.kind === "chapter_review") {
       if (!projectId) invalid("projectId", "project-required");
       assertFanqieProject(ctx, projectId);
-      const targetDocId = optionalText(input, "documentId") ?? row.documentId;
-      if (!targetDocId) invalid("documentId", "document-required");
+      const targetDocId = row.documentId;
+      if (!targetDocId) invalid("documentId", "chapter-required");
       const doc = ctx.document(targetDocId);
       if (doc.projectId !== projectId) invalid("documentId", "project-mismatch");
       const rawObs = Array.isArray(edited.observations) ? (edited.observations as Input[]) : [];

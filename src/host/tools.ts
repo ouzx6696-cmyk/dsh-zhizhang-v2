@@ -149,7 +149,7 @@ export function createZhizhangAgentTools(workspace: AuthorWorkspace): readonly A
           status: { type: "string" },
           note: { type: "string" },
         },
-        ["projectId", "title"],
+        ["projectId", "documentId", "title"],
       ),
       outputSchema: openOutputSchema("Identifier and pending status of the created foreshadow proposal."),
       execute: (args) =>
@@ -157,7 +157,7 @@ export function createZhizhangAgentTools(workspace: AuthorWorkspace): readonly A
           kind: "fact_sync",
           origin: "agent-tool",
           projectId: args.projectId,
-          ...(typeof args.documentId === "string" ? { documentId: args.documentId } : {}),
+          documentId: args.documentId,
           sourceRef: typeof args.title === "string" ? args.title : "伏笔提案",
           payload: {
             foreshadowUpdates: [
