@@ -4,3 +4,6 @@ dist/
 coverage/
 # Project-local agent data (workspace memory, caches). Never shipped.
 .workbuddy/
+# Local-only inventory snapshot (2026-11-21). Its counts and "cannot run
+# npm/git" note are a historical snapshot, not a source of truth.
+/织章V2_下一阶段开发报告.md
