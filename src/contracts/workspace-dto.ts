@@ -207,6 +207,19 @@ export interface RunBillingSummaryDto {
   readonly cacheHitRate: number | null;
 }
 
+/** Per-document cumulative `selection.rewrite` ledger (decision #7, DSH-10). */
+export interface MicroUsageSummaryDto {
+  readonly calls: number;
+  readonly completed: number;
+  readonly failed: number;
+  readonly uncertain: number;
+  readonly totalInput: number;
+  readonly totalOutput: number;
+  readonly totalCacheRead: number;
+  readonly totalCacheWrite: number;
+  readonly settled: number;
+}
+
 export interface RunSummary {
   readonly id: string;
   readonly state: string;
@@ -269,6 +282,8 @@ export interface RunDetailDto {
   readonly billing?: RunBillingSummaryDto;
   readonly contextTrace?: ContextAssemblyReportDto | null;
   readonly recoveryHints?: readonly RecoveryHintDto[];
+  /** Cumulative micro-rewrite usage for this document, shown beside the run billing. */
+  readonly microUsage?: MicroUsageSummaryDto;
 }
 export type RunDetailView = RunDetailDto;
 

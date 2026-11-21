@@ -9,6 +9,7 @@ import {
   type Input,
   type Product,
 } from "./context.ts";
+import { createMicroService } from "./micro-service.ts";
 import { createProductLineRegistry } from "./product-line.ts";
 import { createFanqieModule } from "./products/fanqie.ts";
 import type { ProjectBundleDiskWriter } from "./products/fanqie/io.ts";
@@ -40,6 +41,7 @@ export function openAuthorWorkspace(
   const runs = createRunService(ctx, registry, saveDraftForRow);
   const snapshots = createSnapshotService(ctx, registry);
   const proposals = createProposalService(ctx, registry);
+  const micro = createMicroService(ctx);
 
   function mutation(action: string, input: Input) {
     switch (action) {
@@ -117,8 +119,10 @@ export function openAuthorWorkspace(
         return runs.adoptCandidate(row, input);
       case "run.history":
         return runs.runHistory(row, input);
-      case "run.detail":
-        return runs.runDetail(row, input);
+      case "run.detail": {
+        const detail = runs.runDetail(row, input);
+        return { ...detail, microUsage: micro.usage(row.id) };
+      }
       case "run.reconcile":
         return runs.reconcileRun(row, input);
       default:
@@ -129,6 +133,7 @@ export function openAuthorWorkspace(
   function recoverStartup(): void {
     runs.recoverGenerations();
     proposals.recoverProposals();
+    micro.recover();
     for (const mod of registry.all()) {
       mod.onStartupRecover?.(ctx);
     }
@@ -148,6 +153,11 @@ export function openAuthorWorkspace(
     reserveRefinement: runs.reserveRefinement,
     failGeneration: runs.failGeneration,
     buildSelectionRewriteInput: runs.buildSelectionRewriteInput,
+    beginMicroCall: micro.begin,
+    recordMicroReceipt: micro.recordReceipt,
+    finishMicroCall: micro.finish,
+    recoverMicroCalls: micro.recover,
+    microUsage: micro.usage,
     beginProposalGeneration: proposals.beginProposalGeneration,
     recordProposalReceipt: proposals.recordProposalReceipt,
     finishProposalGeneration: proposals.finishProposalGeneration,

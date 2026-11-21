@@ -30,6 +30,8 @@ export interface SanitizedDiagnosticsReport {
   readonly counts: Readonly<Record<string, number>>;
   readonly activeGenerations: number;
   readonly activeProposals: number;
+  /** In-flight `selection.rewrite` calls (DSH-10). */
+  readonly activeMicroCalls: number;
   readonly agentToolsEnabled: boolean;
   /** True only after all 7+3 tools were accepted by the host registrar (DSH-01). */
   readonly agentToolsRegistered: boolean;
@@ -102,6 +104,7 @@ export function buildSanitizedDiagnostics(
   runtimeInfo: {
     readonly activeGenerations: number;
     readonly activeProposals: number;
+    readonly activeMicroCalls?: number;
     readonly agentToolsEnabled: boolean;
     readonly agentToolsRegistered?: boolean;
     readonly agentToolsError?: string | null;
@@ -148,6 +151,7 @@ export function buildSanitizedDiagnostics(
     },
     activeGenerations: runtimeInfo.activeGenerations,
     activeProposals: runtimeInfo.activeProposals,
+    activeMicroCalls: runtimeInfo.activeMicroCalls ?? 0,
     agentToolsEnabled: runtimeInfo.agentToolsEnabled,
     agentToolsRegistered: runtimeInfo.agentToolsRegistered ?? false,
     agentToolsError: runtimeInfo.agentToolsError ?? null,

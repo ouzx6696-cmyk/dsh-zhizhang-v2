@@ -203,6 +203,24 @@ export function renderRunInspector(target: HTMLElement, detail: RunDetailDto): v
     target.append(callsSec);
   }
 
+  if (detail.microUsage && detail.microUsage.calls > 0) {
+    const micro = detail.microUsage;
+    const microSec = el("div", { className: "inspector-section" });
+    microSec.append(el("h3", { className: "inspector-heading", text: `微改写累计（本文档 ${micro.calls} 次）` }));
+    const microMeta = el("dl", { className: "inspector-meta" });
+    const microRows: readonly [string, string][] = [
+      ["调用状态", `完成 ${micro.completed} · 失败 ${micro.failed} · 待核对 ${micro.uncertain}`],
+      ["输入 / 输出", `${micro.totalInput} / ${micro.totalOutput} token`],
+      ["缓存读 / 缓存写", `${micro.totalCacheRead} / ${micro.totalCacheWrite} token`],
+      ["已结算", `${micro.settled} token`],
+    ];
+    for (const [label, value] of microRows) {
+      microMeta.append(el("dt", { text: label }), el("dd", { className: "tabular", text: value }));
+    }
+    microSec.append(microMeta);
+    target.append(microSec);
+  }
+
   if (detail.candidate?.body) {
     const candSec = el("div", { className: "inspector-section" });
     candSec.append(el("h3", { className: "inspector-heading", text: "已存档候选正文预览" }));

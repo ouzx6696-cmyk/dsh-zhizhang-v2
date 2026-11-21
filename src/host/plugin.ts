@@ -7,6 +7,7 @@ import {
   configureStorePragmas,
   createStore,
   openStore,
+  pruneCommandJournal,
   sanitizePathSegment,
   writeLocalBundleToDir,
 } from "../storage/index.ts";
@@ -53,7 +54,14 @@ export const inject = HOST_REQUIRED_SERVICES;
 
 const BASE_PATH = "/api/zhizhang";
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
-const SHUTDOWN_DRAIN_MS = 5000;
+/**
+ * Decision #8: the drain window was widened from 5s to 15s so that a host
+ * unload can still persist receipts and finished results instead of dropping
+ * them (DSH-08).
+ */
+const SHUTDOWN_DRAIN_MS = 15_000;
+/** DB-02: journal pruning cadence; the function itself is idempotent. */
+const JOURNAL_PRUNE_INTERVAL_MS = 6 * 60 * 60_000;
 const CSP_HEADER = "default-src 'self'; frame-ancestors 'self'; base-uri 'none'; object-src 'none'";
 
 function defaultReadAsset(kind: "html" | "css" | "js", path: string): Uint8Array {
@@ -140,8 +148,16 @@ export function applyWorkbench(
     const disposers: Disposer[] = [];
     const generations = new Map<string, { controller: AbortController; task: Promise<void> }>();
     const proposalJobs = new Map<string, { controller: AbortController; task: Promise<void> }>();
+    const microJobs = new Map<string, { controller: AbortController; task: Promise<unknown> }>();
     const proposalLocks = new Set<string>();
-    let closing = false;
+    /**
+     * `accepting` gates new HTTP work; `dbOpen` gates ledger writes. During the
+     * drain window the workbench already rejects new requests but still records
+     * receipts/results for work that was in flight (DSH-08).
+     */
+    let accepting = true;
+    let dbOpen = true;
+    let journalTimer: ReturnType<typeof setInterval> | undefined;
     let workspaceOnClose: () => void = () => {};
 
     try {
@@ -156,8 +172,24 @@ export function applyWorkbench(
       workspaceOnClose = () => {
         workspace.recoverGenerations();
         workspace.recoverProposals();
+        workspace.recoverMicroCalls();
       };
       workspace.recoverStartup();
+
+      // DB-02: the host owns journal maintenance. Run once at startup, then on a
+      // slow interval; failures never block the workbench.
+      const pruneJournal = () => {
+        if (!dbOpen) return;
+        try {
+          pruneCommandJournal(db);
+        } catch (error) {
+          ctx.logger.error("zhizhang: command journal prune failed", { reason: describeError(error) });
+        }
+      };
+      pruneJournal();
+      journalTimer = setInterval(pruneJournal, JOURNAL_PRUNE_INTERVAL_MS) as unknown as ReturnType<typeof setInterval>;
+      // Never let maintenance hold the host process open.
+      (journalTimer as unknown as { unref?: () => void }).unref?.();
 
       const route = (
         path: string,
@@ -223,11 +255,12 @@ export function applyWorkbench(
       );
 
       route("/diag", ["GET"], async () => {
-        if (closing) return new Response(null, { status: 503 });
+        if (!accepting) return new Response(null, { status: 503 });
         try {
           const report = buildSanitizedDiagnostics(db, {
             activeGenerations: generations.size,
             activeProposals: proposalJobs.size,
+            activeMicroCalls: microJobs.size,
             agentToolsEnabled,
             agentToolsRegistered,
             agentToolsError,
@@ -239,7 +272,7 @@ export function applyWorkbench(
       });
 
       route("/state", ["GET"], async (request) => {
-        if (closing || request.signal.aborted) return new Response(null, { status: 503 });
+        if (!accepting || request.signal.aborted) return new Response(null, { status: 503 });
         try {
           const query = new URL(request.url).searchParams;
           const result = workspace.readState(
@@ -259,7 +292,7 @@ export function applyWorkbench(
           if (typeof action !== "string") {
             throw new ContractError("input.invalid", { field: "action", reason: "required" });
           }
-          if (closing || request.signal.aborted) return new Response(null, { status: 503 });
+          if (!accepting || request.signal.aborted) return new Response(null, { status: 503 });
 
           if (action === "run.generate") {
             const runId = typeof input.runId === "string" ? input.runId : "";
@@ -282,16 +315,16 @@ export function applyWorkbench(
                   return workspace.beginGenerationCall(attemptId, phase, inputReserve, maxOutput);
                 },
                 receive(callId, usage) {
-                  if (!closing) workspace.recordGenerationReceipt(attemptId, callId, usage);
+                  if (dbOpen) workspace.recordGenerationReceipt(attemptId, callId, usage);
                 },
               },
               workspace.generationRunner(run.product),
             )
               .then((result) => {
-                if (!closing) workspace.finishGeneration(attemptId, { ...result }, null);
+                if (dbOpen) workspace.finishGeneration(attemptId, { ...result }, null);
               })
               .catch((error: unknown) => {
-                if (!closing) {
+                if (dbOpen) {
                   const reason = error instanceof ContractError
                     ? error.code
                     : controller.signal.aborted
@@ -335,7 +368,7 @@ export function applyWorkbench(
                   return job.id;
                 },
                 receive(_callId, usage) {
-                  if (!closing) workspace.recordProposalReceipt(job.id, usage);
+                  if (dbOpen) workspace.recordProposalReceipt(job.id, usage);
                 },
               },
             );
@@ -358,12 +391,12 @@ export function applyWorkbench(
                   });
                 }
                 assertStageOutput(WRITING_STAGE_IDS[job.phase], parsed, "json");
-                if (!closing) {
+                if (dbOpen) {
                   workspace.finishProposalGeneration(job.id, parsed as Record<string, unknown>, null);
                 }
               })
               .catch((error: unknown) => {
-                if (!closing) {
+                if (dbOpen) {
                   const reason = error instanceof ContractError
                     ? error.code
                     : controller.signal.aborted
@@ -392,23 +425,45 @@ export function applyWorkbench(
 
           if (action === "selection.rewrite") {
             const req = workspace.buildSelectionRewriteInput(input);
+            // The ledger row is the per-document concurrency lock (DSH-10).
+            const job = workspace.beginMicroCall(req);
+            const controller = new AbortController();
+            const signal = AbortSignal.any([request.signal, controller.signal]);
             const caller = createSingleShotCaller(
               ctx.llm,
               { provider: req.provider, model: req.model, reserved: req.reserved },
-              request.signal,
-              { begin: () => "selection", receive: () => {} },
+              signal,
+              {
+                begin: () => job.id,
+                receive: (_callId, usage) => {
+                  if (dbOpen) workspace.recordMicroReceipt(job.id, usage);
+                },
+              },
             );
-            const rewrittenText = (
-              await caller.complete({
-                phase: "selectionRewrite",
-                system: req.system,
-                prompt: req.prompt,
-                maxOutputTokens: 2000,
-                cachePrefix: req.cachePrefix,
-                disableThinking: true,
-              })
-            ).trim();
-            assertStageOutput(WRITING_STAGE_IDS.selectionRewrite, rewrittenText, "body");
+            const task = (async () => {
+              try {
+                const text = (
+                  await caller.complete({
+                    phase: "selectionRewrite",
+                    system: req.system,
+                    prompt: req.prompt,
+                    maxOutputTokens: 2000,
+                    cachePrefix: req.cachePrefix,
+                    disableThinking: true,
+                  })
+                ).trim();
+                assertStageOutput(WRITING_STAGE_IDS.selectionRewrite, text, "body");
+                if (dbOpen) workspace.finishMicroCall(job.id, false);
+                return text;
+              } catch (error) {
+                if (dbOpen) workspace.finishMicroCall(job.id, true);
+                throw error;
+              } finally {
+                microJobs.delete(job.id);
+              }
+            })();
+            microJobs.set(job.id, { controller, task });
+            const rewrittenText = await task;
             return json({
               ok: true,
               result: {
@@ -432,20 +487,28 @@ export function applyWorkbench(
         }
       });
     } catch (error) {
+      accepting = false;
+      dbOpen = false;
+      if (journalTimer !== undefined) clearInterval(journalTimer);
       for (const dispose of disposers.reverse()) void dispose();
       db.close();
       throw error;
     }
 
     return async () => {
-      closing = true;
+      // Stop accepting new work first; keep the ledger writable until the drain
+      // finishes so receipts and finished results are not lost (DSH-08).
+      accepting = false;
       for (const { controller } of generations.values()) controller.abort();
       for (const { controller } of proposalJobs.values()) controller.abort();
+      for (const { controller } of microJobs.values()) controller.abort();
+      if (journalTimer !== undefined) clearInterval(journalTimer);
       await Promise.all(disposers.map((dispose) => dispose()));
 
       const inFlight = [
         ...Array.from(generations.values(), (entry) => entry.task),
         ...Array.from(proposalJobs.values(), (entry) => entry.task),
+        ...Array.from(microJobs.values(), (entry) => entry.task),
       ];
       if (inFlight.length > 0) {
         let timer: unknown;
@@ -461,6 +524,7 @@ export function applyWorkbench(
       try {
         workspaceOnClose();
       } finally {
+        dbOpen = false;
         db.close();
       }
     };
