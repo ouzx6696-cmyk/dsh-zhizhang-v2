@@ -442,7 +442,10 @@ export function compactAutoSaveRevisions(
           .filter((name): name is string => typeof name === "string"),
       );
       if (cols.has("base_revision_id")) {
-        collect("SELECT base_revision_id AS rev FROM author_ai_proposals WHERE base_revision_id IS NOT NULL;");
+        collect(
+          "SELECT base_revision_id AS rev FROM author_ai_proposals " +
+            "WHERE base_revision_id IS NOT NULL AND status IN ('pending','inflight');",
+        );
       }
     }
 

@@ -143,6 +143,18 @@ test("workbench API client builds URLs, rejects non-JSON logins or bad packets, 
         message: "该稿件已有活动任务，请先完成或取消当前任务。（诊断号 diag-42）",
       });
 
+      // 4b. Proposal drift refusal uses its own message
+      nextResponse = () =>
+        Response.json({
+          ok: false,
+          code: "gate.denied",
+          details: { action: "proposal.decide", reason: "proposal-stale" },
+          diagnosticId: "diag-43",
+        });
+      await assert.rejects(apiRequest({ projectId: "p1", documentId: "d1" }, "proposal.decide", {}), {
+        message: "提案生成后章节已被修改，请拒绝本提案并重新生成。（诊断号 diag-43）",
+      });
+
       // 5. version.conflict friendly message
       nextResponse = () => Response.json({ ok: false, code: "version.conflict" });
       await assert.rejects(apiRequest({ projectId: "p1", documentId: "d1" }, "draft.save", {}), {

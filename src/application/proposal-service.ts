@@ -13,6 +13,7 @@ import {
 } from "../workflow/writing-budget.ts";
 import type { WritingPhase } from "../workflow/writing-stages.ts";
 import { count, invalid, optionalText, text, type Input, type Product, type WorkspaceContext } from "./context.ts";
+import { sha256Text } from "./digest.ts";
 import type { ProductLineRegistry } from "./product-line.ts";
 
 interface ProposalSpec {
@@ -60,10 +61,14 @@ export function createProposalService(ctx: WorkspaceContext, registry: ProductLi
       let sourceText = optionalText(input, "sourceText") ?? "";
       let sourceRef = optionalText(input, "sourceRef") ?? "";
       let resolvedProjectId = projectId;
+      let baseRevisionId: string | null = null;
+      let sourceSha = "";
 
       if (documentId) {
         const doc = ctx.document(documentId);
         resolvedProjectId = doc.projectId;
+        baseRevisionId = doc.revisionId ?? null;
+        sourceSha = sha256Text(doc.body ?? "");
         if (!sourceText) sourceText = doc.body ?? "";
         if (!sourceRef) sourceRef = doc.title;
       }
@@ -102,9 +107,23 @@ export function createProposalService(ctx: WorkspaceContext, registry: ProductLi
       stmt(db, `
         INSERT INTO author_ai_proposals (
           id, project_id, document_id, kind, status, source_ref,
-          payload, provider, model, reserved, settled, usage, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 'inflight', ?, '{}', ?, ?, ?, 0, '[]', ?, ?);
-      `).run(id, resolvedProjectId, documentId, kind, sourceRef, provider, model, reserved, now, now);
+          payload, provider, model, reserved, settled, usage,
+          base_revision_id, source_sha256, origin, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'inflight', ?, '{}', ?, ?, ?, 0, '[]', ?, ?, 'ai-generate', ?, ?);
+      `).run(
+        id,
+        resolvedProjectId,
+        documentId,
+        kind,
+        sourceRef,
+        provider,
+        model,
+        reserved,
+        baseRevisionId,
+        sourceSha,
+        now,
+        now,
+      );
 
       return {
         id,
@@ -118,6 +137,7 @@ export function createProposalService(ctx: WorkspaceContext, registry: ProductLi
         disableThinking: true,
         projectId: resolvedProjectId,
         documentId,
+        baseRevisionId,
       };
     });
   }

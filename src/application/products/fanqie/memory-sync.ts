@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import type { MemorySyncStatus } from "../../../contracts/workspace-dto.ts";
 import { splitChapterParagraphs } from "../../../domain/shared/index.ts";
 import { stmt } from "../../../storage/index.ts";
+import { sha256Text } from "../../digest.ts";
 import type { WorkspaceContext } from "../../context.ts";
 
 export interface ParagraphDeltaResult {
@@ -10,9 +10,7 @@ export interface ParagraphDeltaResult {
   readonly changedParagraphCount: number;
 }
 
-export function sha256Text(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
-}
+export { sha256Text } from "../../digest.ts";
 
 function countOccurrences(haystack: string, needle: string): number {
   if (!haystack || !needle) return 0;

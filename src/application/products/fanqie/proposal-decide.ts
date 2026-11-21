@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { AiProposalDto, AiProposalKind } from "../../../contracts/workspace-dto.ts";
+import { ContractError } from "../../../contracts/index.ts";
+import type { AiProposalDto, AiProposalKind, ProposalOrigin } from "../../../contracts/workspace-dto.ts";
 import { stmt, syncChapterFts } from "../../../storage/index.ts";
 import {
   invalid,
@@ -10,6 +11,7 @@ import {
   type Input,
   type WorkspaceContext,
 } from "../../context.ts";
+import { sha256Text } from "../../digest.ts";
 import { commitFactBatch, commitFactSyncProposal, commitForeshadowBatch } from "./fact-sync.ts";
 import { commitArcPlanProposal } from "./controls.ts";
 import { insertObservationsBatch } from "./diagnostics.ts";
@@ -31,6 +33,52 @@ interface ProposalRow {
   readonly error: string | null;
   readonly createdAt: number;
   readonly updatedAt: number;
+  readonly baseRevisionId: string | null;
+  readonly sourceSha256: string;
+  readonly origin: ProposalOrigin;
+}
+
+const DRIFT_BOUND_KINDS: ReadonlySet<AiProposalKind> = new Set(["summary", "chapter_review", "fact_sync", "setting"]);
+
+type StaleCheck = "fresh" | "unpinned" | "not-bound";
+
+function staleError(row: ProposalRow, currentRevisionId: string | null): ContractError {
+  return new ContractError("gate.denied", {
+    action: "proposal.decide",
+    reason: "proposal-stale",
+    proposalId: row.id,
+    baseRevisionId: row.baseRevisionId,
+    currentRevisionId,
+  });
+}
+
+/**
+ * Refuses to decide a proposal whose chapter moved after generation.
+ *
+ * Only AI-generated, document-bound proposals are gated. Manual proposals
+ * (`origin = "author-ui"` or `"agent-tool"`) and legacy rows created before
+ * 2.3.0 (null base revision) stay decidable so an author is never locked out
+ * of an old inbox.
+ */
+function assertProposalFresh(ctx: WorkspaceContext, row: ProposalRow): StaleCheck {
+  if (row.origin !== "ai-generate") return "not-bound";
+  if (!DRIFT_BOUND_KINDS.has(row.kind)) return "not-bound";
+  if (!row.baseRevisionId || !row.documentId) return "unpinned";
+
+  let doc: ReturnType<WorkspaceContext["document"]>;
+  try {
+    doc = ctx.document(row.documentId);
+  } catch (error) {
+    if (error instanceof ContractError && error.code === "input.not_found") {
+      throw staleError(row, null);
+    }
+    throw error;
+  }
+
+  const current = doc.revisionId ?? null;
+  if (current === row.baseRevisionId) return "fresh";
+  if (row.sourceSha256 && sha256Text(doc.body ?? "") === row.sourceSha256) return "fresh";
+  throw staleError(row, current);
 }
 
 function parseProposalKind(raw: unknown): AiProposalKind {
@@ -67,25 +115,43 @@ export function createManualProposal(ctx: WorkspaceContext, input: Input): AiPro
   if (!input.payload || typeof input.payload !== "object" || Array.isArray(input.payload)) {
     invalid("payload", "object-required");
   }
+  const doc = documentId ? ctx.document(documentId) : null;
+  if (doc && projectId && doc.projectId !== projectId) invalid("projectId", "project-mismatch");
+  const resolvedProjectId = projectId ?? doc?.projectId ?? null;
+  const origin: ProposalOrigin = optionalText(input, "origin") === "agent-tool" ? "agent-tool" : "author-ui";
   const id = randomUUID();
   const now = Date.now();
   return ctx.atomic(() => {
     stmt(ctx.db, `
       INSERT INTO author_ai_proposals (
-        id, project_id, document_id, kind, status, source_ref, payload, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?);
-    `).run(id, projectId, documentId, kind, sourceRef, JSON.stringify(input.payload), now, now);
-    if (projectId) {
-      ctx.event(projectId, "setting", "proposal.created", { id, kind });
+        id, project_id, document_id, kind, status, source_ref, payload,
+        base_revision_id, source_sha256, origin, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?);
+    `).run(
+      id,
+      resolvedProjectId,
+      documentId,
+      kind,
+      sourceRef,
+      JSON.stringify(input.payload),
+      doc?.revisionId ?? null,
+      doc ? sha256Text(doc.body ?? "") : "",
+      origin,
+      now,
+      now,
+    );
+    if (resolvedProjectId) {
+      ctx.event(resolvedProjectId, "setting", "proposal.created", { id, kind });
     }
     return {
       id,
-      projectId,
+      projectId: resolvedProjectId,
       documentId,
       kind,
       status: "pending",
       sourceRef,
       payload: input.payload as Record<string, unknown>,
+      origin,
       provider: null,
       model: null,
       reserved: 0,
@@ -141,7 +207,8 @@ export function decideProposal(ctx: WorkspaceContext, input: Input) {
       stmt(ctx.db, `
         SELECT id, project_id AS projectId, document_id AS documentId, kind, status,
           source_ref AS sourceRef, payload, provider, model, reserved, settled, error,
-          created_at AS createdAt, updated_at AS updatedAt
+          created_at AS createdAt, updated_at AS updatedAt,
+          base_revision_id AS baseRevisionId, source_sha256 AS sourceSha256, origin
         FROM author_ai_proposals WHERE id = ?;
       `).get(proposalId),
       "ai-proposal",
@@ -156,7 +223,12 @@ export function decideProposal(ctx: WorkspaceContext, input: Input) {
       if (row.projectId) {
         ctx.event(row.projectId, "setting", "proposal.decided", { id: proposalId, kind: row.kind, status: "rejected" });
       }
-      return { id: proposalId, status: "rejected" as const };
+      return { id: proposalId, status: "rejected" as const, staleCheck: "not-checked" as const };
+    }
+
+    const staleCheck = assertProposalFresh(ctx, row);
+    if (staleCheck === "unpinned" && row.projectId) {
+      ctx.event(row.projectId, "setting", "proposal.decide.unpinned", { id: proposalId, kind: row.kind });
     }
 
     const basePayload = mapProposalRow(row).payload;
@@ -254,6 +326,6 @@ export function decideProposal(ctx: WorkspaceContext, input: Input) {
     }
     stmt(ctx.db, "UPDATE author_ai_proposals SET status = 'approved', payload = ?, updated_at = ? WHERE id = ?;")
       .run(JSON.stringify(edited), now, proposalId);
-    return { id: proposalId, status: "approved" as const, committed };
+    return { id: proposalId, status: "approved" as const, staleCheck, committed };
   });
 }

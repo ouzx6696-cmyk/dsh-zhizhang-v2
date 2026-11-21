@@ -173,6 +173,7 @@ export function createZhizhangAgentTools(workspace: AuthorWorkspace): readonly Z
       execute: (args) =>
         workspace.mutation("proposal.create", {
           kind: "fact_sync",
+          origin: "agent-tool",
           projectId: args.projectId,
           ...(typeof args.documentId === "string" ? { documentId: args.documentId } : {}),
           sourceRef: typeof args.title === "string" ? args.title : "伏笔提案",
@@ -211,6 +212,7 @@ export function createZhizhangAgentTools(workspace: AuthorWorkspace): readonly Z
       execute: (args) =>
         workspace.mutation("proposal.create", {
           kind: "technique",
+          origin: "agent-tool",
           projectId: args.projectId,
           sourceRef: typeof args.title === "string" ? args.title : "技法提案",
           payload: {

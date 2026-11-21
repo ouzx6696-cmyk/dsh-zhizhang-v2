@@ -529,6 +529,45 @@ test("DB-18 compactAutoSaveRevisions preserves protected & daily-latest revision
   assert.deepEqual(remaining, ["r-final", "r-old-3", "r-rec-1", "r-rec-2"]);
 });
 
+test("DB-18 compactAutoSaveRevisions only pins base revisions of pending proposals", (t) => {
+  const db = openDatabase(":memory:");
+  t.after(() => db.close());
+  initFullDb(db);
+
+  db.prepare("INSERT INTO author_projects (id, name, product) VALUES ('p1', '提案保护', 'fanqie');").run();
+  createDocument(db, "c1");
+
+  const dayMs = 86_400_000;
+  const now = 20 * dayMs + 5000;
+  const days = [6, 5, 4, 3];
+  const statuses = ["pending", "approved", "rejected", "failed"];
+  statuses.forEach((status, index) => {
+    const base = days[index] * dayMs;
+    const protectedRev = `r-${status}-base`;
+    const latestRev = `r-${status}-latest`;
+    appendRevision(db, { revisionId: protectedRev, documentId: "c1", body: status, createdAt: base + 100 });
+    appendRevision(db, { revisionId: latestRev, documentId: "c1", body: `${status}-latest`, createdAt: base + 200 });
+    db.prepare(`
+      INSERT INTO author_ai_proposals (id, project_id, document_id, kind, status, base_revision_id)
+      VALUES (?, 'p1', 'c1', 'fact_sync', ?, ?);
+    `).run(`prop-${status}`, status, protectedRev);
+  });
+  // Keep the document's current pointer off the daily-latest rows so the
+  // protected set is the only variable under test.
+  appendRevision(db, { revisionId: "r-current", documentId: "c1", body: "current", createdAt: now - 1000 });
+
+  const dry = compactAutoSaveRevisions(db, { nowMs: now, dryRun: true });
+  assert.equal(dry.deleted, 3, "the three non-pending bases must be eligible for deletion");
+  compactAutoSaveRevisions(db, { nowMs: now });
+
+  const remaining = db.prepare("SELECT revision_id FROM revisions ORDER BY revision_id ASC;").all()
+    .map((row) => row.revision_id);
+  assert.ok(remaining.includes("r-pending-base"), "a pending proposal must pin its base revision");
+  for (const status of ["approved", "rejected", "failed"]) {
+    assert.ok(!remaining.includes(`r-${status}-base`), `${status} proposals must not pin revisions forever`);
+  }
+});
+
 test("DB-03/19/25 shared per-project ProjectionStore folds once, zero write tx on 0 events, throttles/evicts checkpoints, and respects db_uuid & concern tolerance", (t) => {
   const db = openDatabase(":memory:");
   t.after(() => db.close());
