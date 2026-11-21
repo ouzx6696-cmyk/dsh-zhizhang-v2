@@ -66,9 +66,11 @@ import {
   unmountLibraryItem,
 } from "./fanqie/library.ts";
 import {
+  createForeshadow,
   handleContinuity,
   listForeshadows,
   listLore,
+  patchForeshadow,
   scanLoreConflicts,
   settingsPage,
   upsertForeshadow,
@@ -264,6 +266,8 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
     "lore.list": { scope: "project", handler: (ctx, input) => listLore(ctx, input) },
     "lore.conflicts": { scope: "project", handler: (ctx, input) => scanLoreConflicts(ctx, input) },
     "foreshadow.upsert": { scope: "project", handler: (ctx, input) => upsertForeshadow(ctx, input) },
+    "foreshadow.create": { scope: "project", handler: (ctx, input) => createForeshadow(ctx, input) },
+    "foreshadow.patch": { scope: "project", handler: (ctx, input) => patchForeshadow(ctx, input) },
     "foreshadow.list": { scope: "project", handler: (ctx, input) => listForeshadows(ctx, input) },
     "deconstruct.save": { scope: "global", handler: (ctx, input) => saveDeconstruction(ctx, input) },
     "deconstruct.list": { scope: "global", handler: (ctx, input) => listDeconstructions(ctx, input) },

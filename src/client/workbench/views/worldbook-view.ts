@@ -100,7 +100,7 @@ export function createWorldbookView(container: HTMLElement, host: WorkbenchShell
           confirmLabel: "保存伏笔",
         });
         if (!title?.trim()) return;
-        await host.request("foreshadow.upsert", {
+        await host.request("foreshadow.create", {
           projectId,
           title: title.trim(),
           plantedChapterId: documentId || undefined,
@@ -260,15 +260,11 @@ export function createWorldbookView(container: HTMLElement, host: WorkbenchShell
           resolveBtn.type = "button";
           resolveBtn.onclick = () =>
             void host.perform(async () => {
-              await host.request("foreshadow.upsert", {
+              await host.request("foreshadow.patch", {
                 projectId,
                 id: fs.id,
-                title: fs.title,
-                factId: fs.factId ?? undefined,
-                plantedChapterId: fs.plantedChapterId ?? undefined,
-                resolvedChapterId: documentId || undefined,
                 status: "resolved",
-                note: fs.note,
+                resolvedChapterId: documentId || undefined,
               });
               await refresh();
             });

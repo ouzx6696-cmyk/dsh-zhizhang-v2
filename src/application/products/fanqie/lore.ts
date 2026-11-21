@@ -3,6 +3,7 @@ import type { ForeshadowDto, LoreConflictDto, LoreEntryDto } from "../../../cont
 import { ContractError } from "../../../contracts/index.ts";
 import {
   assertForeshadowStatus,
+  assertForeshadowTransition,
   detectLoreConflicts,
   LORE_CATEGORIES,
   mergeFactVersion,
@@ -10,6 +11,7 @@ import {
   planReorder,
   settingsAt,
   type ChapterOutlineFacts,
+  type ForeshadowState,
   type LoreForeshadowEntry,
   type SettingFact,
 } from "../../../domain/fanqie/index.ts";
@@ -397,7 +399,19 @@ export function listForeshadows(ctx: WorkspaceContext, input: Input): Foreshadow
   return ctx.read(() => queryForeshadows(ctx, projectId, status));
 }
 
-export function upsertForeshadow(ctx: WorkspaceContext, input: Input): ForeshadowDto {
+const FORESHADOW_SELECT = `
+  id, project_id AS projectId, fact_id AS factId, title,
+  planted_chapter_id AS plantedChapterId, planted_point AS plantedPoint,
+  target_chapter_id AS targetChapterId, resolved_chapter_id AS resolvedChapterId,
+  status, note, updated_at AS updatedAt
+`;
+
+function readForeshadowRow(ctx: WorkspaceContext, id: string): ForeshadowDto | undefined {
+  return stmt(ctx.db, `SELECT ${FORESHADOW_SELECT} FROM author_foreshadows WHERE id = ?;`)
+    .get(id) as ForeshadowDto | undefined;
+}
+
+export function createForeshadow(ctx: WorkspaceContext, input: Input): ForeshadowDto {
   const projectId = text(input, "projectId");
   assertFanqieProject(ctx, projectId);
   const title = text(input, "title").trim();
@@ -411,6 +425,7 @@ export function upsertForeshadow(ctx: WorkspaceContext, input: Input): Foreshado
   const note = typeof input.note === "string" ? input.note.trim() : "";
 
   return ctx.atomic(() => {
+    if (readForeshadowRow(ctx, id)) invalid("id", "already-exists");
     if (plantedChapterId) assertChapterInProject(ctx, projectId, plantedChapterId, "plantedChapterId");
     if (targetChapterId) assertChapterInProject(ctx, projectId, targetChapterId, "targetChapterId");
     if (resolvedChapterId) assertChapterInProject(ctx, projectId, resolvedChapterId, "resolvedChapterId");
@@ -419,19 +434,21 @@ export function upsertForeshadow(ctx: WorkspaceContext, input: Input): Foreshado
       INSERT INTO author_foreshadows (
         id, project_id, fact_id, title, planted_chapter_id, planted_point,
         target_chapter_id, resolved_chapter_id, status, note, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (id) DO UPDATE SET
-        fact_id = excluded.fact_id,
-        title = excluded.title,
-        planted_chapter_id = excluded.planted_chapter_id,
-        planted_point = excluded.planted_point,
-        target_chapter_id = excluded.target_chapter_id,
-        resolved_chapter_id = excluded.resolved_chapter_id,
-        status = excluded.status,
-        note = excluded.note,
-        updated_at = excluded.updated_at;
-    `).run(id, projectId, factId, title, plantedChapterId, plantedPoint, targetChapterId, resolvedChapterId, status, note, updatedAt);
-    ctx.event(projectId, "setting", "foreshadow.updated", { id, status });
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    `).run(
+      id,
+      projectId,
+      factId,
+      title,
+      plantedChapterId,
+      plantedPoint,
+      targetChapterId,
+      resolvedChapterId,
+      status,
+      note,
+      updatedAt,
+    );
+    ctx.event(projectId, "setting", "foreshadow.created", { id, status });
     return {
       id,
       projectId,
@@ -446,6 +463,88 @@ export function upsertForeshadow(ctx: WorkspaceContext, input: Input): Foreshado
       updatedAt,
     };
   });
+}
+
+export function patchForeshadow(ctx: WorkspaceContext, input: Input): ForeshadowDto {
+  const id = text(input, "id");
+  const existing = requiredRow<ForeshadowDto>(readForeshadowRow(ctx, id), "foreshadow", id);
+  const requestedProject = optionalText(input, "projectId");
+  if (requestedProject && requestedProject !== existing.projectId) invalid("projectId", "project-mismatch");
+  const projectId = existing.projectId;
+
+  const status: ForeshadowState = input.status !== undefined
+    ? assertForeshadowStatus(input.status)
+    : existing.status;
+  // The domain table intentionally has no self-loops; a patch that only edits
+  // a note must not be treated as an illegal `planted → planted` transition.
+  if (status !== existing.status) {
+    assertForeshadowTransition(existing.status, status, { reopen: input.reopen === true });
+  }
+
+  const title = input.title !== undefined ? text(input, "title").trim() : existing.title;
+  const factId = input.factId !== undefined ? (optionalText(input, "factId") ?? null) : existing.factId;
+  const plantedChapterId = input.plantedChapterId !== undefined
+    ? (optionalText(input, "plantedChapterId") ?? null)
+    : existing.plantedChapterId;
+  const targetChapterId = input.targetChapterId !== undefined
+    ? (optionalText(input, "targetChapterId") ?? null)
+    : existing.targetChapterId;
+  const resolvedChapterId = input.resolvedChapterId !== undefined
+    ? (optionalText(input, "resolvedChapterId") ?? null)
+    : existing.resolvedChapterId;
+  const plantedPoint = input.plantedPoint !== undefined
+    ? Math.max(1, count(input, "plantedPoint"))
+    : existing.plantedPoint;
+  const note = typeof input.note === "string" ? input.note.trim() : existing.note;
+
+  return ctx.atomic(() => {
+    if (plantedChapterId) assertChapterInProject(ctx, projectId, plantedChapterId, "plantedChapterId");
+    if (targetChapterId) assertChapterInProject(ctx, projectId, targetChapterId, "targetChapterId");
+    if (resolvedChapterId) assertChapterInProject(ctx, projectId, resolvedChapterId, "resolvedChapterId");
+    const updatedAt = Date.now();
+    stmt(ctx.db, `
+      UPDATE author_foreshadows
+      SET fact_id = ?, title = ?, planted_chapter_id = ?, planted_point = ?,
+          target_chapter_id = ?, resolved_chapter_id = ?, status = ?, note = ?, updated_at = ?
+      WHERE id = ? AND project_id = ?;
+    `).run(
+      factId,
+      title,
+      plantedChapterId,
+      plantedPoint,
+      targetChapterId,
+      resolvedChapterId,
+      status,
+      note,
+      updatedAt,
+      id,
+      projectId,
+    );
+    ctx.event(projectId, "setting", "foreshadow.updated", { id, from: existing.status, to: status });
+    return {
+      id,
+      projectId,
+      factId,
+      title,
+      plantedChapterId,
+      plantedPoint,
+      targetChapterId,
+      resolvedChapterId,
+      status,
+      note,
+      updatedAt,
+    };
+  });
+}
+
+/**
+ * Backwards-compatible entry point: an existing id patches the row (preserving
+ * fields the caller did not send), a new id creates it.
+ */
+export function upsertForeshadow(ctx: WorkspaceContext, input: Input): ForeshadowDto {
+  const id = optionalText(input, "id");
+  if (id && readForeshadowRow(ctx, id)) return patchForeshadow(ctx, input);
+  return createForeshadow(ctx, input);
 }
 
 export function scanLoreConflicts(ctx: WorkspaceContext, input: Input): LoreConflictDto[] {

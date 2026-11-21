@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { normalizeLoreCategory, mergeFactVersion, type SettingFact } from "../../../domain/fanqie/index.ts";
+import {
+  assertForeshadowStatus,
+  assertForeshadowTransition,
+  mergeFactVersion,
+  normalizeLoreCategory,
+  type SettingFact,
+} from "../../../domain/fanqie/index.ts";
 import { anchor, pointAtOffset } from "../../../domain/shared/index.ts";
 import { stmt, syncChapterFts } from "../../../storage/index.ts";
 import {
@@ -13,8 +19,6 @@ import {
 import { materializeApprovedLore } from "./lore.ts";
 import { markChapterMemoryClean, syncChapterMemoryAndEntities } from "./memory-sync.ts";
 import { approvedFacts, assertFanqieProject } from "./shared.ts";
-
-const FORESHADOW_STATUSES = new Set(["proposed", "planted", "hinted", "resolved", "abandoned"]);
 
 function buildKnownFromMap(
   item: Input,
@@ -166,43 +170,50 @@ export function commitForeshadowBatch(
   const now = Date.now();
   items.forEach((fs, idx) => {
     if (selectedIndices && !selectedIndices.has(idx)) return;
-    const status = typeof fs.status === "string" && FORESHADOW_STATUSES.has(fs.status) ? fs.status : "planted";
+    const requested = fs.status === undefined || fs.status === null ? null : assertForeshadowStatus(fs.status);
     const explicitId = upsertExisting ? optionalText(fs, "id") : undefined;
     const title = upsertExisting ? (optionalText(fs, "title") ?? "") : text(fs, "title").trim();
     const factId = optionalText(fs, "factId") ?? null;
     const note = typeof fs.note === "string" ? fs.note.trim() : "";
     const existing = upsertExisting
       ? explicitId
-        ? (stmt(ctx.db, "SELECT id FROM author_foreshadows WHERE id = ? AND project_id = ?;")
-            .get(explicitId, projectId) as { id: string } | undefined)
+        ? (stmt(ctx.db, "SELECT id, status FROM author_foreshadows WHERE id = ? AND project_id = ?;")
+            .get(explicitId, projectId) as { id: string; status: string } | undefined)
         : title
           ? (stmt(ctx.db, `
-              SELECT id FROM author_foreshadows
+              SELECT id, status FROM author_foreshadows
               WHERE project_id = ? AND title = ? AND COALESCE(fact_id, '') = COALESCE(?, '');
-            `).get(projectId, title, factId) as { id: string } | undefined)
+            `).get(projectId, title, factId) as { id: string; status: string } | undefined)
           : undefined
       : undefined;
     const fsId = existing?.id ?? explicitId ?? randomUUID();
     if (existing) {
+      const previous = assertForeshadowStatus(existing.status);
+      const status = requested ?? previous;
+      if (status !== previous) {
+        assertForeshadowTransition(previous, status, { reopen: fs.reopen === true });
+      }
       stmt(ctx.db, `
         UPDATE author_foreshadows
         SET status = ?,
             note = CASE WHEN ? != '' THEN ? ELSE note END,
             resolved_chapter_id = CASE WHEN ? = 'resolved' THEN ? ELSE resolved_chapter_id END,
             updated_at = ?
-        WHERE id = ?;
-      `).run(status, note, note, status, chapterId, now, fsId);
+        WHERE id = ? AND project_id = ?;
+      `).run(status, note, note, status, chapterId, now, fsId, projectId);
+      ctx.event(projectId, "setting", "foreshadow.updated", { id: fsId, status, from: previous });
     } else if (title) {
+      const status = requested ?? "planted";
       stmt(ctx.db, `
         INSERT INTO author_foreshadows (
           id, project_id, fact_id, title, planted_chapter_id, planted_point,
           resolved_chapter_id, status, note, updated_at
         ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?);
       `).run(fsId, projectId, factId, title, chapterId, status === "resolved" ? chapterId : null, status, note, now);
+      ctx.event(projectId, "setting", "foreshadow.updated", { id: fsId, status, from: null });
     } else {
       return;
     }
-    ctx.event(projectId, "setting", "foreshadow.updated", { id: fsId, status });
     ids.push(fsId);
   });
   return ids;
