@@ -4,6 +4,7 @@ import type {
 } from "../../../contracts/workspace-dto.ts";
 import type { WorkbenchShellHost } from "../plugins/types.ts";
 import { el } from "../store.ts";
+import { createButton, createCard } from "../ui/primitives.ts";
 
 export function createIoView(container: HTMLElement, host: WorkbenchShellHost) {
   let lastExport: ProjectExportBundleDto | null = null;
@@ -33,46 +34,48 @@ export function createIoView(container: HTMLElement, host: WorkbenchShellHost) {
     container.append(header);
 
     // Export card
-    const exportCard = el("section", "", "panel-card");
-    exportCard.append(el("h2", "导出本书工程（Markdown 目录 + 结构化资产包）"));
+    const exportBody: HTMLElement[] = [];
     if (!project || project.product !== "fanqie") {
-      exportCard.append(el("p", "请先打开一个番茄连载项目即可导出整书工程。", "muted-copy"));
+      exportBody.push(el("p", "请先打开一个番茄连载项目即可导出整书工程。", "muted-copy"));
     } else {
       const actions = el("div", "", "actions");
-      const exportBundleBtn = el("button", "打包导出整书 JSON 资产包", "primary");
-      exportBundleBtn.type = "button";
-      exportBundleBtn.onclick = () =>
-        void host.perform(async () => {
-          const bundle = await host.request<ProjectExportBundleDto>("project.export_bundle", { projectId });
-          lastExport = bundle;
-          triggerDownload(`${project.name}-zhizhang-bundle.json`, JSON.stringify(bundle, null, 2));
-          host.notice(`已打包 ${bundle.files.length} 个文件`);
-          refresh();
-        });
-
-      const exportDiskBtn = el("button", "写入本地工作区目录（exports/）");
-      exportDiskBtn.type = "button";
-      exportDiskBtn.onclick = () =>
-        void host.perform(async () => {
-          const bundle = await host.request<ProjectExportBundleDto>("project.export_bundle", {
-            projectId,
-            writeToDisk: true,
-          });
-          lastExport = bundle;
-          host.notice(
-            bundle.writtenDirectory
-              ? `已导出到目录：${bundle.writtenDirectory}`
-              : "已生成导出包（当前预览环境未配置磁盘导出根路径，可下载 JSON 包）",
-          );
-          refresh();
-        });
-
-      actions.append(exportBundleBtn, exportDiskBtn);
-      exportCard.append(actions);
+      actions.append(
+        createButton({
+          label: "打包导出整书 JSON 资产包",
+          variant: "primary",
+          onClick: () =>
+            void host.perform(async () => {
+              const bundle = await host.request<ProjectExportBundleDto>("project.export_bundle", { projectId });
+              lastExport = bundle;
+              triggerDownload(`${project.name}-zhizhang-bundle.json`, JSON.stringify(bundle, null, 2));
+              host.notice(`已打包 ${bundle.files.length} 个文件`);
+              refresh();
+            }),
+        }),
+        createButton({
+          label: "写入本地工作区目录（exports/）",
+          variant: "secondary",
+          onClick: () =>
+            void host.perform(async () => {
+              const bundle = await host.request<ProjectExportBundleDto>("project.export_bundle", {
+                projectId,
+                writeToDisk: true,
+              });
+              lastExport = bundle;
+              host.notice(
+                bundle.writtenDirectory
+                  ? `已导出到目录：${bundle.writtenDirectory}`
+                  : "已生成导出包（当前预览环境未配置磁盘导出根路径，可下载 JSON 包）",
+              );
+              refresh();
+            }),
+        }),
+      );
+      exportBody.push(actions);
     }
 
     if (lastExport) {
-      exportCard.append(
+      exportBody.push(
         el(
           "p",
           `最近导出：${lastExport.projectName} · 共 ${lastExport.files.length} 个文件${lastExport.writtenDirectory ? ` · 目录 ${lastExport.writtenDirectory}` : ""}`,
@@ -83,22 +86,23 @@ export function createIoView(container: HTMLElement, host: WorkbenchShellHost) {
       for (const file of lastExport.files.slice(0, 30)) {
         list.append(el("li", `${file.path}（${file.content.length} 字符）`));
       }
-      exportCard.append(list);
+      exportBody.push(list);
     }
-    container.append(exportCard);
 
-    // Import card
-    const importCard = el("section", "", "panel-card");
-    importCard.append(
-      el("h2", "从本地文件夹或资产包导入"),
-      el("p", "支持选择本地小说目录（含卷/幕/章 `.md` 与可选 `zhizhang-project.json`）。已定稿章节（final）与已锁定设定会自动跳过保护。", "muted-copy"),
+    container.append(
+      createCard({
+        tag: "section",
+        variant: "default",
+        padding: "md",
+        title: "导出本书工程（Markdown 目录 + 结构化资产包）",
+        body: exportBody,
+      }),
     );
 
-    const dirLabel = el("label", "选择本地文件夹导入（Chrome / Edge / Safari）");
-    const dirInput = document.createElement("input");
-    dirInput.type = "file";
-    dirInput.multiple = true;
-    (dirInput as HTMLInputElement & { webkitdirectory: boolean }).webkitdirectory = true;
+    // Import card
+    const importBody: HTMLElement[] = [
+      el("p", "支持选择本地小说目录（含卷/幕/章 `.md` 与可选 `zhizhang-project.json`）。已定稿章节（final）与已锁定设定会自动跳过保护。", "muted-copy"),
+    ];
 
     const targetCheckLabel = el("label", "", "check");
     const mergeCurrentCheck = document.createElement("input");
@@ -106,6 +110,12 @@ export function createIoView(container: HTMLElement, host: WorkbenchShellHost) {
     mergeCurrentCheck.checked = Boolean(project && project.product === "fanqie");
     targetCheckLabel.append(mergeCurrentCheck, document.createTextNode("合并更新到当前打开的项目（取消勾选则新建独立项目）"));
 
+    const dirLabel = el("label", "选择本地文件夹导入（Chrome / Edge / Safari）", "ui-field");
+    const dirInput = document.createElement("input");
+    dirInput.type = "file";
+    dirInput.className = "ui-input";
+    dirInput.multiple = true;
+    (dirInput as HTMLInputElement & { webkitdirectory: boolean }).webkitdirectory = true;
     dirInput.onchange = () => {
       const selected = Array.from(dirInput.files ?? []);
       if (selected.length === 0) return;
@@ -130,11 +140,11 @@ export function createIoView(container: HTMLElement, host: WorkbenchShellHost) {
       });
     };
     dirLabel.append(dirInput);
-    importCard.append(targetCheckLabel, dirLabel);
 
-    const jsonLabel = el("label", "或选择导出的 `.json` 资产包文件导入");
+    const jsonLabel = el("label", "或选择导出的 `.json` 资产包文件导入", "ui-field");
     const jsonInput = document.createElement("input");
     jsonInput.type = "file";
+    jsonInput.className = "ui-input";
     jsonInput.accept = ".json,application/json";
     jsonInput.onchange = () => {
       const file = jsonInput.files?.[0];
@@ -154,11 +164,12 @@ export function createIoView(container: HTMLElement, host: WorkbenchShellHost) {
       });
     };
     jsonLabel.append(jsonInput);
-    importCard.append(jsonLabel);
+
+    importBody.push(targetCheckLabel, dirLabel, jsonLabel);
 
     if (lastImportSummary) {
       const s = lastImportSummary;
-      importCard.append(
+      importBody.push(
         el(
           "p",
           `导入汇总：新建卷 ${s.volumesCreated} · 幕 ${s.actsCreated} · 新建章 ${s.chaptersCreated} · 更新章 ${s.chaptersUpdated} · 已定稿跳过 ${s.chaptersSkippedLocked.length} · 设定待审提案 ${s.loreProposed} · 库条目 ${s.libraryImported}`,
@@ -167,7 +178,15 @@ export function createIoView(container: HTMLElement, host: WorkbenchShellHost) {
       );
     }
 
-    container.append(importCard);
+    container.append(
+      createCard({
+        tag: "section",
+        variant: "default",
+        padding: "md",
+        title: "从本地文件夹或资产包导入",
+        body: importBody,
+      }),
+    );
   }
 
   return { refresh };

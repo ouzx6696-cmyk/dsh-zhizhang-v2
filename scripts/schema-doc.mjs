@@ -1,34 +1,21 @@
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { createGenerationLedger } from "../src/storage/author-generation.ts";
-import { createAuthorSchema } from "../src/storage/author-schema.ts";
-import {
-  appliedMigrations,
-  createCommandSchema,
-  createDeliverySchema,
-  createEventLogSchema,
-  createFtsSchema,
-  createProjectionSchema,
-  openDatabase,
-} from "../src/storage/index.ts";
+import { openAuthorWorkspace } from "../src/application/author-workspace.ts";
+import { createProjectionSchema, openDatabase } from "../src/storage/index.ts";
 
 const FTS_SHADOW_PATTERN = /^fts_(?:chapters|lore|library)_(?:data|idx|content|docsize|config)$/;
 
 /**
- * Opens an in-memory SQLite database initialized with all Zhizhang V2.3
- * schemas and returns structured introspection metadata from `sqlite_master`.
+ * Opens an in-memory SQLite database initialized with all Zhizhang 3.0
+ * core + product-line + FTS5 schemas and returns structured introspection
+ * metadata from `sqlite_master`.
  */
 export function buildFreshSchemaSummary() {
   const db = openDatabase(":memory:");
   try {
-    createCommandSchema(db);
-    createEventLogSchema(db);
-    createDeliverySchema(db);
     createProjectionSchema(db);
-    createAuthorSchema(db);
-    createFtsSchema(db);
-    createGenerationLedger(db);
+    openAuthorWorkspace(db);
     return inspectDatabaseSchema(db);
   } finally {
     db.close();
@@ -39,7 +26,6 @@ export function buildFreshSchemaSummary() {
 export function inspectDatabaseSchema(db) {
   const schemaRow = db.prepare("SELECT value FROM meta WHERE key = 'schema';").get();
   const userVersionRow = db.prepare("PRAGMA user_version;").get();
-  const migrations = appliedMigrations(db);
 
   const allObjects = db
     .prepare(
@@ -111,7 +97,6 @@ export function inspectDatabaseSchema(db) {
   return {
     schemaId: schemaRow?.value ?? "unknown",
     userVersion: userVersionRow?.user_version ?? 0,
-    migrations,
     counts: {
       tables: tables.length,
       ftsTables: ftsTables.length,
@@ -128,16 +113,15 @@ export function inspectDatabaseSchema(db) {
   };
 }
 
-/** Renders deterministic Markdown documentation from a schema summary (DB-21). */
+/** Renders deterministic Markdown documentation from a schema summary. */
 export function renderSchemaMarkdown(summary) {
   const lines = [
     "# Zhizhang SQLite Schema Reference (Auto-Generated)",
     "",
-    `> Generated from \`sqlite_master\` by \`scripts/schema-doc.mjs\`. Do not hand-edit.`,
+    "> Generated from live `sqlite_master` by `scripts/schema-doc.mjs`. Do not hand-edit.",
     "",
     `- **Schema ID**: \`${summary.schemaId}\``,
     `- **SQLite \`user_version\`**: \`${summary.userVersion}\``,
-    `- **Migrations applied**: ${summary.migrations.length}`,
     "",
     "## Summary Counts",
     "",
@@ -149,10 +133,6 @@ export function renderSchemaMarkdown(summary) {
     `| Views | ${summary.counts.views} |`,
     `| Explicit Indexes | ${summary.counts.indexes} |`,
     `| Triggers | ${summary.counts.triggers} |`,
-    "",
-    "## Migrations",
-    "",
-    ...summary.migrations.map((id, i) => `${i + 1}. \`${id}\``),
     "",
     "## Tables",
     "",

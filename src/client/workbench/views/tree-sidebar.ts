@@ -292,6 +292,7 @@ export function createTreeSidebar(
     const metaText = [badge, chars, syncTag].filter(Boolean).join(" · ");
 
     const displayTitle = node.title || options?.formatUntitled?.({ id: node.id, title: node.title }) || "未命名稿件";
+    button.title = metaText ? `${displayTitle} · ${metaText}` : displayTitle;
     button.append(el("span", displayTitle, "doc-nav-title"));
     if (metaText) {
       button.append(el("span", metaText, "doc-nav-meta tabular"));
@@ -300,7 +301,7 @@ export function createTreeSidebar(
   }
 
   const virtualList = createVirtualList<FlatTreeNode>(container, {
-    rowHeight: 36,
+    rowHeight: 48,
     overscan: 2,
     directThreshold: 40,
     emptyText: "暂无匹配章节或稿件，请先新建。",

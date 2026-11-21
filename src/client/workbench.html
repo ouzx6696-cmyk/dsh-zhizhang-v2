@@ -5,49 +5,55 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>织章工作台</title>
+  <meta name="description" content="Author-controlled Fanqie and Toutiao writing workbench for DeepSeek Harness">
+  <meta property="og:title" content="织章工作台">
+  <meta property="og:description" content="Author-controlled Fanqie and Toutiao writing workbench for DeepSeek Harness">
   <link rel="stylesheet" href="./workbench.css">
   <script src="./workbench/main.js" type="module"></script>
 </head>
 <body>
-  <header class="top">
-    <a href="./workbench" class="brand">织章工作台</a>
-    <nav class="top-nav" aria-label="工作区视图控制">
+  <header class="top ui-navbar" data-ui="navbar">
+    <div class="top-left">
+      <a href="./workbench" class="brand">织章</a>
+      <span class="top-sep" aria-hidden="true">/</span>
       <span id="breadcrumb" class="breadcrumb">未选择项目</span>
-      <div class="segmented workspace-views" role="tablist" aria-label="主工作区视图">
-        <button type="button" data-workspace-view="writing" aria-selected="true" class="active">写作</button>
-        <button type="button" data-workspace-view="outline" aria-selected="false">卷幕大纲</button>
-        <button type="button" data-workspace-view="worldbook" aria-selected="false">设定库</button>
-        <button type="button" data-workspace-view="deconstruct" aria-selected="false">拆书库</button>
-        <button type="button" data-workspace-view="techniques" aria-selected="false">技法卡</button>
-        <button type="button" data-workspace-view="io" aria-selected="false">导入导出</button>
+    </div>
+    <nav class="top-center" aria-label="工作区视图控制">
+      <div class="segmented workspace-views ui-navbar-tabs" role="tablist" aria-label="主工作区视图">
+        <button type="button" class="ui-navbar-tab active" data-ui="navbar-tab" data-workspace-view="writing" aria-selected="true">写作</button>
+        <button type="button" class="ui-navbar-tab" data-ui="navbar-tab" data-workspace-view="outline" aria-selected="false">卷幕大纲</button>
+        <button type="button" class="ui-navbar-tab" data-ui="navbar-tab" data-workspace-view="worldbook" aria-selected="false">设定库</button>
+        <button type="button" class="ui-navbar-tab" data-ui="navbar-tab" data-workspace-view="deconstruct" aria-selected="false">拆书库</button>
+        <button type="button" class="ui-navbar-tab" data-ui="navbar-tab" data-workspace-view="techniques" aria-selected="false">技法卡</button>
+        <button type="button" class="ui-navbar-tab" data-ui="navbar-tab" data-workspace-view="io" aria-selected="false">导入导出</button>
       </div>
-      <button id="quick-jump" type="button" class="nav-toggle" title="快速跳转 (Ctrl/Cmd + K)">跳转</button>
-      <button id="global-search" type="button" class="nav-toggle" title="全书检索 (Ctrl/Cmd + Shift + F)">检索</button>
-      <button id="navigation-toggle" type="button" class="nav-toggle" aria-pressed="true">目录</button>
-      <button id="pipeline-toggle" type="button" class="nav-toggle" aria-pressed="true">流程</button>
-      <button id="theme-toggle" type="button" class="nav-toggle">深色</button>
     </nav>
     <div class="top-actions">
-      <button id="save" type="button" class="primary" hidden>保存正文</button>
+      <button id="quick-jump" type="button" class="ui-btn ui-btn--ghost ui-btn--sm nav-toggle" data-ui="button" title="快速跳转 (Ctrl/Cmd + K)">跳转</button>
+      <button id="global-search" type="button" class="ui-btn ui-btn--ghost ui-btn--sm nav-toggle" data-ui="button" title="全书检索 (Ctrl/Cmd + Shift + F)">检索</button>
+      <button id="navigation-toggle" type="button" class="ui-btn ui-btn--ghost ui-btn--sm nav-toggle" data-ui="button" aria-pressed="true">目录</button>
+      <button id="pipeline-toggle" type="button" class="ui-btn ui-btn--ghost ui-btn--sm nav-toggle" data-ui="button" aria-pressed="true">流程</button>
+      <button id="theme-toggle" type="button" class="ui-btn ui-btn--ghost ui-btn--sm nav-toggle" data-ui="button">外观</button>
+      <button id="save" type="button" class="ui-btn ui-btn--primary ui-btn--md primary" data-ui="button" hidden>保存正文</button>
     </div>
   </header>
 
   <div class="layout" id="layout">
     <aside aria-label="目录" id="navigation" class="sidebar sidebar-left">
       <div class="sidebar-block">
-        <label for="projects" class="field-label">项目</label>
-        <select id="projects"><option value="">选择项目</option></select>
+        <label for="projects" class="field-label ui-field-label">项目</label>
+        <select id="projects" class="ui-input ui-select" data-ui="input"><option value="">选择项目</option></select>
         <details class="disclosure">
           <summary>新建项目</summary>
           <form id="new-project" class="stack-form">
-            <label>项目名称<input name="name" required maxlength="120" placeholder="例如：长风卷 / 产业观察"></label>
+            <label>项目名称<input class="ui-input" data-ui="input" name="name" required maxlength="120" placeholder="例如：长风卷 / 产业观察"></label>
             <label>产品线
-              <select name="product">
+              <select class="ui-input ui-select" data-ui="input" name="product">
                 <option value="fanqie">番茄连载</option>
                 <option value="toutiao">头条创作</option>
               </select>
             </label>
-            <button type="submit" class="primary">创建项目</button>
+            <button type="submit" class="ui-btn ui-btn--primary ui-btn--md primary" data-ui="button">创建项目</button>
           </form>
         </details>
       </div>
@@ -55,10 +61,10 @@
       <div id="document-tools" class="sidebar-block" hidden>
         <h2 class="section-heading">稿件目录</h2>
         <div id="tree-toolbar" class="tree-toolbar" hidden>
-          <input id="tree-filter" type="search" placeholder="筛选章名或摘要…" aria-label="筛选章节">
+          <input id="tree-filter" class="ui-input" data-ui="input" type="search" placeholder="筛选章名或摘要…" aria-label="筛选章节">
           <div class="actions">
-            <button id="tree-new-volume" type="button" class="notice-dismiss">+ 卷</button>
-            <button id="tree-open-outline" type="button" class="notice-dismiss">管理卷幕</button>
+            <button id="tree-new-volume" type="button" class="ui-btn ui-btn--secondary ui-btn--sm notice-dismiss" data-ui="button">+ 卷</button>
+            <button id="tree-open-outline" type="button" class="ui-btn ui-btn--secondary ui-btn--sm notice-dismiss" data-ui="button">管理卷幕</button>
           </div>
         </div>
         <nav id="documents" class="doc-list" aria-label="稿件列表"></nav>
@@ -194,7 +200,7 @@
           <button type="button" role="tab" data-pipeline-tab="workflow" aria-selected="true" class="active">流转</button>
           <button type="button" role="tab" data-pipeline-tab="planning" aria-selected="false">规划</button>
           <button type="button" role="tab" id="tab-continuity" data-pipeline-tab="continuity" aria-selected="false">设定</button>
-          <button type="button" role="tab" data-pipeline-tab="runs" aria-selected="false">候选</button>
+          <button type="button" role="tab" data-pipeline-tab="runs" aria-selected="false">作业</button>
         </div>
 
         <section data-pipeline-panel="workflow" class="pipeline-panel">
@@ -368,6 +374,9 @@
               <button type="submit">导入候选稿</button>
             </form>
           </div>
+
+          <hr class="hairline">
+          <div id="job-center" class="job-center"></div>
         </section>
       </div>
     </aside>

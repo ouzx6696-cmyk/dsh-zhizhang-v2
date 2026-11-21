@@ -1,34 +1,25 @@
 {
   "name": "@zhizhang/dsh-workbench",
-  "version": "2.2.0",
+  "version": "3.0.0",
   "private": true,
   "description": "Author-controlled Fanqie and Toutiao workbench for DeepSeek Harness",
   "type": "module",
   "engines": {
-    "node": ">=24.15.0",
-    "npm": ">=11.0.0"
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
   },
   "scripts": {
     "check": "tsc --project tsconfig.json --noEmit && tsc --project tsconfig.client.json --noEmit",
+    "lint": "npm run check",
     "build": "tsc --project tsconfig.build.json && tsc --project tsconfig.client.json",
-    "preflight": "node scripts/preflight.mjs",
-    "deploy:touch": "node scripts/deploy.mjs --touch-only",
-    "dev": "node scripts/dev-server.mjs",
+    "dev": "npm run build && node scripts/dev-server.mjs",
+    "start": "node scripts/dev-server.mjs",
     "docs:schema": "node scripts/schema-doc.mjs --write docs/schema.md",
-    "migrate:evidence-point": "node scripts/evidence-point-migrate.mjs",
-    "test": "node --test \"test/*-d02.test.mjs\" \"test/*-w02.test.mjs\" \"test/*-v2.test.mjs\" \"test/*-v23.test.mjs\" test/smoke.test.mjs",
-    "test:contracts": "node --test \"test/*-d02.test.mjs\" \"test/*-w02.test.mjs\"",
-    "test:v2": "node --test \"test/*-v2.test.mjs\" test/smoke.test.mjs",
-    "test:v23": "node --test \"test/*-v23.test.mjs\"",
-    "test:host": "node --test test/host-plugin-v2.test.mjs test/generation-v2.test.mjs test/backup-v2.test.mjs",
-    "test:client": "node --test test/client-v2.test.mjs",
-    "test:arch": "node --test test/smoke.test.mjs test/refactor-v2.test.mjs",
-    "test:evidence": "node --test \"test/*-?01.test.mjs\"",
-    "test:all": "node --test \"test/*.test.mjs\"",
-    "test:model": "node scripts/model-check.mjs",
-    "test:bench": "node scripts/workspace-bench.mjs",
-    "test:browser": "node scripts/browser-check.mjs",
-    "verify": "npm run check && npm test"
+    "test": "node --test \"test/*.test.mjs\"",
+    "verify": "npm run check && npm test",
+    "bench": "node scripts/workspace-bench.mjs && node scripts/db-bench.mjs",
+    "preflight": "node scripts/preflight.mjs",
+    "deploy:touch": "node scripts/deploy.mjs --touch-only"
   },
   "devDependencies": {
     "typescript": "5.8.3"

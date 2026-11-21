@@ -7,6 +7,30 @@ import type {
 } from "../../../contracts/workspace-dto.ts";
 import type { WorkbenchShellHost } from "../plugins/types.ts";
 import { el } from "../store.ts";
+import { createButton, createCard, createInput } from "../ui/primitives.ts";
+
+const TECHNIQUE_CATEGORIES = [
+  { value: "opening", label: "开篇" },
+  { value: "hook", label: "钩子" },
+  { value: "conflict", label: "冲突" },
+  { value: "dialogue", label: "对话" },
+  { value: "foreshadow", label: "伏笔" },
+  { value: "pacing", label: "节奏" },
+  { value: "cliffhanger", label: "章末断章" },
+  { value: "narrative", label: "叙事通用" },
+] as const;
+
+function createCheckboxField(name: string, labelText: string): HTMLLabelElement {
+  const label = document.createElement("label");
+  label.className = "check";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.name = name;
+  const text = document.createElement("span");
+  text.textContent = labelText;
+  label.append(checkbox, text);
+  return label;
+}
 
 export function createLibraryView(
   container: HTMLElement,
@@ -61,115 +85,196 @@ export function createLibraryView(
     const toolbar = el("div", "", "actions");
     const seg = el("div", "", "segmented");
     for (const [id, label] of [["all", "全部有效"], ["global", "全局库"], ["project", "本书专属/覆写"]] as const) {
-      const btn = el("button", label, scopeFilter === id ? "active" : undefined);
-      btn.type = "button";
-      btn.onclick = () => {
-        scopeFilter = id;
-        void host.perform(refresh);
-      };
-      seg.append(btn);
+      seg.append(
+        createButton({
+          label,
+          variant: "ghost",
+          size: "sm",
+          active: scopeFilter === id,
+          pressed: scopeFilter === id,
+          onClick: () => {
+            scopeFilter = id;
+            void host.perform(refresh);
+          },
+        }),
+      );
     }
     toolbar.append(seg);
     if (kind === "techniques") {
-      const importSkillBtn = el("button", "导入 SKILL.md");
-      importSkillBtn.type = "button";
-      importSkillBtn.onclick = () =>
-        void host.perform(async () => {
-          const skillMd = await host.modal.prompt({
-            title: "导入标准 SKILL.md（纯提示词沙箱）",
-            message: "请粘贴 SKILL.md 全文。导入前将自动校验大小（≤ 128 KiB）、剥离脚本/Hook/工具声明并展示预览。",
-            label: "SKILL.md 原文",
-            placeholder: "---\nname: 去AI味写法\nstage_bindings: [write, deslop]\n---\n\n...",
-            confirmLabel: "沙箱解析预览",
-          });
-          if (!skillMd?.trim()) return;
-          const targetScope = scopeFilter === "project" && projectId ? "project" : "global";
-          const preview = await host.request<SkillImportPreviewDto>("skill.import", {
-            skillMd,
-            preview: true,
-            scope: targetScope,
-            ...(targetScope === "project" && projectId ? { projectId } : {}),
-          });
-          const details: string[] = [
-            `标题：${preview.title}`,
-            `适用阶段：${preview.stageBindings.join(" / ") || "write"}`,
-            preview.strippedCapabilities.length > 0
-              ? `已自动剥离危险/非提示词字段：${preview.strippedCapabilities.join("、")}`
-              : "未检出需剥离的脚本/Hook/工具字段",
-            ...preview.warnings.map((w) => `提示：${w}`),
-            `正文字数摘要：${preview.rawPreview.slice(0, 140).replace(/\s+/gu, " ")}`,
-          ];
-          const confirmed = await host.modal.confirm({
-            title: "确认导入标准 SKILL.md（沙箱预览）",
-            message: `将以「${targetScope === "global" ? "全局共享" : "本书专属"}」纯提示词 Skill 入库，确认继续？`,
-            details,
-            confirmLabel: "确认入库",
-          });
-          if (!confirmed) return;
-          await host.request("skill.import", {
-            skillMd,
-            preview: false,
-            scope: targetScope,
-            ...(targetScope === "project" && projectId ? { projectId } : {}),
-          });
-          host.notice(`Skill「${preview.title}」已通过沙箱导入`);
-          await refresh();
-        });
-      toolbar.append(importSkillBtn);
+      toolbar.append(
+        createButton({
+          label: "导入 SKILL.md",
+          variant: "secondary",
+          size: "sm",
+          onClick: () =>
+            void host.perform(async () => {
+              const skillMd = await host.modal.prompt({
+                title: "导入标准 SKILL.md（纯提示词沙箱）",
+                message: "请粘贴 SKILL.md 全文。导入前将自动校验大小（≤ 128 KiB）、剥离脚本/Hook/工具声明并展示预览。",
+                label: "SKILL.md 原文",
+                placeholder: "---\nname: 去AI味写法\nstage_bindings: [write, deslop]\n---\n\n...",
+                confirmLabel: "沙箱解析预览",
+              });
+              if (!skillMd?.trim()) return;
+              const targetScope = scopeFilter === "project" && projectId ? "project" : "global";
+              const preview = await host.request<SkillImportPreviewDto>("skill.import", {
+                skillMd,
+                preview: true,
+                scope: targetScope,
+                ...(targetScope === "project" && projectId ? { projectId } : {}),
+              });
+              const details: string[] = [
+                `标题：${preview.title}`,
+                `适用阶段：${preview.stageBindings.join(" / ") || "write"}`,
+                preview.strippedCapabilities.length > 0
+                  ? `已自动剥离危险/非提示词字段：${preview.strippedCapabilities.join("、")}`
+                  : "未检出需剥离的脚本/Hook/工具字段",
+                ...preview.warnings.map((w) => `提示：${w}`),
+                `正文字数摘要：${preview.rawPreview.slice(0, 140).replace(/\s+/gu, " ")}`,
+              ];
+              const confirmed = await host.modal.confirm({
+                title: "确认导入标准 SKILL.md（沙箱预览）",
+                message: `将以「${targetScope === "global" ? "全局共享" : "本书专属"}」纯提示词 Skill 入库，确认继续？`,
+                details,
+                confirmLabel: "确认入库",
+              });
+              if (!confirmed) return;
+              await host.request("skill.import", {
+                skillMd,
+                preview: false,
+                scope: targetScope,
+                ...(targetScope === "project" && projectId ? { projectId } : {}),
+              });
+              host.notice(`Skill「${preview.title}」已通过沙箱导入`);
+              await refresh();
+            }),
+        }),
+      );
     }
     header.append(left, toolbar);
     container.append(header);
 
     // Pending AI proposals
     if (proposals.length > 0) {
-      const propBox = el("section", "", "panel-card");
-      propBox.append(el("h2", `待作者确认的 AI ${kind === "deconstruct" ? "拆书" : "技法"}提案（${proposals.length}）`));
+      const proposalRows: HTMLElement[] = [];
       for (const prop of proposals) {
-        const row = el("div", "", "proposal-row");
-        row.append(el("pre", JSON.stringify(prop.payload, null, 2), "server-body-preview"));
         const actions = el("div", "", "actions");
-        const approveBtn = el("button", "确认入库", "primary");
-        approveBtn.type = "button";
-        approveBtn.onclick = () =>
-          void host.perform(async () => {
-            await host.request("proposal.decide", { proposalId: prop.id, accept: true });
-            host.notice("提案已入库生效");
-            await refresh();
-          });
-        const rejectBtn = el("button", "拒绝");
-        rejectBtn.type = "button";
-        rejectBtn.onclick = () =>
-          void host.perform(async () => {
-            await host.request("proposal.decide", { proposalId: prop.id, accept: false });
-            await refresh();
-          });
-        actions.append(approveBtn, rejectBtn);
-        row.append(actions);
-        propBox.append(row);
+        actions.append(
+          createButton({
+            label: "确认入库",
+            variant: "primary",
+            size: "sm",
+            onClick: () =>
+              void host.perform(async () => {
+                await host.request("proposal.decide", { proposalId: prop.id, accept: true });
+                host.notice("提案已入库生效");
+                await refresh();
+              }),
+          }),
+          createButton({
+            label: "拒绝",
+            variant: "secondary",
+            size: "sm",
+            onClick: () =>
+              void host.perform(async () => {
+                await host.request("proposal.decide", { proposalId: prop.id, accept: false });
+                await refresh();
+              }),
+          }),
+        );
+        const row = el("div", "", "proposal-row");
+        row.append(el("pre", JSON.stringify(prop.payload, null, 2), "server-body-preview"), actions);
+        proposalRows.push(row);
       }
-      container.append(propBox);
+      container.append(
+        createCard({
+          tag: "section",
+          variant: "elevated",
+          padding: "md",
+          title: `待作者确认的 AI ${kind === "deconstruct" ? "拆书" : "技法"}提案（${proposals.length}）`,
+          body: proposalRows,
+        }),
+      );
     }
 
-    // Create / Save Form
-    const formCard = el("section", "", "panel-card");
+    // Create / Save Form (safe DOM construction via unified Input + Button + Card)
     const form = document.createElement("form");
     form.className = "stack-form";
 
     if (kind === "deconstruct") {
-      formCard.append(el("h2", "新增拆书样本"));
-      form.innerHTML = `
-        <label>样本标题<input name="title" required placeholder="例如：黄金三章开篇退婚冲突"></label>
-        <label>出处书名<input name="sourceBook" placeholder="例：《某某传》"></label>
-        <label>题材 / 节奏（快爽/稳推/慢燃）<input name="pacing" placeholder="快爽"></label>
-        <label>标签（逗号分隔）<input name="tags" placeholder="退婚, 反转, 黄金三章"></label>
-        <label>样本原文片段<textarea name="excerpt" rows="4" required></textarea></label>
-        <label>开篇钩子分析<textarea name="hookAnalysis" rows="2"></textarea></label>
-        <label>冲突节拍拆解<textarea name="conflictBeats" rows="2"></textarea></label>
-        <label>爽点与情绪节奏<textarea name="payoffRhythm" rows="2"></textarea></label>
-        <label>文笔与章法批注<textarea name="proseNotes" rows="2"></textarea></label>
-        <label class="check"><input name="projectOnly" type="checkbox">仅存为当前项目专属（不进全局库）</label>
-        <button type="submit" class="primary">保存到拆书库</button>
-      `;
+      const titleField = createInput({
+        label: "样本标题",
+        name: "title",
+        required: true,
+        placeholder: "例如：黄金三章开篇退婚冲突",
+      });
+      const sourceBookField = createInput({
+        label: "出处书名",
+        name: "sourceBook",
+        placeholder: "例：《某某传》",
+      });
+      const pacingField = createInput({
+        label: "题材 / 节奏（快爽/稳推/慢燃）",
+        name: "pacing",
+        placeholder: "快爽",
+      });
+      const tagsField = createInput({
+        label: "标签（逗号分隔）",
+        name: "tags",
+        placeholder: "退婚, 反转, 黄金三章",
+      });
+      const excerptField = createInput({
+        kind: "textarea",
+        label: "样本原文片段",
+        name: "excerpt",
+        rows: 4,
+        required: true,
+      });
+      const hookField = createInput({
+        kind: "textarea",
+        label: "开篇钩子分析",
+        name: "hookAnalysis",
+        rows: 2,
+      });
+      const conflictField = createInput({
+        kind: "textarea",
+        label: "冲突节拍拆解",
+        name: "conflictBeats",
+        rows: 2,
+      });
+      const payoffField = createInput({
+        kind: "textarea",
+        label: "爽点与情绪节奏",
+        name: "payoffRhythm",
+        rows: 2,
+      });
+      const proseField = createInput({
+        kind: "textarea",
+        label: "文笔与章法批注",
+        name: "proseNotes",
+        rows: 2,
+      });
+      const projectOnlyCheck = createCheckboxField("projectOnly", "仅存为当前项目专属（不进全局库）");
+      const submitBtn = createButton({
+        label: "保存到拆书库",
+        variant: "primary",
+        type: "submit",
+      });
+
+      form.append(
+        titleField.root,
+        sourceBookField.root,
+        pacingField.root,
+        tagsField.root,
+        excerptField.root,
+        hookField.root,
+        conflictField.root,
+        payoffField.root,
+        proseField.root,
+        projectOnlyCheck,
+        submitBtn,
+      );
+
       form.onsubmit = (e) => {
         e.preventDefault();
         const fd = new FormData(form);
@@ -193,25 +298,85 @@ export function createLibraryView(
           await refresh();
         });
       };
+
+      container.append(
+        createCard({
+          tag: "section",
+          variant: "default",
+          padding: "md",
+          title: "新增拆书样本",
+          body: form,
+        }),
+      );
     } else {
-      formCard.append(el("h2", "新增写作技法卡片"));
-      form.innerHTML = `
-        <label>技法卡名称<input name="title" required placeholder="例如：三段式信息差反转"></label>
-        <label>分类<select name="category">
-          <option value="opening">开篇</option><option value="hook">钩子</option>
-          <option value="conflict">冲突</option><option value="dialogue">对话</option>
-          <option value="foreshadow">伏笔</option><option value="pacing">节奏</option>
-          <option value="cliffhanger">章末断章</option><option value="narrative" selected>叙事通用</option>
-        </select></label>
-        <label>适用节奏（快爽/稳推/慢燃，可留空）<input name="pacing" placeholder="快爽"></label>
-        <label>场景标签（逗号分隔）<input name="sceneTags" placeholder="打脸, 揭秘, 高潮"></label>
-        <label>触发条件<input name="triggerWhen" placeholder="主角握有对手未知的底牌时"></label>
-        <label>执行步骤<textarea name="executionSteps" rows="3" required placeholder="1. 先放对手嚣张立flag；2. 给配角反应镜头；3. 一句亮底牌收尾"></textarea></label>
-        <label>关键约束<textarea name="constraints" rows="2"></textarea></label>
-        <label>禁忌反例<textarea name="antiPatterns" rows="2"></textarea></label>
-        <label class="check"><input name="projectOnly" type="checkbox">仅存为当前项目专属（不进全局库）</label>
-        <button type="submit" class="primary">保存技法卡片</button>
-      `;
+      const titleField = createInput({
+        label: "技法卡名称",
+        name: "title",
+        required: true,
+        placeholder: "例如：三段式信息差反转",
+      });
+      const categoryField = createInput({
+        kind: "select",
+        label: "分类",
+        name: "category",
+        value: "narrative",
+        options: TECHNIQUE_CATEGORIES,
+      });
+      const pacingField = createInput({
+        label: "适用节奏（快爽/稳推/慢燃，可留空）",
+        name: "pacing",
+        placeholder: "快爽",
+      });
+      const sceneTagsField = createInput({
+        label: "场景标签（逗号分隔）",
+        name: "sceneTags",
+        placeholder: "打脸, 揭秘, 高潮",
+      });
+      const triggerField = createInput({
+        label: "触发条件",
+        name: "triggerWhen",
+        placeholder: "主角握有对手未知的底牌时",
+      });
+      const stepsField = createInput({
+        kind: "textarea",
+        label: "执行步骤",
+        name: "executionSteps",
+        rows: 3,
+        required: true,
+        placeholder: "1. 先放对手嚣张立flag；2. 给配角反应镜头；3. 一句亮底牌收尾",
+      });
+      const constraintsField = createInput({
+        kind: "textarea",
+        label: "关键约束",
+        name: "constraints",
+        rows: 2,
+      });
+      const antiPatternsField = createInput({
+        kind: "textarea",
+        label: "禁忌反例",
+        name: "antiPatterns",
+        rows: 2,
+      });
+      const projectOnlyCheck = createCheckboxField("projectOnly", "仅存为当前项目专属（不进全局库）");
+      const submitBtn = createButton({
+        label: "保存技法卡片",
+        variant: "primary",
+        type: "submit",
+      });
+
+      form.append(
+        titleField.root,
+        categoryField.root,
+        pacingField.root,
+        sceneTagsField.root,
+        triggerField.root,
+        stepsField.root,
+        constraintsField.root,
+        antiPatternsField.root,
+        projectOnlyCheck,
+        submitBtn,
+      );
+
       form.onsubmit = (e) => {
         e.preventDefault();
         const fd = new FormData(form);
@@ -230,40 +395,51 @@ export function createLibraryView(
             antiPatterns: String(fd.get("antiPatterns") ?? ""),
           });
           form.reset();
+          categoryField.setValue("narrative");
           host.notice("技法卡片已保存");
           await refresh();
         });
       };
+
+      container.append(
+        createCard({
+          tag: "section",
+          variant: "default",
+          padding: "md",
+          title: "新增写作技法卡片",
+          body: form,
+        }),
+      );
     }
-    formCard.append(form);
-    container.append(formCard);
 
     // List Section
-    const listCard = el("section", "", "panel-card");
     const items = kind === "deconstruct" ? deconstructions : techniques;
-    listCard.append(el("h2", `已入库条目（${items.length}）`));
+    const listBody: HTMLElement[] = [];
     if (items.length === 0) {
-      listCard.append(el("p", "暂无条目，请先新增或通过本地导入包导入。", "muted-copy"));
+      listBody.push(el("p", "暂无条目，请先新增或通过本地导入包导入。", "muted-copy"));
     } else {
       for (const item of items) {
-        const card = el("article", "", "setting-item");
         const scopeBadge = item.overrideOfId ? "本书覆写全局" : item.scope === "global" ? "全局共享" : "本书专属";
         const skillTag = kind === "techniques" && (item as TechniqueCardDto).assetKind === "skill" ? " · [Skill]" : "";
-        card.append(el("p", `${item.title} · [${scopeBadge}]${skillTag}${item.pacing ? ` · ${item.pacing}` : ""}`, "setting-title"));
+        const eyebrow = `[${scopeBadge}]${skillTag}${item.pacing ? ` · ${item.pacing}` : ""}`;
+        const itemBody: HTMLElement[] = [];
+
         if (kind === "deconstruct") {
           const dec = item as DeconstructionDto;
-          card.append(
-            el("p", [dec.sourceBook && `出处《${dec.sourceBook}》`, dec.hookAnalysis, dec.conflictBeats].filter(Boolean).join(" · "), "setting-meta"),
-            el("p", dec.excerpt.slice(0, 180) + (dec.excerpt.length > 180 ? "…" : "")),
-          );
+          const metaLine = [dec.sourceBook && `出处《${dec.sourceBook}》`, dec.hookAnalysis, dec.conflictBeats]
+            .filter(Boolean)
+            .join(" · ");
+          if (metaLine) itemBody.push(el("p", metaLine, "setting-meta"));
+          itemBody.push(el("p", dec.excerpt.slice(0, 180) + (dec.excerpt.length > 180 ? "…" : "")));
         } else {
           const tech = item as TechniqueCardDto;
           const stageNote = tech.stageBindings?.length ? `阶段: ${tech.stageBindings.join("/")}` : "";
           const refNote = tech.references?.length ? `参考附件 ${tech.references.length} 份` : "";
-          card.append(
-            el("p", [tech.category, stageNote, refNote, tech.triggerWhen, tech.sceneTags.join("、")].filter(Boolean).join(" · "), "setting-meta"),
-            el("p", tech.executionSteps),
-          );
+          const metaLine = [tech.category, stageNote, refNote, tech.triggerWhen, tech.sceneTags.join("、")]
+            .filter(Boolean)
+            .join(" · ");
+          if (metaLine) itemBody.push(el("p", metaLine, "setting-meta"));
+          itemBody.push(el("p", tech.executionSteps));
         }
 
         const actions = el("div", "", "actions");
@@ -272,111 +448,147 @@ export function createLibraryView(
           const projMounted = mounts.some(
             (m) => m.itemKind === itemKind && m.itemId === item.id && m.targetType === "project",
           );
-          const mountProjBtn = el("button", projMounted ? "取消全书挂载" : "挂载到全书");
-          mountProjBtn.type = "button";
-          mountProjBtn.onclick = () =>
-            void host.perform(async () => {
-              await host.request(projMounted ? "library.unmount" : "library.mount", {
-                projectId,
-                targetType: "project",
-                targetId: projectId,
-                itemKind,
-                itemId: item.id,
-              });
-              await refresh();
-            });
-          actions.append(mountProjBtn);
+          actions.append(
+            createButton({
+              label: projMounted ? "取消全书挂载" : "挂载到全书",
+              variant: "secondary",
+              size: "sm",
+              onClick: () =>
+                void host.perform(async () => {
+                  await host.request(projMounted ? "library.unmount" : "library.mount", {
+                    projectId,
+                    targetType: "project",
+                    targetId: projectId,
+                    itemKind,
+                    itemId: item.id,
+                  });
+                  await refresh();
+                }),
+            }),
+          );
 
           if (documentId && active?.product === "fanqie") {
             const chMounted = mounts.some(
               (m) => m.itemKind === itemKind && m.itemId === item.id && m.targetType === "chapter" && m.targetId === documentId,
             );
-            const mountChBtn = el("button", chMounted ? "取消本章挂载" : "置顶挂载到当前章", chMounted ? undefined : "primary");
-            mountChBtn.type = "button";
-            mountChBtn.onclick = () =>
-              void host.perform(async () => {
-                await host.request(chMounted ? "library.unmount" : "library.mount", {
-                  projectId,
-                  targetType: "chapter",
-                  targetId: documentId,
-                  itemKind,
-                  itemId: item.id,
-                  mode: "pin",
-                });
-                await refresh();
-              });
-            actions.append(mountChBtn);
+            actions.append(
+              createButton({
+                label: chMounted ? "取消本章挂载" : "置顶挂载到当前章",
+                variant: chMounted ? "secondary" : "primary",
+                size: "sm",
+                onClick: () =>
+                  void host.perform(async () => {
+                    await host.request(chMounted ? "library.unmount" : "library.mount", {
+                      projectId,
+                      targetType: "chapter",
+                      targetId: documentId,
+                      itemKind,
+                      itemId: item.id,
+                      mode: "pin",
+                    });
+                    await refresh();
+                  }),
+              }),
+            );
           }
 
           if (item.scope === "global") {
-            const overrideBtn = el("button", "本书覆写此卡");
-            overrideBtn.type = "button";
-            overrideBtn.onclick = () =>
-              void host.perform(async () => {
-                if (kind === "deconstruct") {
-                  const dec = item as DeconstructionDto;
-                  await host.request("deconstruct.save", {
-                    scope: "project",
-                    projectId,
-                    overrideOfId: dec.id,
-                    title: `${dec.title}（本书微调）`,
-                    excerpt: dec.excerpt,
-                    hookAnalysis: dec.hookAnalysis,
-                    conflictBeats: dec.conflictBeats,
-                    payoffRhythm: dec.payoffRhythm,
-                    proseNotes: dec.proseNotes,
-                  });
-                } else {
-                  const tech = item as TechniqueCardDto;
-                  await host.request("technique.save", {
-                    scope: "project",
-                    projectId,
-                    overrideOfId: tech.id,
-                    title: `${tech.title}（本书微调）`,
-                    category: tech.category,
-                    pacing: tech.pacing,
-                    sceneTags: tech.sceneTags,
-                    triggerWhen: tech.triggerWhen,
-                    executionSteps: tech.executionSteps,
-                    constraints: tech.constraints,
-                    antiPatterns: tech.antiPatterns,
-                    ...(tech.assetKind ? { assetKind: tech.assetKind } : {}),
-                    ...(tech.stageBindings ? { stageBindings: tech.stageBindings } : {}),
-                    ...(tech.references ? { references: tech.references } : {}),
-                  });
-                }
-                host.notice("已创建本书专属覆写版本，不影响全局原卡");
-                await refresh();
-              });
-            actions.append(overrideBtn);
+            actions.append(
+              createButton({
+                label: "本书覆写此卡",
+                variant: "secondary",
+                size: "sm",
+                onClick: () =>
+                  void host.perform(async () => {
+                    if (kind === "deconstruct") {
+                      const dec = item as DeconstructionDto;
+                      await host.request("deconstruct.save", {
+                        scope: "project",
+                        projectId,
+                        overrideOfId: dec.id,
+                        title: `${dec.title}（本书微调）`,
+                        excerpt: dec.excerpt,
+                        hookAnalysis: dec.hookAnalysis,
+                        conflictBeats: dec.conflictBeats,
+                        payoffRhythm: dec.payoffRhythm,
+                        proseNotes: dec.proseNotes,
+                      });
+                    } else {
+                      const tech = item as TechniqueCardDto;
+                      await host.request("technique.save", {
+                        scope: "project",
+                        projectId,
+                        overrideOfId: tech.id,
+                        title: `${tech.title}（本书微调）`,
+                        category: tech.category,
+                        pacing: tech.pacing,
+                        sceneTags: tech.sceneTags,
+                        triggerWhen: tech.triggerWhen,
+                        executionSteps: tech.executionSteps,
+                        constraints: tech.constraints,
+                        antiPatterns: tech.antiPatterns,
+                        ...(tech.assetKind ? { assetKind: tech.assetKind } : {}),
+                        ...(tech.stageBindings ? { stageBindings: tech.stageBindings } : {}),
+                        ...(tech.references ? { references: tech.references } : {}),
+                      });
+                    }
+                    host.notice("已创建本书专属覆写版本，不影响全局原卡");
+                    await refresh();
+                  }),
+              }),
+            );
           }
         }
 
-        const delBtn = el("button", "删除", "danger");
-        delBtn.type = "button";
-        delBtn.onclick = () =>
-          void host.perform(async () => {
-            const confirmed = await host.modal.confirm({
-              title: "删除库条目",
-              message: `确认删除「${item.title}」？`,
-              confirmLabel: "确认删除",
-              destructive: true,
-            });
-            if (!confirmed) return;
-            const { projectId: activeProjectId } = host.getState();
-            await host.request(kind === "deconstruct" ? "deconstruct.delete" : "technique.delete", {
-              id: item.id,
-              scope: item.scope,
-              ...(activeProjectId ? { projectId: activeProjectId } : {}),
-            });
-            await refresh();
-          });
-        actions.append(delBtn);
-        card.append(actions);
-        listCard.append(card);
+        actions.append(
+          createButton({
+            label: "删除",
+            variant: "danger",
+            size: "sm",
+            onClick: () =>
+              void host.perform(async () => {
+                const confirmed = await host.modal.confirm({
+                  title: "删除库条目",
+                  message: `确认删除「${item.title}」？`,
+                  confirmLabel: "确认删除",
+                  destructive: true,
+                });
+                if (!confirmed) return;
+                const { projectId: activeProjectId } = host.getState();
+                await host.request(kind === "deconstruct" ? "deconstruct.delete" : "technique.delete", {
+                  id: item.id,
+                  scope: item.scope,
+                  ...(activeProjectId ? { projectId: activeProjectId } : {}),
+                });
+                await refresh();
+              }),
+          }),
+        );
+
+        listBody.push(
+          createCard({
+            tag: "article",
+            variant: "subtle",
+            padding: "sm",
+            eyebrow,
+            title: item.title,
+            body: itemBody,
+            footer: actions,
+            className: "setting-item",
+          }),
+        );
       }
     }
-    container.append(listCard);
+
+    container.append(
+      createCard({
+        tag: "section",
+        variant: "default",
+        padding: "md",
+        title: `已入库条目（${items.length}）`,
+        body: listBody,
+      }),
+    );
   }
 
   return { refresh };

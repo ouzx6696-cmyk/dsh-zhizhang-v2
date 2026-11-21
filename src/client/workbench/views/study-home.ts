@@ -1,5 +1,6 @@
 import type { WorkspaceSnapshot } from "../../../contracts/workspace-dto.ts";
 import { el } from "../dom.ts";
+import { createButton, createCard } from "../ui/primitives.ts";
 
 export interface LastActiveRef {
   readonly projectId: string;
@@ -45,7 +46,7 @@ export function writeLastActiveRef(ref: LastActiveRef): void {
 
 /**
  * Cold-start bookshelf & quick-resume hero rendered inside `#empty` when no
- * document is currently active. Zero extra HTML `#id` queries.
+ * document is currently active. Uses unified Card & Button primitives.
  */
 export function createStudyHome(container: HTMLElement, callbacks: StudyHomeCallbacks) {
   let productFilter: "all" | "fanqie" | "toutiao" = "all";
@@ -57,50 +58,73 @@ export function createStudyHome(container: HTMLElement, callbacks: StudyHomeCall
     const canResume = Boolean(lastActive && projects.some((p) => p.id === lastActive.projectId));
 
     const wrap = el("div", { className: "study-home" });
-    wrap.append(
-      el("p", { className: "eyebrow", text: "DeepSeek Harness 作者工作台 · 书斋" }),
+    const intro = el("header", { className: "study-intro" });
+    intro.append(
+      el("p", { className: "eyebrow study-eyebrow", text: "DeepSeek Harness 作者工作台 · 书斋" }),
       el("h1", { text: "从这里落笔" }),
       el("p", {
         className: "lead",
         text: "作者主权三态隔离、人物视角知情边界与逐段合稿在同一书斋内闭环运行。",
       }),
     );
+    wrap.append(intro);
 
     if (canResume && lastActive) {
-      const hero = el("article", { className: "panel-card hero-resume-card" });
-      hero.append(
-        el("p", { className: "eyebrow", text: "上次写作" }),
-        el("h2", { text: `${lastActive.projectName || "项目"} · ${lastActive.title || "未命名章节"}` }),
-      );
-      const resumeBtn = el("button", { className: "primary", text: "一键续写上一章" });
-      resumeBtn.type = "button";
-      resumeBtn.onclick = () => callbacks.onResumeDocument(lastActive.projectId, lastActive.documentId);
-      hero.append(resumeBtn);
+      const resumeBtn = createButton({
+        label: "一键续写上一章",
+        variant: "primary",
+        size: "md",
+        onClick: () => callbacks.onResumeDocument(lastActive.projectId, lastActive.documentId),
+      });
+      const hero = createCard({
+        variant: "elevated",
+        padding: "md",
+        eyebrow: "上次写作",
+        title: `${lastActive.projectName || "项目"} · ${lastActive.title || "未命名章节"}`,
+        headerAction: resumeBtn,
+        className: "hero-resume-card",
+      });
       wrap.append(hero);
     }
 
-    const ctaRow = el("div", { className: "actions" });
-    const wizardBtn = el("button", { className: "primary", text: "三步开新书" });
-    wizardBtn.type = "button";
-    wizardBtn.onclick = callbacks.onOpenWizard;
-
-    const demoBtn = el("button", { text: "一键导入示例书" });
-    demoBtn.type = "button";
-    demoBtn.onclick = callbacks.onImportDemoBook;
+    const ctaRow = el("div", { className: "actions study-cta-row" });
+    const wizardBtn = createButton({
+      label: "三步开新书",
+      variant: "primary",
+      size: "lg",
+      onClick: callbacks.onOpenWizard,
+    });
+    const demoBtn = createButton({
+      label: "一键导入示例书",
+      variant: "secondary",
+      size: "lg",
+      onClick: callbacks.onImportDemoBook,
+    });
     ctaRow.append(wizardBtn, demoBtn);
     wrap.append(ctaRow);
 
+    const shelfBar = el("div", { className: "study-shelf-bar" });
     const filterRow = el("div", { className: "segmented" });
     for (const [id, label] of [["all", "全部书架"], ["fanqie", "番茄连载"], ["toutiao", "头条创作"]] as const) {
-      const btn = el("button", { className: productFilter === id ? "active" : undefined, text: label });
-      btn.type = "button";
-      btn.onclick = () => {
-        productFilter = id;
-        paint();
-      };
+      const btn = createButton({
+        label,
+        variant: "ghost",
+        size: "sm",
+        active: productFilter === id,
+        selected: productFilter === id,
+        onClick: () => {
+          productFilter = id;
+          paint();
+        },
+      });
       filterRow.append(btn);
     }
-    wrap.append(filterRow);
+    const countLabel = el("span", {
+      className: "muted-copy tabular study-shelf-count",
+      text: `${projects.length} 部作品`,
+    });
+    shelfBar.append(filterRow, countLabel);
+    wrap.append(shelfBar);
 
     const visibleProjects = productFilter === "all"
       ? projects
@@ -108,18 +132,37 @@ export function createStudyHome(container: HTMLElement, callbacks: StudyHomeCall
 
     const grid = el("div", { className: "bookshelf-grid" });
     if (visibleProjects.length === 0) {
-      grid.append(el("p", { className: "muted-copy", text: "书架暂无作品，点击「三步开新书」或「一键导入示例书」立即起步。" }));
+      const emptyBox = createCard({
+        variant: "subtle",
+        padding: "lg",
+        tag: "div",
+        className: "bookshelf-empty",
+        body: el("p", {
+          className: "muted-copy",
+          text: "书架暂无作品，点击「三步开新书」或「一键导入示例书」立即起步。",
+        }),
+      });
+      grid.append(emptyBox);
     } else {
       for (const proj of visibleProjects) {
-        const card = el("article", { className: "panel-card bookshelf-card" });
-        card.append(
-          el("p", { className: "setting-meta", text: proj.product === "fanqie" ? "番茄连载" : "头条创作" }),
-          el("p", { className: "setting-title", text: proj.name }),
-        );
-        const openBtn = el("button", { text: "进入书桌" });
-        openBtn.type = "button";
-        openBtn.onclick = () => callbacks.onSelectProject(proj.id);
-        card.append(openBtn);
+        const openBtn = createButton({
+          label: "进入书桌",
+          variant: "secondary",
+          size: "sm",
+          onClick: (event) => {
+            event.stopPropagation();
+            callbacks.onSelectProject(proj.id);
+          },
+        });
+        const card = createCard({
+          variant: "interactive",
+          padding: "md",
+          eyebrow: proj.product === "fanqie" ? "番茄连载" : "头条创作",
+          title: proj.name,
+          footer: openBtn,
+          className: "bookshelf-card",
+          onClick: () => callbacks.onSelectProject(proj.id),
+        });
         grid.append(card);
       }
     }

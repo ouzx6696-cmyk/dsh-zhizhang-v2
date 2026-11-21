@@ -1,28 +1,26 @@
-// The schema version window (contracts.md B.10, frozen 2026-11-19).
+// Schema version window for Next-Gen Zhizhang 3.x.
 //
-// A store records one schema id in its `meta` table. Opening accepts only the
-// ids inside the V2 window: the whole V2 major, `zhizhang/2.x`. Anything
-// outside that major — a future 3.0, or any v1.x id — is refused with
-// `storage.format_unsupported`, never migrated and never half-served. V2 only
-// ever moves forward inside its own major.
+// A store records its schema id in `meta`. Opening accepts only ids within the
+// 3.x major window (`zhizhang/3.<minor>`). Anything outside that window is
+// refused with `storage.format_unsupported` rather than silently migrated.
 
 import { StorageError } from "./errors.ts";
 
-/** The schema id a newly created store records. */
-export const SCHEMA_ID = "zhizhang/2.3";
+/** Schema identifier written to newly created stores. */
+export const SCHEMA_ID = "zhizhang/3.0";
 
 /** SQLite `PRAGMA user_version` corresponding to `SCHEMA_ID`. */
-export const SCHEMA_USER_VERSION = 23;
+export const SCHEMA_USER_VERSION = 30;
 
-/** The window: any `zhizhang/2.<minor>` id opens, and nothing else does. */
-export const SCHEMA_WINDOW = /^zhizhang\/2\.\d+$/;
+/** Accepted schema window for this major release. */
+export const SCHEMA_WINDOW = /^zhizhang\/3\.\d+$/;
 
-/** Whether an id read from a store is inside the V2 window. */
+/** Returns true when `schemaId` falls inside the supported 3.x window. */
 export function isSupportedSchema(schemaId: string): boolean {
   return schemaId === SCHEMA_ID || SCHEMA_WINDOW.test(schemaId);
 }
 
-/** Refuses an id outside the window, carrying the frozen details shape. */
+/** Refuses any schema id outside the supported window. */
 export function assertSupportedSchema(schemaId: string): void {
   if (isSupportedSchema(schemaId)) return;
   throw new StorageError("storage.format_unsupported", {

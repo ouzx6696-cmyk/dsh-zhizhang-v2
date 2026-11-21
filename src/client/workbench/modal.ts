@@ -1,3 +1,5 @@
+import { createButton, createCard, createInput } from "./ui/primitives.ts";
+
 export interface ConfirmOptions {
   readonly title: string;
   readonly message: string;
@@ -63,19 +65,7 @@ export function createModalController(dialog: HTMLDialogElement) {
 
   function confirm(options: ConfirmOptions): Promise<boolean> {
     return openAndAwait<boolean>((finish) => {
-      const box = document.createElement("div");
-      box.className = "modal-card";
-
-      const heading = document.createElement("h2");
-      heading.className = "modal-title";
-      heading.textContent = options.title;
-      box.append(heading);
-
-      const desc = document.createElement("p");
-      desc.className = "modal-message";
-      desc.textContent = options.message;
-      box.append(desc);
-
+      const bodyNodes: HTMLElement[] = [];
       if (options.details && options.details.length > 0) {
         const list = document.createElement("ul");
         list.className = "modal-list";
@@ -84,26 +74,38 @@ export function createModalController(dialog: HTMLDialogElement) {
           li.textContent = item;
           list.append(li);
         }
-        box.append(list);
+        bodyNodes.push(list);
       }
 
       const actions = document.createElement("div");
       actions.className = "modal-actions";
 
-      const cancelBtn = document.createElement("button");
-      cancelBtn.type = "button";
-      cancelBtn.textContent = options.cancelLabel ?? "取消";
-      cancelBtn.onclick = () => finish(false);
+      const cancelBtn = createButton({
+        label: options.cancelLabel ?? "取消",
+        variant: "secondary",
+        onClick: () => finish(false),
+      });
 
-      const okBtn = document.createElement("button");
-      okBtn.type = "button";
-      okBtn.className = options.destructive ? "danger" : "primary";
-      okBtn.textContent = options.confirmLabel ?? "确认";
-      okBtn.onclick = () => finish(true);
+      const okBtn = createButton({
+        label: options.confirmLabel ?? "确认",
+        variant: options.destructive ? "danger" : "primary",
+        onClick: () => finish(true),
+      });
 
       actions.append(cancelBtn, okBtn);
-      box.append(actions);
-      dialog.append(box);
+
+      const card = createCard({
+        tag: "div",
+        variant: "elevated",
+        padding: "lg",
+        className: "modal-card",
+        title: options.title,
+        subtitle: options.message,
+        ...(bodyNodes.length > 0 ? { body: bodyNodes } : {}),
+        footer: actions,
+      });
+
+      dialog.append(card);
       return okBtn;
     }, false);
   }
@@ -111,49 +113,52 @@ export function createModalController(dialog: HTMLDialogElement) {
   function prompt(options: PromptOptions): Promise<string | null> {
     return openAndAwait<string | null>((finish) => {
       const form = document.createElement("form");
-      form.className = "modal-card";
+      form.className = "modal-form";
 
-      const heading = document.createElement("h2");
-      heading.className = "modal-title";
-      heading.textContent = options.title;
-      form.append(heading);
-
-      const desc = document.createElement("p");
-      desc.className = "modal-message";
-      desc.textContent = options.message;
-      form.append(desc);
-
-      const fieldLabel = document.createElement("label");
-      fieldLabel.className = "modal-field";
-      fieldLabel.textContent = options.label;
-      const textarea = document.createElement("textarea");
-      textarea.rows = 3;
-      textarea.placeholder = options.placeholder ?? "";
-      textarea.value = options.initialValue ?? "";
-      fieldLabel.append(textarea);
-      form.append(fieldLabel);
+      const field = createInput({
+        kind: "textarea",
+        label: options.label,
+        rows: 3,
+        placeholder: options.placeholder ?? "",
+        value: options.initialValue ?? "",
+        className: "modal-field",
+      });
 
       const actions = document.createElement("div");
       actions.className = "modal-actions";
 
-      const cancelBtn = document.createElement("button");
-      cancelBtn.type = "button";
-      cancelBtn.textContent = options.cancelLabel ?? "取消";
-      cancelBtn.onclick = () => finish(null);
+      const cancelBtn = createButton({
+        label: options.cancelLabel ?? "取消",
+        variant: "secondary",
+        onClick: () => finish(null),
+      });
 
-      const okBtn = document.createElement("button");
-      okBtn.type = "submit";
-      okBtn.className = "primary";
-      okBtn.textContent = options.confirmLabel ?? "确认提交";
+      const okBtn = createButton({
+        label: options.confirmLabel ?? "确认提交",
+        variant: "primary",
+        type: "submit",
+      });
 
       actions.append(cancelBtn, okBtn);
-      form.append(actions);
+
+      const card = createCard({
+        tag: "div",
+        variant: "elevated",
+        padding: "lg",
+        className: "modal-card",
+        title: options.title,
+        subtitle: options.message,
+        body: field.root,
+        footer: actions,
+      });
+
+      form.append(card);
       form.onsubmit = (event) => {
         event.preventDefault();
-        finish(textarea.value);
+        finish(field.getValue());
       };
       dialog.append(form);
-      return textarea;
+      return field.control;
     }, null);
   }
 

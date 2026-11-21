@@ -1,6 +1,7 @@
 import type { DocumentSummary, SearchHitDto } from "../../../contracts/workspace-dto.ts";
 import type { WorkspaceViewId } from "../plugins/types.ts";
 import { el } from "../store.ts";
+import { createButton, createCard, createInput } from "../ui/primitives.ts";
 
 export interface CommandPaletteDeps {
   readonly dialog: HTMLDialogElement;
@@ -47,16 +48,19 @@ export function createCommandPalette(deps: CommandPaletteDeps) {
       return;
     }
     for (const row of rows) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "palette-item";
+      const btn = createButton({
+        label: "",
+        variant: "ghost",
+        size: "sm",
+        className: "palette-item",
+        onClick: () => {
+          close();
+          row.onPick();
+        },
+      });
       const title = el("span", row.title, "palette-item-title");
       const meta = el("span", row.meta, "palette-item-meta");
-      btn.append(title, meta);
-      btn.onclick = () => {
-        close();
-        row.onPick();
-      };
+      btn.replaceChildren(title, meta);
       list.append(btn);
     }
   }
@@ -65,23 +69,35 @@ export function createCommandPalette(deps: CommandPaletteDeps) {
     mode = nextMode;
     deps.dialog.replaceChildren();
 
-    const card = el("div", "", "modal-card palette-card");
-    const header = el("div", "", "palette-header");
-    const heading = el("h2", mode === "jump" ? "快速跳转（Ctrl/Cmd + K）" : "全书全文检索（FTS5 · Ctrl/Cmd + Shift + F）", "modal-title");
-    const closeBtn = el("button", "关闭", "notice-dismiss");
-    closeBtn.type = "button";
-    closeBtn.onclick = close;
-    header.append(heading, closeBtn);
+    const closeBtn = createButton({
+      label: "关闭",
+      variant: "ghost",
+      size: "sm",
+      className: "notice-dismiss",
+      onClick: close,
+    });
 
-    const input = document.createElement("input");
-    input.type = "search";
-    input.className = "palette-input";
-    input.placeholder = mode === "jump"
-      ? "输入章节标题、视图名称或命令（如 大纲 / 专注）…"
-      : "输入正文关键词、设定词或技法关键词（支持中英文子串）…";
+    const searchField = createInput({
+      kind: "search",
+      ariaLabel: mode === "jump" ? "快速跳转" : "全书全文检索",
+      placeholder: mode === "jump"
+        ? "输入章节标题、视图名称或命令（如 大纲 / 专注）…"
+        : "输入正文关键词、设定词或技法关键词（支持中英文子串）…",
+      className: "palette-input",
+    });
 
     const results = el("div", "", "palette-results");
-    card.append(header, input, results);
+
+    const card = createCard({
+      tag: "div",
+      variant: "elevated",
+      padding: "lg",
+      className: "modal-card palette-card",
+      title: mode === "jump" ? "快速跳转（Ctrl/Cmd + K）" : "全书全文检索（FTS5 · Ctrl/Cmd + Shift + F）",
+      headerAction: closeBtn,
+      body: [searchField.root, results],
+    });
+
     deps.dialog.append(card);
 
     deps.dialog.oncancel = (event) => {
@@ -90,7 +106,7 @@ export function createCommandPalette(deps: CommandPaletteDeps) {
     };
 
     const runQuery = () => {
-      const q = input.value.trim();
+      const q = searchField.getValue().trim();
       if (mode === "jump") {
         const lower = q.toLowerCase();
         const items: { title: string; meta: string; onPick: () => void }[] = [];
@@ -163,9 +179,9 @@ export function createCommandPalette(deps: CommandPaletteDeps) {
       }, 180);
     };
 
-    input.addEventListener("input", runQuery);
+    searchField.control.addEventListener("input", runQuery);
     deps.dialog.showModal();
-    input.focus();
+    searchField.control.focus();
     runQuery();
   }
 

@@ -26,10 +26,12 @@ import { createActionCoordinator, createRenderGate, el, formatCharCount } from "
 import { createCommandPalette } from "./views/command-palette.ts";
 import { createDiffView } from "./views/diff-view.ts";
 import { createNewBookWizard } from "./views/new-book-wizard.ts";
+import { createJobCenter } from "./views/job-center.ts";
 import { renderRunInspector } from "./views/run-inspector.ts";
 import { createSelectionMicrobar } from "./views/selection-microbar.ts";
 import { createStudyHome, writeLastActiveRef } from "./views/study-home.ts";
 import { createTreeSidebar } from "./views/tree-sidebar.ts";
+import { enhanceNavbar } from "./ui/primitives.ts";
 
 const RUN_STATE_LABELS: Readonly<Record<string, string>> = {
   running: "等待候选稿",
@@ -59,12 +61,40 @@ function quickEstimateTokens(text: string): number {
 }
 
 export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
+  enhanceNavbar(document.querySelector<HTMLElement>("header.top"));
   createAppearancePopover(byId<HTMLButtonElement>("theme-toggle"));
 
   const editor = byId<HTMLTextAreaElement>("body");
   const modal = createModalController(byId<HTMLDialogElement>("workbench-dialog"));
   const diffView = createDiffView(byId("comparison"), {
     onLocate: (text, leftIndex) => locateEditorParagraph(text, leftIndex),
+  });
+  const jobCenter = createJobCenter(byId("job-center"), {
+    onCancelJob: (job) => {
+      if (job.kind === "draft_generation" && job.runId) {
+        void perform(() => change("run.cancel", { runId: job.runId! }, { message: "已取消生成作业" }));
+      } else if (job.kind === "proposal_extraction" && job.proposalId) {
+        void perform(async () => {
+          await request("proposal.cancel", { proposalId: job.proposalId! });
+          await load();
+          notice("已取消提案抽取作业");
+        });
+      }
+    },
+    onInspectRun: (runId) => void perform(() => showRunDetail(runId)),
+    onApplyRecoveryHint: (hint) => {
+      const form = byId<HTMLFormElement>("start-run");
+      const tokenLimit = form.elements.namedItem("tokenLimit") as HTMLInputElement | null;
+      if ((hint.action === "increase_budget" || hint.action === "increase_output_limit") && tokenLimit) {
+        const currentVal = Number(tokenLimit.value || 12000);
+        const nextVal = Math.max(12000, currentVal + 4000);
+        tokenLimit.value = String(nextVal);
+        tokenLimit.focus();
+        notice(`已将令牌预算预填提升至 ${nextVal.toLocaleString("zh-Hans")}，可直接重试或创建新任务。`);
+        return;
+      }
+      notice("建议在模型设置中关闭深度思考后点击“开始生成”原地重试。");
+    },
   });
   const modulesById = new Map(modules.map((mod) => [mod.id, mod]));
   const gate = createRenderGate();
@@ -409,6 +439,11 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     usingCustomTree = false;
     gate.reset();
     await load();
+    if (!documentId && snapshot.documents && snapshot.documents.length > 0) {
+      documentId = snapshot.documents[0].id;
+      gate.reset();
+      await load();
+    }
   }
 
   async function importDemoBook(): Promise<void> {
@@ -643,14 +678,21 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     byId("generate-run").hidden = locked || isUncertain || !["running", "failed"].includes(run?.state ?? "");
     byId("cancel").hidden = run?.state !== "running";
 
-    if (!pollTimer && run?.state === "running" && ["prepared", "inflight", "received"].includes(run.generationState ?? "")) {
+    const jobsList = snapshot.jobs ?? [];
+    jobCenter.render(jobsList, run, snapshot.runs ?? []);
+
+    const hasOpenJob =
+      (run?.state === "running" && ["prepared", "inflight", "received"].includes(run.generationState ?? "")) ||
+      jobsList.some((j) => j.state === "prepared" || j.state === "inflight" || j.state === "received");
+
+    if (!pollTimer && hasOpenJob) {
       pollTimer = window.setInterval(() => {
         if (!document.hidden && !composing) {
           void coordinator.runBackgroundPoll(() => loadState(snapshot.asOfSeq, true));
         }
       }, 2000);
     }
-    if (pollTimer && run?.state !== "running") {
+    if (pollTimer && !hasOpenJob) {
       window.clearInterval(pollTimer);
       pollTimer = undefined;
     }

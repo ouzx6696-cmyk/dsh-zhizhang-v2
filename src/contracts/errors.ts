@@ -1,18 +1,16 @@
-// The frozen error envelope.
+// Structured error envelope and closed error code set.
 //
-// The shape and the closed code set are frozen in contracts.md §2 and B.1
-// (2026-11-19, A-class): a structured error carries `code`, the
-// disclosure-allowed `details`, and a `diagnosticId` that ties the failure back
-// to a log entry. The code set is closed — adding a code is a contract change,
-// not a local decision, so a code outside the set is refused at construction
-// rather than surfacing at a caller.
+// Every domain, workflow, storage, and host error carries a closed `code`,
+// disclosure-safe `details`, and a `diagnosticId` that correlates the caller
+// response with server-side logs. Adding or changing a code is a contract-level
+// decision, so codes outside the closed set are rejected at construction time.
 //
-// This lives in `contracts/` because every module raises these codes; the
-// storage layer keeps its own `StorageError` subclass for domain clarity.
+// Lives in `contracts/` because every layer raises these codes; the storage
+// layer exposes a `StorageError` subclass for clarity.
 
 import { randomUUID } from "node:crypto";
 
-/** The frozen closed code set (contracts.md B.1). */
+/** Closed error code set shared across all layers. */
 export const ERROR_CODES = [
   "version.conflict",
   "auth.denied",

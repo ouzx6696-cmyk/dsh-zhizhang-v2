@@ -1,31 +1,28 @@
-// Backup creation, verification, restore and retention.
+// Backup creation, verification, restore, and retention.
 //
-// The rules are frozen in contracts.md B.10 (2026-11-19) and pinned by
-// `storage-a01.test.mjs`:
-//
-//   - a backup is a directory holding the store plus a manifest that records
-//     every entry's sha256;
+// Core invariants:
+//   - a backup is a directory holding the store plus a manifest recording
+//     every entry's SHA-256 digest;
 //   - a backup is usable only when every manifest entry is present and still
-//     hashes to the recorded value — a missing entry or a changed byte makes
-//     the whole backup unusable;
-//   - restoring never silently overwrites a non-empty target;
-//   - retention keeps the newest valid backups and never leaves the author
-//     with zero valid backups: when pruning would delete the last one, the
-//     newest valid backup is kept and the refusal is recorded.
+//     hashes to the recorded value — any missing entry or altered byte renders
+//     the entire backup unusable;
+//   - restoring never silently overwrites a non-empty target unless explicitly
+//     requested;
+//   - retention keeps the newest valid backups and refuses to prune the last
+//     valid backup, recording the refusal for caller visibility.
 //
-// V2.3 upgrades (DB-04 / DSH-19):
+// Implementation guarantees:
 //   - streaming SHA-256 hashing (bounded memory even for large databases);
 //   - atomic `.tmp` + `rename` manifest writes;
-//   - online hot backup via `node:sqlite` `backup()` (fallback `VACUUM INTO`);
-//   - WAL checkpoint enforcement on offline `createBackup` (refuses if WAL
-//     cannot be truncated rather than silently copying an incomplete file);
+//   - online hot backup via `node:sqlite` `backup()` (with `VACUUM INTO` fallback);
+//   - WAL checkpoint enforcement on offline `createBackup`;
 //   - stat-validated verification cache for `listBackups` / `listBackupDetails`;
-//   - optional `exports/` bundle inclusion in backup manifests.
+//   - strict root-directory containment on verify and restore paths.
 
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { copyFile, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join, posix, resolve } from "node:path";
+import { dirname, join, posix, resolve, sep } from "node:path";
 import { openDatabase, runOnlineBackup, type SqliteDatabase } from "./driver.ts";
 import { StorageError } from "./errors.ts";
 import { checkpointDatabase } from "./stmt-pool.ts";
@@ -98,7 +95,17 @@ function fileStamp(info: { readonly size?: number; readonly mtimeMs?: number; re
   return `${info.size ?? -1}:${info.mtimeMs ?? -1}:${info.ctimeMs ?? -1}`;
 }
 
-/** Streaming SHA-256 hash so large databases never buffer whole files in RAM (DB-04). */
+/** Ensures `target` resolves strictly inside `rootDir`. */
+function assertContained(rootDir: string, relativePath: string): string {
+  const root = resolve(rootDir);
+  const target = resolve(join(root, relativePath));
+  if (!target.startsWith(`${root}${sep}`)) {
+    throw new StorageError("storage.format_unsupported", { reason: "backup-path-escape", path: relativePath });
+  }
+  return target;
+}
+
+/** Streaming SHA-256 hash so large databases never buffer whole files in RAM. */
 async function sha256OfFile(path: string): Promise<string> {
   const hash = createHash("sha256");
   const stream = createReadStream(path);
@@ -360,7 +367,7 @@ export async function verifyBackup(backupDir: string): Promise<BackupManifest> {
   for (const entry of manifest.entries) {
     let actualHash: string;
     try {
-      const file = join(backupDir, entry.path);
+      const file = assertContained(backupDir, entry.path);
       if (entry.path !== STORE_NAME && !(await lstat(dirname(file))).isDirectory()) throw new Error("invalid directory");
       if (!(await lstat(file)).isFile()) throw new Error("invalid file");
       actualHash = await sha256OfFile(file);
@@ -501,9 +508,10 @@ export async function restoreBackup(
     await removeWalSidecars(targetDir);
   }
   for (const entry of manifest.entries) {
-    const target = join(targetDir, entry.path);
+    const src = assertContained(backupDir, entry.path);
+    const target = assertContained(targetDir, entry.path);
     await mkdir(dirname(target), { recursive: true, mode: 0o700 });
-    await copyFile(join(backupDir, entry.path), target);
+    await copyFile(src, target);
   }
   await writeFileAtomic(join(targetDir, MANIFEST_NAME), JSON.stringify(manifest));
   return targetDir;
@@ -539,9 +547,10 @@ export async function restoreWorkspace(backup: string, target: string) {
   await mkdir(join(target, "deliveries"), { mode: 0o700 });
   await removeWalSidecars(target);
   for (const { path } of manifest.entries) {
-    const dest = join(target, path === STORE_NAME ? "workspace.sqlite" : path);
+    const src = assertContained(backup, path);
+    const dest = assertContained(target, path === STORE_NAME ? "workspace.sqlite" : path);
     await mkdir(dirname(dest), { recursive: true, mode: 0o700 });
-    await copyFile(join(backup, path), dest);
+    await copyFile(src, dest);
   }
   return target;
 }

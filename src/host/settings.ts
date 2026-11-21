@@ -1,4 +1,5 @@
-import { stmt, type SqliteDatabase } from "../storage/index.ts";
+import { readSchemaId, stmt, type SqliteDatabase } from "../storage/index.ts";
+import type { ActiveJobCounts } from "./job-engine.ts";
 
 export interface ZhizhangConfigFormField {
   readonly key: string;
@@ -23,19 +24,15 @@ export interface DsHConfigFormRegistrar {
 
 export interface SanitizedDiagnosticsReport {
   readonly version: string;
+  readonly schemaId: string;
   readonly nodeVersion: string;
   readonly journalMode: string;
-  readonly appliedMigrations: readonly string[];
   readonly ftsIntegrityOk: boolean;
+  readonly usageConsistencyIssues: number;
   readonly counts: Readonly<Record<string, number>>;
-  readonly activeGenerations: number;
-  readonly activeProposals: number;
-  /** In-flight `selection.rewrite` calls (DSH-10). */
-  readonly activeMicroCalls: number;
+  readonly activeJobs: ActiveJobCounts;
   readonly agentToolsEnabled: boolean;
-  /** True only after all 7+3 tools were accepted by the host registrar (DSH-01). */
   readonly agentToolsRegistered: boolean;
-  /** Error class name when registration failed; never a message, so no paths leak. */
   readonly agentToolsError: string | null;
 }
 
@@ -50,7 +47,7 @@ export function createZhizhangConfigSchema(initial?: {
   return {
     id: "zhizhang-workbench",
     tab: "settings.plugins.tab",
-    title: "织章工作台（V2.2）",
+    title: "织章工作台（V3.0）",
     description: "配置默认模型提供方与 DsH 对话辅助工具边界（所有工具严禁直接改写权威稿件与设定）。",
     fields: [
       {
@@ -69,10 +66,10 @@ export function createZhizhangConfigSchema(initial?: {
       },
       {
         key: "enableAgentTools",
-        label: "启用 DsH 对话只读与提案工具（7+3）",
+        label: "启用 DsH 对话只读与提案工具",
         type: "boolean",
         defaultValue: enableAgentTools,
-        description: "允许 DsH 对话读取章节/知情事实并提交待确认提案，不允许静默写入正文。",
+        description: "允许 DsH 对话读取章节/文章/知情事实并提交待确认提案，不允许静默写入正文。",
       },
     ],
     current: {
@@ -102,18 +99,20 @@ export function registerZhizhangSettings(
 export function buildSanitizedDiagnostics(
   db: SqliteDatabase,
   runtimeInfo: {
-    readonly activeGenerations: number;
-    readonly activeProposals: number;
-    readonly activeMicroCalls?: number;
+    readonly activeJobs: ActiveJobCounts;
+    readonly usageConsistencyIssues?: number;
     readonly agentToolsEnabled: boolean;
     readonly agentToolsRegistered?: boolean;
     readonly agentToolsError?: string | null;
   },
 ): SanitizedDiagnosticsReport {
   const journalRow = stmt(db, "PRAGMA journal_mode;").get() as { journal_mode?: string } | undefined;
-  const migrations = (
-    stmt(db, "SELECT id FROM schema_migrations ORDER BY applied_at ASC, id ASC;").all() as readonly { id: string }[]
-  ).map((m) => m.id);
+  let schemaId = "unknown";
+  try {
+    schemaId = readSchemaId(db);
+  } catch {
+    schemaId = "unknown";
+  }
 
   let ftsIntegrityOk = true;
   try {
@@ -134,24 +133,24 @@ export function buildSanitizedDiagnostics(
   };
 
   return {
-    version: "2.2.0",
+    version: "3.0.0",
+    schemaId,
     nodeVersion: process.version,
     journalMode: journalRow?.journal_mode ?? "unknown",
-    appliedMigrations: migrations,
     ftsIntegrityOk,
+    usageConsistencyIssues: runtimeInfo.usageConsistencyIssues ?? 0,
     counts: {
       projects: countTable("author_projects"),
       documents: countTable("author_documents"),
       revisions: countTable("revisions"),
       runs: countTable("author_runs"),
+      jobs: countTable("author_jobs"),
       loreCurrent: countTable("author_lore_current"),
       foreshadows: countTable("author_foreshadows"),
       techniques: countTable("library_technique_cards"),
       observations: countTable("author_chapter_observations"),
     },
-    activeGenerations: runtimeInfo.activeGenerations,
-    activeProposals: runtimeInfo.activeProposals,
-    activeMicroCalls: runtimeInfo.activeMicroCalls ?? 0,
+    activeJobs: runtimeInfo.activeJobs,
     agentToolsEnabled: runtimeInfo.agentToolsEnabled,
     agentToolsRegistered: runtimeInfo.agentToolsRegistered ?? false,
     agentToolsError: runtimeInfo.agentToolsError ?? null,

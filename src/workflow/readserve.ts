@@ -22,7 +22,7 @@
 import type { SqliteDatabase } from "../storage/driver.ts";
 import { StorageError } from "../storage/errors.ts";
 import { currentSeq, readEvents, type LoggedEvent } from "../storage/eventlog.ts";
-import { inferEventConcern } from "../storage/author-schema.ts";
+import { inferEventConcern } from "../storage/index.ts";
 import type { ProjectionStore, ProjectionUnit } from "../storage/projection.ts";
 import {
   isConcern,

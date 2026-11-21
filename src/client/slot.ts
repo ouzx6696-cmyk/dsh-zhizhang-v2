@@ -28,7 +28,7 @@ interface DsHHostWindow extends Window {
   __DSH_CONFIG__?: { readonly apiBase?: string };
 }
 
-export type WorkbenchSlotView = "main" | "conversation";
+export type WorkbenchSlotView = "main" | "conversation" | "settings";
 
 export const WORKBENCH_IFRAME_SANDBOX =
   "allow-scripts allow-same-origin allow-forms allow-modals allow-downloads";
@@ -109,8 +109,8 @@ export function resolveWorkbenchUrl(options?: {
     }
   }
 
-  if (options?.view === "conversation") {
-    url.searchParams.set("view", "conversation");
+  if (options?.view === "conversation" || options?.view === "settings") {
+    url.searchParams.set("view", options.view);
   }
   return url;
 }
@@ -119,10 +119,17 @@ export function createWorkbenchFrameProps(options?: {
   readonly view?: WorkbenchSlotView;
   readonly apiBase?: string;
 }): Record<string, unknown> {
-  const view: WorkbenchSlotView = options?.view === "conversation" ? "conversation" : "main";
+  const view: WorkbenchSlotView =
+    options?.view === "conversation" || options?.view === "settings" ? options.view : "main";
   const source = resolveWorkbenchUrl({ view, apiBase: options?.apiBase });
+  const title =
+    view === "conversation"
+      ? "织章工作台（会话预览）"
+      : view === "settings"
+        ? "织章工作台（插件设置）"
+        : "织章工作台";
   return {
-    title: view === "conversation" ? "织章工作台（会话预览）" : "织章工作台",
+    title,
     src: source.href,
     sandbox: WORKBENCH_IFRAME_SANDBOX,
     referrerPolicy: WORKBENCH_IFRAME_REFERRER_POLICY,
@@ -132,54 +139,74 @@ export function createWorkbenchFrameProps(options?: {
   };
 }
 
+/**
+ * Registers all DsH Web UI client slots (`main`, `sidebar.panellist`,
+ * `conversation.view`, and lazy `settings.plugins.tab`).
+ */
+export function registerWorkbenchSlots(ctx: DsHSlotContext, React: DsHReact): void {
+  const ctxApiBase = ctx.apiBase ?? ctx.config?.apiBase;
+
+  function PanelIcon({ size }: { size?: number }) {
+    return React.createElement(
+      "span",
+      { "aria-hidden": true, style: { fontSize: size, lineHeight: 1 } },
+      "织",
+    );
+  }
+
+  function MainWorkbench(props?: { apiBase?: string }) {
+    return React.createElement(
+      "iframe",
+      createWorkbenchFrameProps({ view: "main", apiBase: props?.apiBase ?? ctxApiBase }),
+    );
+  }
+
+  function ConversationWorkbench(props?: { apiBase?: string }) {
+    return React.createElement(
+      "iframe",
+      createWorkbenchFrameProps({ view: "conversation", apiBase: props?.apiBase ?? ctxApiBase }),
+    );
+  }
+
+  function SettingsWorkbench(props?: { apiBase?: string }) {
+    return React.createElement(
+      "iframe",
+      createWorkbenchFrameProps({ view: "settings", apiBase: props?.apiBase ?? ctxApiBase }),
+    );
+  }
+
+  ctx.slots.inject("main", () =>
+    ctx.slots.register({ name: "main", key: "zhizhang.workbench" }, MainWorkbench),
+  );
+  ctx.slots.inject("sidebar.panellist", () =>
+    ctx.slots.register(
+      { name: "sidebar.panellist", id: "zhizhang.workbench", label: "织章", order: 20 },
+      PanelIcon,
+    ),
+  );
+  ctx.slots.inject("conversation.view", () =>
+    ctx.slots.register(
+      { name: "conversation.view", id: "zhizhang.workbench", label: "织章", order: 40 },
+      ConversationWorkbench,
+    ),
+  );
+  ctx.slots.inject("settings.plugins.tab", () =>
+    ctx.slots.register(
+      { name: "settings.plugins.tab", id: "zhizhang.workbench", label: "织章", order: 60 },
+      SettingsWorkbench,
+    ),
+  );
+}
+
 if (typeof window !== "undefined" && (window as DsHHostWindow).__ModuleLoader__) {
   (window as DsHHostWindow).__ModuleLoader__!.load({
     id: "@zhizhang/dsh-workbench",
     factory(require) {
       const React = require("react") as DsHReact;
-
-      function PanelIcon({ size }: { size?: number }) {
-        return React.createElement(
-          "span",
-          { "aria-hidden": true, style: { fontSize: size, lineHeight: 1 } },
-          "织",
-        );
-      }
-
       return {
         inject: ["slots"],
         apply(ctx) {
-          const ctxApiBase = ctx.apiBase ?? ctx.config?.apiBase;
-
-          function MainWorkbench(props?: { apiBase?: string }) {
-            return React.createElement(
-              "iframe",
-              createWorkbenchFrameProps({ view: "main", apiBase: props?.apiBase ?? ctxApiBase }),
-            );
-          }
-
-          function ConversationWorkbench(props?: { apiBase?: string }) {
-            return React.createElement(
-              "iframe",
-              createWorkbenchFrameProps({ view: "conversation", apiBase: props?.apiBase ?? ctxApiBase }),
-            );
-          }
-
-          ctx.slots.inject("main", () =>
-            ctx.slots.register({ name: "main", key: "zhizhang.workbench" }, MainWorkbench),
-          );
-          ctx.slots.inject("sidebar.panellist", () =>
-            ctx.slots.register(
-              { name: "sidebar.panellist", id: "zhizhang.workbench", label: "织章", order: 20 },
-              PanelIcon,
-            ),
-          );
-          ctx.slots.inject("conversation.view", () =>
-            ctx.slots.register(
-              { name: "conversation.view", id: "zhizhang.workbench", label: "织章", order: 40 },
-              ConversationWorkbench,
-            ),
-          );
+          registerWorkbenchSlots(ctx, React);
         },
       };
     },

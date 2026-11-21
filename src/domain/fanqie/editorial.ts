@@ -11,7 +11,7 @@ export const CHAPTER_LENGTH_WARNING_BAND = [1500, 6000] as const;
 
 /**
  * Author-authorized explicit Fanqie chapter transition table (Res#1 / FQ-25),
- * encoded verbatim from `docs/02-domain-rules.md` without adding or removing
+ * encoded verbatim from `docs/04-domain-rules.md` without adding or removing
  * any transition edge.
  */
 export const CHAPTER_TRANSITIONS = {

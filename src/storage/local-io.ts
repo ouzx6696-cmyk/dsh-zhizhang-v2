@@ -38,7 +38,7 @@ function sleepSyncMs(ms: number): void {
 
 /**
  * Performs `renameSync` with bounded exponential backoff retries on Windows
- * `EPERM`/`EBUSY` directory-lock errors (DB-20).
+ * `EPERM`/`EBUSY` directory-lock errors.
  */
 export function renameWithRetry(
   oldPath: string,

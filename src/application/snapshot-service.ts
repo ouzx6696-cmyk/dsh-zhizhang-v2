@@ -43,8 +43,9 @@ export function createSnapshotService(ctx: WorkspaceContext, registry: ProductLi
             r.recovery_hints AS recoveryHintsRaw
           FROM author_runs r
           LEFT JOIN candidates c ON c.candidate_id = r.candidate_id AND r.state = 'awaiting-author'
-          LEFT JOIN author_generation_attempts g ON g.rowid = (
-            SELECT MAX(a.rowid) FROM author_generation_attempts a WHERE a.run_id = r.id
+          LEFT JOIN author_jobs g ON g.rowid = (
+            SELECT MAX(a.rowid) FROM author_jobs a
+            WHERE a.run_id = r.id AND a.kind = 'draft_generation'
           )
           WHERE r.document_id = ? AND (
             r.rowid IN (SELECT rowid FROM author_runs WHERE document_id = ? ORDER BY rowid DESC LIMIT 2)
@@ -75,6 +76,27 @@ export function createSnapshotService(ctx: WorkspaceContext, registry: ProductLi
       ? activeModule.enrichRunSummaries(ctx, active, baseRuns)
       : baseRuns;
 
+    const recentJobs = ctx.jobs
+      .list({ projectId, ...(active ? { documentId: active.id } : {}), limit: 20 })
+      .map((j) => ({
+        id: j.id,
+        kind: j.kind,
+        subtype: j.subtype,
+        projectId: j.projectId,
+        documentId: j.documentId,
+        runId: j.runId,
+        proposalId: j.proposalId,
+        provider: j.provider,
+        model: j.model,
+        state: j.state,
+        stage: j.stage,
+        reserved: j.reserved,
+        settled: j.settled,
+        error: j.error,
+        createdAt: j.createdAt,
+        updatedAt: j.updatedAt,
+      }));
+
     const productContribution = activeModule ? activeModule.contributeSnapshot(ctx, projectId, active) : {};
 
     return {
@@ -83,6 +105,7 @@ export function createSnapshotService(ctx: WorkspaceContext, registry: ProductLi
       active,
       activeContext,
       runs,
+      jobs: recentJobs,
       approved: false,
       delivery: null,
       exportStatus: null,

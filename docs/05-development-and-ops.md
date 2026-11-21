@@ -1,190 +1,72 @@
-# 05 · 开发、验收与运维指南
-
-本文档面向参与开发的工程师与日常维护数据的作者/运维人员，提供从环境初始化、双管线构建、本地预览、全量测试到打包部署和离线灾备恢复的完整实操手册。
+# 开发、精简测试体系与安全运维指南（Zhizhang 3.0）
 
 ---
 
-## 一、环境准备与依赖安装
+## 1. 运行环境要求
 
-### 1. 工具链版本要求（对应 [package.json](../package.json)）
-- **Node.js**：`>=24.15.0`（支持内置 TypeScript 类型擦除直接运行 `.ts` 源码）
-- **npm**：`>=11.0.0`
-- **TypeScript**：`5.8.3`（锁定在 `package-lock.json`，全项目**零运行时第三方依赖**）
-
-### 2. 初始化安装
-```bash
-npm ci --ignore-scripts
-```
-> **Windows PowerShell 说明**：若当前系统 PowerShell 执行策略禁止加载 `npm.ps1`，请将下文所有 `npm` 命令替换为 `npm.cmd`（例如 `npm.cmd ci --ignore-scripts`、`npm.cmd run verify`）。
+- **Node.js**：`>= 22.0.0`（必须支持内置 `node:sqlite` 与原生 `node:test`）
+- **TypeScript**：`5.8.3`（唯一开发依赖，用于类型检查与编译构建）
+- **运行时依赖**：**零（0）第三方运行时依赖**（由 `npm run preflight` 与架构守卫测试共同锁定）
 
 ---
 
-## 二、TypeScript 检查与双管线构建
+## 2. 常用研发命令
 
-项目拆分为两条独立的严格 TypeScript 编译管线，利用 [src/node-builtins.d.ts](../src/node-builtins.d.ts) 声明 Node 24 内置模块与 Web 标准全局类型（无需安装 `@types/node`）：
-
-| 配置文件 | 目标环境 | 输出位置 | 覆盖范围与说明 |
-| --- | --- | --- | --- |
-| [tsconfig.json](../tsconfig.json) | Node 24 (`NodeNext`) | 不发射文件 (`noEmit`) | 后端只读静态检查（供 `npm run check` 使用） |
-| [tsconfig.build.json](../tsconfig.build.json) | Node 24 (`NodeNext`) | `dist/server/`（含 `.d.ts`） | 编译宿主插件、应用服务、领域、存储与工作流模块为原生 ESM |
-| [tsconfig.client.json](../tsconfig.client.json) | 浏览器 (`ESNext` + DOM) | `dist/client/` | 编译 `src/client/slot.ts` 与 `src/client/workbench/**/*.ts` 浏览器 ESM 模块 |
-
-> 打包前建议运行 `node scripts/preflight.mjs` 校验 Node 版本与零依赖状态，并通过 `node scripts/deploy.mjs --touch-only` 刷新 `dist/client/` 产物与静态 HTML/CSS 的 `mtime`（规避 `npm pack` 旧时间戳触发 DsH 缓存僵死）。
-
-常用构建与检查命令：
-
-```bash
-# 仅执行只读严格类型检查（不写入任何产物）
-npm run check
-
-# 全量编译后端与浏览器前端至 dist/
-npm run build
-```
+| 命令 | 说明 |
+| --- | --- |
+| `npm run check` | 只读类型检查（同时校验后端 `tsconfig.json` 与前端 `tsconfig.client.json`，不产出文件） |
+| `npm run build` | 编译服务端代码至 `dist/server/`，编译浏览器 ES 模块至 `dist/client/` |
+| `npm test` | 运行全部 12 套件精简测试（确定性、纯本地、不联网，耗时 ~3 秒） |
+| `npm run verify` | 研发提交前一键闭环：`npm run check && npm test` |
+| `npm run dev` | 构建并启动本地预览服务（默认监听 `http://localhost:3000/workbench`） |
+| `npm run start` | 直接启动已构建的预览服务（`node scripts/dev-server.mjs`） |
+| `npm run docs:schema` | 从当前 `zhizhang/3.0` 真实 SQLite DDL 重新生成 `docs/schema.md` |
+| `npm run bench` | 运行工作台与 SQLite/FTS5 性能基准脚本 |
+| `npm run preflight` | 发布前环境自检（Node 版本、`node:sqlite`、零运行时依赖） |
+| `npm run deploy:touch` | 验证 DsH 部署包结构与触发文件（dry-run / touch-only） |
 
 ---
 
-## 三、本地开发预览服务器
+## 3. 精简高效的 12 套件测试体系
 
-无需启动完整 DsH 宿主即可在本地浏览器直接调试工作台 UI 与前后端完整交互：
+测试体系严格拒绝重复取证夹具与脆弱的文档表格校验，全部测试收拢为 **`test/` 目录下 12 个高信噪比 `node:test` 文件**，共用测试夹具统一置于 `support/harness.mjs`（遵守 Node 测试发现规则，不污染用例计数）：
 
-```bash
-# 1. 必须先构建前端模块到 dist/client/
-npm run build
-
-# 2. 启动本地 HTTP 预览服务（默认端口 3000）
-npm run dev
-```
-
-启动后访问：`http://localhost:3000/workbench`。
-
-### 环境变量与行为差异
-
-| 环境变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `PORT` | `3000` | 监听端口 |
-| `HOST` | `127.0.0.1` | 监听地址（安全默认仅监听本机回环；仅在明确可信局域网场景才显式覆盖） |
-| `ZHIZHANG_DATA_DIR` | 未设置（纯内存 `:memory:`） | 设置为本地路径时，持久化读写 `<dir>/workspace.sqlite` 并在 `<dir>/deliveries/` 写入交稿 `.md` |
-
-> **预览环境限制**：[scripts/dev-server.mjs](../scripts/dev-server.mjs) 不挂载真实 DsH LLM 传输，调用 `run.generate` 时会返回 `gate.denied (preview-no-llm-transport)`；你可以通过工作台「候选」页签的**「手动导入候选稿」**完整体验差异对照、采纳、QA、批准与本地 Markdown 交稿流程。
+| 套件 | 覆盖维度 |
+| --- | --- |
+| `test/01-contracts-protected.test.mjs` | 受保护常量不变式、前端镜像逐字一致性、`ContractError`、审批门禁、零运行时 DTO 校验、3.x Schema 窗口 |
+| `test/02-domain-fanqie.test.mjs` | 番茄章节审稿流转与 2 次打回上限、设定区间与角色知情点、重排冲突、段落锚点、伏笔/技法排序、AI 腔与黄金三章诊断 |
+| `test/03-domain-toutiao.test.mjs` | 头条 34 字标题上限、微头条无标题约束、84 分 QA 通过线、2 轮回改上限与固定交付尾句 |
+| `test/04-storage-fts.test.mjs` | `zhizhang/3.0`（`user_version = 30`）洁净建表、命令幂等日志、事件归类审计、External Content FTS5 与 2 字 CJK 回退 |
+| `test/05-unified-job-kernel.test.mjs` | 统一 `author_jobs` / `author_job_calls` 台账、晚到回执恒等校验、并发锁、`HostJobEngine` 全链路执行与有界卸载排空 |
+| `test/06-app-fanqie-workflow.test.mjs` | 番茄端到端作者流程（卷幕章建构 → 连续性 → 挂载与上下文预估 → 生成采纳 → 审稿 → 定稿锁定） |
+| `test/07-app-toutiao-workflow.test.mjs` | 头条端到端作者流程（策划 → QA 84 → 验收 → 审批 → 交付与断网重启续传、微头条限制、2 轮自动回改熔断） |
+| `test/08-host-plugin-tools.test.mjs` | `applyWorkbench` Next-Gen HTTP 路由、静态清单、安全响应头（CSP / nosniff / Referrer-Policy）、脱敏 `/diag`、11 个声明式 Agent 工具边界 |
+| `test/09-client-core.test.mjs` | 段落/字级 Diff 与局部勾选合并、`draft-vault` 草稿保险箱、`renderGate` 竞态防抖、划词重定位、`api.ts` 路由分发 |
+| `test/10-client-workbench.test.mjs` | `workbench.html` 三区布局与挂载点、`CLIENT_JS_MODULES` 清单完备性、零原生弹窗与零原始 HTML 注入守卫、统一基础组件与 `JobCenter` 交互 |
+| `test/11-backup-and-io.test.mjs` | 在线热备份 / 离线冷备份、SHA-256 篡改检测、非空恢复目录拒绝、保留策略修剪、整书包导入导出、Skill 导入与原子交付路径约束 |
+| `test/12-architecture-guards.test.mjs` | 跨层依赖红线、双产品线隔离、`host/tools.ts` 产品无关性、交付尾句单一定义、零运行时依赖与测试目录洁净守卫 |
 
 ---
 
-## 四、自动化测试架构与专项验证矩阵
+## 4. 安全边界、数据备份与运维诊断
 
-项目测试体系采用**「共享夹具底座（`support/`）+ 分层无跳过离线回归（`test/`）+ 专项基准/浏览器验收（`scripts/`）」**六层结构，全部基于 Node 24 内置测试运行器 `node --test`，**100% 离线确定性执行、零外部网络与模型费用、严格遵守 [AGENTS.md](../AGENTS.md) 测试目录布局规则**：
+### 默认内置防护边界
 
-- **共享测试基础设施（`support/`，严禁放进 `test/`）**：
-  - [support/a01.mjs](../support/a01.mjs)：历史取证与冻结契约共用基础断言、叙事锚点原语及临时目录包装（由 [test/support-a01.test.mjs](../test/support-a01.test.mjs) 固定）；
-  - [support/v2-harness.mjs](../support/v2-harness.mjs)：V2 统一测试底座（Windows 安全的 SQLite/WAL 多连接句柄生命周期管理器 `createTestWorkspace`、支持异步门控与中止信号的剧本化 LLM 传输 `createScriptedLlm`、mock DsH Cordis 宿主适配器 `createMockDsHHost`、浏览器双存储与全局对象临时注入器 `createMemoryStorage`/`withBrowserGlobals` 及 `ContractError` 断言），由 [test/support-v2.test.mjs](../test/support-v2.test.mjs) 固定。
+- **文件与目录路径约束**：交付文件写入（`src/host/delivery-io.ts`）、本地整书包导出（`src/storage/local-io.ts`）与备份校验恢复（`src/storage/backup.ts`）均强制校验文件名合法性并锁定在目标根目录内，避免意外越界写入。
+- **前端 DOM 渲染与浏览器头防护**：所有前端视图采用纯 DOM 节点创建（全前端零 `innerHTML`），静态资源与 API 响应统一启用 `Content-Security-Policy`（`default-src 'self'`）、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer` 与 `Cache-Control: no-store`。
+- **请求校验与异常脱敏**：所有写入型 `POST` 接口强制校验 `application/json` 类型与请求体上限（`2 MiB`）；非预期异常仅返回关联 `diagnosticId`，不暴露内部堆栈与本机路径。
 
-### 1. 分层离线测试套件（`node --test`）
+### 数据备份与恢复（`src/storage/backup.ts`）
 
-| 命令 | 测试范围 | 文件数 | 用例数 | 覆盖职责与说明 |
-| --- | --- | :---: | :---: | --- |
-| `npm run test:contracts` | `*-d02`、`*-w02` | 14 | 147 | **冻结契约合规**：存储格式窗口、命令幂等账本、事件日志、冷启动恢复、运行状态机、预算守卫与交稿批准门 |
-| `npm run test:v2` | `*-v2`、`smoke` | 18 | 101 | **V2.2 应用与全栈测试**：工作区核心流程、Sprint 1–4 优化闭环（缓存/记忆/FTS5/SKILL 沙箱/体检/ diff/微改写/5000 章虚拟化/控制面/7+3 工具）、宿主插件 HTTP/SSE、灾备恢复与静态架构守卫 |
-| `npm run test:v23` | `*-v23` | 12 | 87 | **V2.3 底座测试**：段落切分/`mergeFactVersion`/伏笔与章节转换表、`normalizeUsage` 与 schema 迁移、热备/FTS 两段式、diff 与选段校验、虚拟列表行高、提案漂移/事实 id、宿主工具适配与 thinking 过滤、微改写账本与卸载排空、跨项目写入拦截与章节必填、P0 清零复核补丁与状态表守卫 |
-| `npm run test:host` | `host-plugin-v2`、`generation-v2`、`backup-v2` | 3 | 18 | **宿主、传输与灾备专测**：`/workbench`/`/state`/`/diag`/`/mutate` CSP 与状态码映射、202 异步生成与取消、thinking 块过滤、`export.conflict` 与重启恢复、SHA-256 整库备份还原与防篡改 |
-| `npm run test:client` | `client-v2` | 1 | 7 | **前端无浏览器单元测试**：`DraftVault` 多标签 owner 隔离与慢保存恢复、大型段落 LCS `computeParagraphDiff`、`apiRequest` 错误汉化与按动作超时、`slot.ts` 三槽位注入、`workbench.html` 全量 ID/页签/Manifest 静态契约校验 |
-| `npm run test:arch` | `smoke`、`refactor-v2` | 2 | 13 | **架构边界与布局守卫**：全仓库 `.ts` 递归依赖隔离（双产品线/宿主/存储/客户端零越界）、`workspace-dto.ts` 纯类型零运行时校验、`AGENTS.md` 目录纯净度、`manifest`/`package.json`/`cordis.patch.yml` 一致性 |
-| `npm test` | `test:contracts` + `test:v2` + `test:v23` | 44 | 335 | **日常核心回归** |
-| `npm run test:evidence` | `*-?01.test.mjs` | 26 | 173 | **历史规则取证**：固定录存 v1.x 规则裁决证据与原始对照行为 |
-| `npm run test:all` | `test/*.test.mjs` | 70 | 508 | **发版前全量验收**：核心 + 取证全覆盖（无跳过） |
-| `npm run verify` | `check` + `npm test` | 44 | 335 | **日常开发必跑门禁** |
+- **在线热备份（`createHotBackup`）**：直接基于活跃 SQLite 连接执行在线备份，写入目标目录并生成带 SHA-256 的清单文件，不阻塞读者。
+- **离线冷备份（`createBackup`）**：对已关闭的数据库文件执行 WAL 检查点校验与流式 SHA-256 备份。
+- **安全恢复（`restoreBackup` / `restoreWorkspace`）**：先逐文件校验 SHA-256 清单与目标目录路径约束，并强制拒绝向非空目录静默覆盖（`restore-target-not-empty`），保护现有手稿。
+- **自动修剪（`planRetention` / `pruneBackups`）**：按保留份数清理旧备份，并保证**永远不删除最后一份有效备份**。
 
-> **测试目录布局规范（[AGENTS.md](../AGENTS.md)）**：`node --test` 默认把 `test/` 下所有 `.mjs` 文件计为测试文件，因此多夹具共享辅助工具严格位于 `support/` 下，且由 [test/refactor-v2.test.mjs](../test/refactor-v2.test.mjs) 自动化断言 `test/` 目录内仅存在 `*.test.mjs` 文件。
+### 运行时诊断（`GET /api/zhizhang/diag`）
 
-### 2. 专项验证脚本
-
-```bash
-# 1. 确定性模型传输回放验证（3000字长图文 + QA + 1轮回改 + 4类令牌 + 超预算 + 缺失回执）
-npm run test:model
-
-# 2. 650章万字与100条历史万字候选快照体积与延迟基准
-npm run test:bench
-
-# 3. Playwright 浏览器端三旅程端到端验收（需先执行 npm run build）
-npm run test:browser
-```
-
-- **性能基线红线（`workspace-bench.mjs`）**：首次打开 650 章万字小说快照须 `< 100 KiB`；叠加 100 条万字舍弃候选历史后须 `< 150 KiB`（当前实测分别约 `74.7 KiB` 与 `75.3 KiB`，中位响应 `< 1.1 ms`）。
-- **浏览器端三旅程（`scripts/browser-check.mjs`）**：在独立 Playwright Chromium 中加载真实编译后的前端 JS，依次验证：
-  1. **慢保存防丢字与多标签冲突保护**（保存期间继续键入不被覆盖、刷新恢复、第二标签页冲突保留本地稿）；
-  2. **番茄连载多人物知情与冻结输入到定稿**（多人物不同章节段落知情、失效段落边界、任务冻结设定隔离、审稿到定稿）；
-  3. **头条改题、质检、版本批准到交稿导出**。
-  - 可通过环境变量 `ZHIZHANG_PLAYWRIGHT` 与 `ZHIZHANG_CHROMIUM` 指向本机已安装的 Playwright 模块与 Chromium 可执行文件。
-
----
-
-## 五、打包与 DsH Web 安装部署
-
-### 1. 构建与生成发布包
-```bash
-npm ci --ignore-scripts
-npm run verify
-npm run test:all
-npm run build
-npm pack --ignore-scripts
-```
-执行后会在根目录生成安装包 `zhizhang-dsh-workbench-2.2.0.tgz`（包含 `dist/server/`、`dist/client/`、`src/client/workbench.html`、`src/client/workbench.css`、`src/bundle/cordis.patch.yml`、`src/bundle/locale/`、`docs/`）。
-
-### 2. 在 DsH Web `0.2.2+` 中安装运行
-1. 打开 DsH Web 插件管理器 → **添加插件** → 选择本地包 `zhizhang-dsh-workbench-2.1.0.tgz`，启用 **织章工作台**。
-2. 从 DsH 左侧面板点击 **织章**（`sidebar.panellist`），或在会话视图选择 **织章**（`conversation.view`）进入工作台。
-3. **运行时数据布局**（默认位于 `DSH_HOME/zhizhang-v2/`）：
-   - `workspace.sqlite`：全部项目、章节、修订、候选、设定、事件、读模型检查点与任务调用账本；
-   - `deliveries/<documentId>.md`：头条交稿导出的原子 Markdown 文件。
-
----
-
-## 六、离线备份、校验与灾备恢复
-
-> **重要前提**：执行任何备份、恢复或整库搬运前，**必须先停止对应的 DsH profile**，确保无写入句柄占用 `workspace.sqlite`。
-
-仓库提供基于 SHA-256 清单校验的离线运维工具 [scripts/workspace-data.mjs](../scripts/workspace-data.mjs)（底层调用 [src/storage/backup.ts](../src/storage/backup.ts)）：
-
-```bash
-# 1. 创建完整备份（目标必须是全新的空目录）
-node scripts/workspace-data.mjs backup <原数据目录> <全新备份目录>
-
-# 2. 校验并恢复到全新数据目录
-node scripts/workspace-data.mjs restore <备份目录> <全新数据目录>
-```
-
-### 机制与安全保障
-- **备份内容与清单（`backupWorkspace`）**：将宿主数据库 `workspace.sqlite` 复制为备份目录内的 `work.db`，遍历 `deliveries/` 下所有 UUID 命名的 `.md` 文件一并拷贝，并计算所有文件 SHA-256 摘要与库 `schema` 写入 `manifest.json`。
-- **强校验与映射恢复（`restoreWorkspace`）**：
-  1. 逐项校验 `manifest.json` 结构、所有文件存在性及 SHA-256 哈希（任意字节被篡改或缺失文件立即拒止为 `storage.format_unsupported`）；
-  2. 打开 `work.db` 验证 `zhizhang/2.x` Schema 窗口并运行 `PRAGMA quick_check;` 确认数据库页完整；
-  3. 写入全新的 `target` 目录（权限 `0o700`）并将 `work.db` 映射恢复为宿主所需的 `workspace.sqlite`；建议先在隔离 DsH profile 中打开验证，确认无误后再切换，原目录可随时用于回退。
-- **保留策略保障（`planRetention` / `pruneBackups`）**：清理旧备份时，若某次清理会导致有效备份数量归零，系统强制保留最新的一份有效备份并在 `refused` 字段记录拒删原因。
-
-### 证据段落口径回填（FQ-02，决议 #12）
-
-V2.3 起「非空行算一段」是唯一口径。历史 `author_evidence.point` 曾按物理行号计算，段间空行会造成偏移。回填**不是启动迁移**，必须先生成报告供作者核对：
-
-```bash
-# 1. 只读扫描，输出 point-report.json（变更行数与抽样前后值）
-npm run migrate:evidence-point -- --db <数据目录>/workspace.sqlite --report point-report.json
-
-# 2. 核对通过后执行：自动热备到 <数据目录>/backups/evidence-point-<时间戳>/，再单事务回填
-npm run migrate:evidence-point -- --db <数据目录>/workspace.sqlite --apply
-```
-
-脚本幂等：重复执行时已收敛的行不再变动；若回填后仍有漂移，脚本以非零退出并提示先从热备恢复。
-
----
-
-## 七、常见故障与诊断排查速查
-
-工作台出错时若提示含 **诊断号（`diagnosticId`）**，作者可点击横幅「复制诊断号」配合下表定位原因：
-
-| 错误码 / 提示原因 (`reason`) | 成因定位 | 作者 / 运维处置步骤 |
-| --- | --- | --- |
-| `version.conflict` | 编辑器基准修订落后于数据库（多标签页修改或操作顺序交错），或章序重排期间项目 `asOfSeq` 发生变更 | 页面已保留本地编辑并弹出冲突横幅：点「查看服务器最新正文」对照 → 「复制本地稿」留存 → 手动合并或「使用服务器版本」；章序调整需重新刷新后重试 |
-| `gate.denied` · `generation-needs-reconciliation` | 上一次生成任务在模型调用中途（`inflight`）断电/崩溃，存在 `uncertain` 尝试未核对用量 | 在流程「候选」页签查看待对账任务详情，登录 DsH 账单核实实际消耗令牌数，填入「确认用量对账」表单提交即可解锁后续生成 |
-| `gate.denied` · `export.conflict` | 交稿记录已在库中提交为 `已交稿`，但目标目录已存在同名 `.md` 且内容与本次获批版本不同 | 先点击页面「下载获批 Markdown」留存，随后检查 `deliveries/<documentId>.md` 移走或重命名冲突文件，再点「重试或检查导出」 |
-| `budget.exhausted` | 输入预留超预算，或生成/自动回改累积总令牌超出任务设定额度 | 发起前点击「按当前修订核算」采用建议总额（含输出与回改余量）；已失败任务可调整策略后新建或重新创建更高预算任务 |
-| `usage.uncertain` | 配置费用上限时费率未知，或 LLM 流结束未返回合规 4 元组用量 | 核对 DsH 模型提供方配置与流式回调日志，并在工作台对账表单补录真实用量 |
-| `gate.denied` · `setting-is-locked` | 试图批准的新设定提案与已有已锁定（`locked: true`）设定编号冲突 | 保留原锁定设定，或为新变更启用新的设定编号 |
-| `storage.format_unsupported` | 数据库文件损坏、缺少 `meta` 行、或属于 v1.x / 3.x 非 `zhizhang/2.x` Schema | 停止 profile 后使用最近通过 `verifyBackup` 的离线备份恢复到全新目录，切勿强行手工修改 `meta` 表 |
+诊断端点返回脱敏 JSON 摘要，包含：
+- 当前版本号（`3.0.0`）、Schema ID（`zhizhang/3.0`）与 `user_version`（`30`）
+- 统一作业各类型活跃计数与用量对账一致性问题数
+- Agent 工具注册状态
+- 严格脱敏：不返回任何 API 密钥、环境变量、本机目录路径或正文原文

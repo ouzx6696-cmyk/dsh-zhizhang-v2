@@ -9,19 +9,17 @@ import {
   type Input,
   type Product,
 } from "./context.ts";
-import { createMicroService } from "./micro-service.ts";
+import { createJobService } from "./job-service.ts";
 import { createProductLineRegistry } from "./product-line.ts";
 import { createFanqieModule } from "./products/fanqie.ts";
 import type { ProjectBundleDiskWriter } from "./products/fanqie/io.ts";
 import { createToutiaoModule } from "./products/toutiao.ts";
-import { createProposalService } from "./proposal-service.ts";
-import { createRunService } from "./run-service.ts";
 import { createSnapshotService } from "./snapshot-service.ts";
 
 /**
- * Composition root for the Author Workspace application layer.
+ * Composition root for the Author Workspace application layer (`zhizhang/3.0`).
  * Registers isolated Fanqie and Toutiao product-line modules on top of the
- * shared workspace, run, snapshot, proposal, and event-projection platform.
+ * shared workspace, unified job service, snapshot, and event-projection platform.
  */
 export function openAuthorWorkspace(
   db: SqliteDatabase,
@@ -38,10 +36,8 @@ export function openAuthorWorkspace(
     return ctx.appendDraftRevision(row, body, (saved) => mod.onDraftSaved(ctx, saved));
   }
 
-  const runs = createRunService(ctx, registry, saveDraftForRow);
+  const jobs = createJobService(ctx, registry, saveDraftForRow);
   const snapshots = createSnapshotService(ctx, registry);
-  const proposals = createProposalService(ctx, registry);
-  const micro = createMicroService(ctx);
 
   function mutation(action: string, input: Input) {
     switch (action) {
@@ -50,6 +46,8 @@ export function openAuthorWorkspace(
         requiredRow(stmt(db, "SELECT id FROM author_projects WHERE id = ?;").get(projectId), "project", projectId);
         return ctx.readAuthorModel(projectId, input);
       }
+      case "jobs.list":
+        return jobs.listJobs(input);
       case "project.create": {
         const name = text(input, "name").trim();
         const product = input.product;
@@ -95,7 +93,7 @@ export function openAuthorWorkspace(
       case "run.complete":
       case "run.cancel":
       case "run.discard":
-        return runs.handleRunLifecycle(action, input);
+        return jobs.handleRunLifecycle(action, input);
     }
 
     const productAction = registry.resolveAction(action);
@@ -112,58 +110,59 @@ export function openAuthorWorkspace(
       case "draft.save":
         return ctx.dispatch(action, row, input, () => saveDraftForRow(ctx.document(row.id), text(input, "body")));
       case "run.preview":
-        return runs.previewBudget(row, input);
+        return jobs.previewBudget(row, input);
       case "run.start":
-        return runs.startRun(row, input);
+        return jobs.startRun(row, input);
       case "candidate.adopt":
-        return runs.adoptCandidate(row, input);
+        return jobs.adoptCandidate(row, input);
       case "run.history":
-        return runs.runHistory(row, input);
-      case "run.detail": {
-        const detail = runs.runDetail(row, input);
-        return { ...detail, microUsage: micro.usage(row.id) };
-      }
+        return jobs.runHistory(row, input);
+      case "run.detail":
+        return jobs.runDetail(row, input);
       case "run.reconcile":
-        return runs.reconcileRun(row, input);
+        return jobs.reconcileRun(row, input);
       default:
         return invalid("action", "unknown-action");
     }
   }
 
   function recoverStartup(): void {
-    runs.recoverGenerations();
-    proposals.recoverProposals();
-    micro.recover();
+    jobs.recoverAll();
     for (const mod of registry.all()) {
       mod.onStartupRecover?.(ctx);
     }
   }
+
+  const toolFacade = {
+    mutation,
+    snapshot: snapshots.snapshot,
+  };
 
   return {
     snapshot: snapshots.snapshot,
     readState: snapshots.readState,
     projectSeq: snapshots.projectSeq,
     mutation,
-    generationInput: runs.generationInput,
-    generationRunner: runs.generationRunner,
-    beginGenerationCall: runs.beginGenerationCall,
-    recordGenerationReceipt: runs.recordGenerationReceipt,
-    finishGeneration: runs.finishGeneration,
-    recoverGenerations: runs.recoverGenerations,
-    reserveRefinement: runs.reserveRefinement,
-    failGeneration: runs.failGeneration,
-    buildSelectionRewriteInput: runs.buildSelectionRewriteInput,
-    beginMicroCall: micro.begin,
-    recordMicroReceipt: micro.recordReceipt,
-    finishMicroCall: micro.finish,
-    recoverMicroCalls: micro.recover,
-    microUsage: micro.usage,
-    beginProposalGeneration: proposals.beginProposalGeneration,
-    recordProposalReceipt: proposals.recordProposalReceipt,
-    finishProposalGeneration: proposals.finishProposalGeneration,
-    cancelProposalGeneration: proposals.cancelProposalGeneration,
-    recoverProposals: proposals.recoverProposals,
+    listJobs: jobs.listJobs,
+    generationInput: jobs.generationInput,
+    generationRunner: jobs.generationRunner,
+    beginJobCall: jobs.beginJobCall,
+    recordJobReceipt: jobs.recordJobReceipt,
+    finishGeneration: jobs.finishGeneration,
+    reserveRefinement: jobs.reserveRefinement,
+    failGeneration: jobs.failGeneration,
+    buildSelectionRewriteInput: jobs.buildSelectionRewriteInput,
+    beginSelectionRewrite: jobs.beginSelectionRewrite,
+    finishSelectionRewrite: jobs.finishSelectionRewrite,
+    microUsage: jobs.microUsage,
+    beginProposalGeneration: jobs.beginProposalGeneration,
+    recordProposalReceipt: jobs.recordProposalReceipt,
+    finishProposalGeneration: jobs.finishProposalGeneration,
+    cancelProposalGeneration: jobs.cancelProposalGeneration,
+    recoverJobs: jobs.recoverAll,
     recoverStartup,
+    verifyUsageConsistency: () => ctx.jobs.verifyUsageConsistency(),
+    agentTools: () => registry.collectAgentTools(toolFacade),
     resumeExports: () => toutiaoModule.onStartupRecover?.(ctx),
   };
 }

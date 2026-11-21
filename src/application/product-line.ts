@@ -14,6 +14,22 @@ export interface ActionDefinition {
   readonly handler: (ctx: WorkspaceContext, input: Input, row?: DocumentRow) => unknown;
 }
 
+export interface ProductAgentToolFacade {
+  mutation(action: string, input: Record<string, unknown>): unknown;
+  snapshot(projectId?: string, documentId?: string): unknown;
+}
+
+export interface ProductAgentToolSpec {
+  readonly name: string;
+  readonly description: string;
+  readonly readOnly: boolean;
+  readonly proposalOnly?: boolean;
+  readonly properties: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  readonly required?: readonly string[];
+  readonly outputDescription: string;
+  readonly execute: (args: Record<string, unknown>) => unknown;
+}
+
 export interface GenerationRunnerInput {
   readonly id?: string;
   readonly product?: string;
@@ -102,6 +118,7 @@ export interface ProductLineModule {
   ): Record<string, unknown>;
 
   readonly readModels: Readonly<Record<string, AuthorReadUnitFactory>>;
+  readonly agentTools?: (workspace: ProductAgentToolFacade) => readonly ProductAgentToolSpec[];
   onStartupRecover?(ctx: WorkspaceContext): void;
 }
 
@@ -112,6 +129,7 @@ export interface ProductLineRegistry {
   isLockedState(product: string, state: string): boolean;
   resolveAction(action: string): ActionDefinition | undefined;
   collectReadModels(): Readonly<Record<string, AuthorReadUnitFactory>>;
+  collectAgentTools(workspace: ProductAgentToolFacade): readonly ProductAgentToolSpec[];
 }
 
 export function createProductLineRegistry(modules: readonly ProductLineModule[]): ProductLineRegistry {
@@ -152,5 +170,19 @@ export function createProductLineRegistry(modules: readonly ProductLineModule[])
     },
     resolveAction: (action) => actionMap.get(action),
     collectReadModels: () => readModels,
+    collectAgentTools(workspace) {
+      const specs: ProductAgentToolSpec[] = [];
+      const seen = new Set<string>();
+      for (const mod of byId.values()) {
+        for (const tool of mod.agentTools?.(workspace) ?? []) {
+          if (seen.has(tool.name)) {
+            throw new Error(`Duplicate agent tool: ${tool.name}`);
+          }
+          seen.add(tool.name);
+          specs.push(tool);
+        }
+      }
+      return specs;
+    },
   };
 }

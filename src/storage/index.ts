@@ -153,12 +153,25 @@ export {
 } from "./migrations.ts";
 
 export {
+  createCoreSchema,
   SORT_KEY_STEP,
   computeSortKeyBetween,
   inferEventConcern,
   auditEventLogConcerns,
   type EventLogConcernAudit,
-} from "./author-schema.ts";
+} from "./core-schema.ts";
+
+export {
+  createJobLedger,
+  type CreateJobInput,
+  type JobCallRecord,
+  type JobLedger,
+  type JobRecord,
+  type LedgerJobKind,
+  type MicroUsageAggregate,
+  type OpenJobRecord,
+  type UsageConsistencyIssue,
+} from "./job-ledger.ts";
 
 export {
   createFtsSchema,

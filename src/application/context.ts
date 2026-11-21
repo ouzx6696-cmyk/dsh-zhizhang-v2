@@ -4,18 +4,19 @@ import {
   appendEvent,
   appendRevision,
   createCommandSchema,
+  createCoreSchema,
   createDeliverySchema,
   createEventLogSchema,
   createFtsSchema,
+  createJobLedger,
   executeCommand,
   stmt,
   syncChapterFts,
   withReadTx,
   withWriteTx,
+  type JobLedger,
   type SqliteDatabase,
 } from "../storage/index.ts";
-import { createGenerationLedger, type GenerationLedger } from "../storage/author-generation.ts";
-import { createAuthorSchema } from "../storage/author-schema.ts";
 import { createAuthorModelReader } from "../workflow/author-reads.ts";
 import { isLegalTransition, type Concern, type RunState } from "../workflow/index.ts";
 import type { ProductLineRegistry } from "./product-line.ts";
@@ -98,14 +99,14 @@ export function createWorkspaceContext(db: SqliteDatabase, registry: ProductLine
   createCommandSchema(db);
   createEventLogSchema(db);
   createDeliverySchema(db);
-  createAuthorSchema(db);
-  createFtsSchema(db);
+  createCoreSchema(db);
   for (const mod of registry.all()) mod.initSchema(db);
+  createFtsSchema(db);
 
   const atomic = <T>(apply: () => T): T => withWriteTx(db, apply);
   const read = <T>(query: () => T): T => withReadTx(db, query);
 
-  const generation: GenerationLedger = createGenerationLedger(db);
+  const jobs: JobLedger = createJobLedger(db);
   const readAuthorModel = createAuthorModelReader(db, { read, atomic }, registry.collectReadModels());
 
   const competingRunStmt = stmt(db, `
@@ -170,7 +171,7 @@ export function createWorkspaceContext(db: SqliteDatabase, registry: ProductLine
 
   function assertRunAvailable(action: string, documentId: string, runId: string | null = null): void {
     if (competingRunStmt.get(documentId, runId)) refuse(action, "generation-in-progress");
-    if (generation.unresolvedForDocument(documentId, runId)) {
+    if (jobs.unresolvedForDocument(documentId, runId)) {
       refuse(action, "generation-needs-reconciliation");
     }
   }
@@ -271,7 +272,7 @@ export function createWorkspaceContext(db: SqliteDatabase, registry: ProductLine
 
   return {
     db,
-    generation,
+    jobs,
     readAuthorModel,
     atomic,
     read,

@@ -3,14 +3,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
-import { createGenerationLedger } from "../src/storage/author-generation.ts";
-import { createAuthorSchema, SORT_KEY_STEP } from "../src/storage/author-schema.ts";
+import { openAuthorWorkspace } from "../src/application/author-workspace.ts";
 import {
   appendRevision,
-  createCommandSchema,
-  createDeliverySchema,
-  createEventLogSchema,
-  createFtsSchema,
   createProjectionSchema,
   createStore,
   executeCommand,
@@ -18,12 +13,13 @@ import {
   openStore,
   optimizeFts,
   searchWorkspaceFts,
+  SORT_KEY_STEP,
   withReadTx,
   withWriteTx,
 } from "../src/storage/index.ts";
 import { createAuthorModelReader } from "../src/workflow/author-reads.ts";
 
-/** Performance gates from V2.3 Optimization Plan §5 & DB-24. */
+/** Performance gates for 5,000-chapter scale verification. */
 export const DB_BENCH_GATES = {
   navigationColdMs: 300,
   navigationHotMs: 5,
@@ -44,8 +40,7 @@ function roundMs(value) {
 }
 
 /**
- * Runs the 5,000-chapter / 50,000-event Zhizhang V2.3 database scale benchmark
- * (DB-24) and evaluates every §5 performance gate.
+ * Runs the 5,000-chapter / 50,000-event Zhizhang 3.0 database scale benchmark.
  */
 export function runDbBench(options = {}) {
   const chapters = options.chapters ?? 5000;
@@ -67,13 +62,8 @@ export function runDbBench(options = {}) {
       db = openDatabase(":memory:");
     }
 
-    createCommandSchema(db);
-    createEventLogSchema(db);
-    createDeliverySchema(db);
     createProjectionSchema(db);
-    createAuthorSchema(db);
-    createFtsSchema(db);
-    createGenerationLedger(db);
+    openAuthorWorkspace(db);
 
     const projectId = "bench-project-1";
     const baseSentence = "夜风吹过长廊，灯火明灭之间，旧档案柜的铜锁泛出微弱寒光。";

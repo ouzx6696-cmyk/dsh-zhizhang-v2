@@ -7,6 +7,7 @@ import type {
 } from "../../../contracts/workspace-dto.ts";
 import type { WorkbenchShellHost } from "../plugins/types.ts";
 import { el } from "../store.ts";
+import { createButton, createCard, createInput } from "../ui/primitives.ts";
 
 const CATEGORY_LABELS: Readonly<Record<string, string>> = {
   all: "全部",
@@ -81,34 +82,34 @@ export function createWorldbookView(container: HTMLElement, host: WorkbenchShell
     container.replaceChildren();
 
     const header = el("header", "", "view-header");
-    header.append(
-      el("div", "", ""),
-    );
-    header.firstElementChild!.append(
+    const left = el("div");
+    left.append(
       el("p", "结构化设定现行态 · 伏笔追踪 · 时序冲突预警", "eyebrow"),
       el("h1", "动态设定库"),
     );
 
-    const addFsBtn = el("button", "+ 登记新伏笔", "primary");
-    addFsBtn.type = "button";
-    addFsBtn.onclick = () =>
-      void host.perform(async () => {
-        const title = await host.modal.prompt({
-          title: "登记长篇伏笔",
-          message: "输入伏笔名称，例如：银色怀表背面的刻字",
-          label: "伏笔标题",
-          confirmLabel: "保存伏笔",
-        });
-        if (!title?.trim()) return;
-        await host.request("foreshadow.create", {
-          projectId,
-          title: title.trim(),
-          plantedChapterId: documentId || undefined,
-          status: "planted",
-        });
-        await refresh();
-      });
-    header.append(addFsBtn);
+    const addFsBtn = createButton({
+      label: "+ 登记新伏笔",
+      variant: "primary",
+      onClick: () =>
+        void host.perform(async () => {
+          const title = await host.modal.prompt({
+            title: "登记长篇伏笔",
+            message: "输入伏笔名称，例如：银色怀表背面的刻字",
+            label: "伏笔标题",
+            confirmLabel: "保存伏笔",
+          });
+          if (!title?.trim()) return;
+          await host.request("foreshadow.create", {
+            projectId,
+            title: title.trim(),
+            plantedChapterId: documentId || undefined,
+            status: "planted",
+          });
+          await refresh();
+        }),
+    });
+    header.append(left, addFsBtn);
     container.append(header);
 
     // 1. Conflict diagnostics banner
@@ -117,8 +118,7 @@ export function createWorldbookView(container: HTMLElement, host: WorkbenchShell
       box.append(el("p", `检测到 ${conflicts.length} 项设定/伏笔连续性预警`, "conflict-title"));
       const ul = el("ul", "", "modal-list");
       for (const c of conflicts) {
-        const li = el("li", `[${c.severity === "error" ? "严重" : "提醒"}] ${c.message}`);
-        ul.append(li);
+        ul.append(el("li", `[${c.severity === "error" ? "严重" : "提醒"}] ${c.message}`));
       }
       box.append(ul);
       container.append(box);
@@ -126,8 +126,7 @@ export function createWorldbookView(container: HTMLElement, host: WorkbenchShell
 
     // 2. Pending AI Setting / Fact-Sync Proposals
     if (proposals.length > 0) {
-      const propBox = el("section", "", "panel-card");
-      propBox.append(el("h2", `待确认 AI 设定与记忆同步提案（${proposals.length}）`));
+      const propRows: HTMLElement[] = [];
       for (const prop of proposals) {
         const row = el("div", "", "proposal-row");
         const isFactSync = prop.kind === "fact_sync";
@@ -163,123 +162,176 @@ export function createWorldbookView(container: HTMLElement, host: WorkbenchShell
         row.append(el("pre", JSON.stringify(prop.payload, null, 2), "server-body-preview"));
 
         const actions = el("div", "", "actions");
-        const approveBtn = el("button", "确认入库", "primary");
-        approveBtn.type = "button";
-        approveBtn.onclick = () =>
-          void host.perform(async () => {
-            await host.request("proposal.decide", {
-              proposalId: prop.id,
-              accept: true,
-              ...(isFactSync && checkboxes.length > 0
-                ? {
-                  selectedNewFactIndices: checkboxes
-                    .filter((cb) => cb.checked)
-                    .map((cb) => Number(cb.dataset.index)),
-                }
-                : {}),
-            });
-            host.notice("设定提案已确认入库");
-            await refresh();
-            await host.load();
-          });
-        const rejectBtn = el("button", "拒绝提案");
-        rejectBtn.type = "button";
-        rejectBtn.onclick = () =>
-          void host.perform(async () => {
-            await host.request("proposal.decide", { proposalId: prop.id, accept: false });
-            await refresh();
-          });
-        actions.append(approveBtn, rejectBtn);
+        actions.append(
+          createButton({
+            label: "确认入库",
+            variant: "primary",
+            size: "sm",
+            onClick: () =>
+              void host.perform(async () => {
+                await host.request("proposal.decide", {
+                  proposalId: prop.id,
+                  accept: true,
+                  ...(isFactSync && checkboxes.length > 0
+                    ? {
+                      selectedNewFactIndices: checkboxes
+                        .filter((cb) => cb.checked)
+                        .map((cb) => Number(cb.dataset.index)),
+                    }
+                    : {}),
+                });
+                host.notice("设定提案已确认入库");
+                await refresh();
+                await host.load();
+              }),
+          }),
+          createButton({
+            label: "拒绝提案",
+            variant: "secondary",
+            size: "sm",
+            onClick: () =>
+              void host.perform(async () => {
+                await host.request("proposal.decide", { proposalId: prop.id, accept: false });
+                await refresh();
+              }),
+          }),
+        );
         row.append(actions);
-        propBox.append(row);
+        propRows.push(row);
       }
-      container.append(propBox);
+      container.append(
+        createCard({
+          tag: "section",
+          variant: "elevated",
+          padding: "md",
+          title: `待确认 AI 设定与记忆同步提案（${proposals.length}）`,
+          body: propRows,
+        }),
+      );
     }
 
     // 3. Category filter bar
     const filterBar = el("div", "", "filter-toolbar");
     const seg = el("div", "", "segmented");
     for (const [key, label] of Object.entries(CATEGORY_LABELS)) {
-      const btn = el("button", label, key === category ? "active" : undefined);
-      btn.type = "button";
-      btn.onclick = () => {
-        category = key;
-        void host.perform(refresh);
-      };
-      seg.append(btn);
+      seg.append(
+        createButton({
+          label,
+          variant: "ghost",
+          size: "sm",
+          active: key === category,
+          pressed: key === category,
+          onClick: () => {
+            category = key;
+            void host.perform(refresh);
+          },
+        }),
+      );
     }
-    const searchInput = document.createElement("input");
-    searchInput.type = "search";
-    searchInput.placeholder = "按实体名筛选…";
-    searchInput.value = query;
-    searchInput.onchange = () => {
-      query = searchInput.value;
-      void host.perform(refresh);
-    };
-    filterBar.append(seg, searchInput);
+    const searchField = createInput({
+      kind: "search",
+      ariaLabel: "按实体名筛选",
+      placeholder: "按实体名筛选…",
+      value: query,
+      onChange: (val) => {
+        query = val;
+        void host.perform(refresh);
+      },
+    });
+    filterBar.append(seg, searchField.root);
     container.append(filterBar);
 
     // 4. Current materialized lore grid
-    const loreCard = el("section", "", "panel-card");
-    loreCard.append(el("h2", `当前生效设定档案（${entries.length}）`));
+    const loreBody: HTMLElement[] = [];
     if (entries.length === 0) {
-      loreCard.append(el("p", "暂无匹配设定；可在右侧「设定」标签页提交提案并确认。", "muted-copy"));
+      loreBody.push(el("p", "暂无匹配设定；可在右侧「设定」标签页提交提案并确认。", "muted-copy"));
     } else {
       for (const entry of entries) {
-        const item = el("article", "", "setting-item");
-        item.append(
-          el(
-            "p",
-            `[${CATEGORY_LABELS[entry.category] ?? entry.category}] ${entry.entityName ? `${entry.entityName} · ` : ""}${entry.factId}${entry.locked ? " · 🔒已锁定" : ""}`,
-            "setting-title",
-          ),
-          el("p", entry.fact.note),
-          el("p", `来源 ${entry.fact.source} · 生效章 ${entry.fact.effectiveFrom.chapterId} 第 ${entry.fact.effectiveFrom.point} 段`, "setting-meta"),
+        const eyebrow = `[${CATEGORY_LABELS[entry.category] ?? entry.category}]${entry.locked ? " · [已锁定]" : ""}`;
+        const title = `${entry.entityName ? `${entry.entityName} · ` : ""}${entry.factId}`;
+        loreBody.push(
+          createCard({
+            tag: "article",
+            variant: "subtle",
+            padding: "sm",
+            eyebrow,
+            title,
+            body: [
+              el("p", entry.fact.note),
+              el("p", `来源 ${entry.fact.source} · 生效章 ${entry.fact.effectiveFrom.chapterId} 第 ${entry.fact.effectiveFrom.point} 段`, "setting-meta"),
+            ],
+            className: "setting-item",
+          }),
         );
-        loreCard.append(item);
       }
       if (loreCursor) {
-        const moreBtn = el("button", "加载更多设定");
-        moreBtn.type = "button";
-        moreBtn.onclick = () => void host.perform(loadMoreLore);
-        loreCard.append(moreBtn);
+        loreBody.push(
+          createButton({
+            label: "加载更多设定",
+            variant: "secondary",
+            size: "sm",
+            onClick: () => void host.perform(loadMoreLore),
+          }),
+        );
       }
     }
-    container.append(loreCard);
+    container.append(
+      createCard({
+        tag: "section",
+        variant: "default",
+        padding: "md",
+        title: `当前生效设定档案（${entries.length}）`,
+        body: loreBody,
+      }),
+    );
 
     // 5. Foreshadows
-    const fsCard = el("section", "", "panel-card");
-    fsCard.append(el("h2", `伏笔账本（${foreshadows.length}）`));
+    const fsBody: HTMLElement[] = [];
     if (foreshadows.length === 0) {
-      fsCard.append(el("p", "尚未登记伏笔。", "muted-copy"));
+      fsBody.push(el("p", "尚未登记伏笔。", "muted-copy"));
     } else {
       for (const fs of foreshadows) {
-        const item = el("article", "", "setting-item");
-        item.append(
-          el("p", `${fs.title} · ${FORESHADOW_LABELS[fs.status] ?? fs.status}`, "setting-title"),
-          el("p", fs.note || "暂无备注", "setting-meta"),
+        const canResolve = fs.status === "planted" || fs.status === "hinted";
+        const footer = canResolve
+          ? createButton({
+            label: "标记已在当前章回收",
+            variant: "primary",
+            size: "sm",
+            onClick: () =>
+              void host.perform(async () => {
+                await host.request("foreshadow.patch", {
+                  projectId,
+                  id: fs.id,
+                  status: "resolved",
+                  resolvedChapterId: documentId || undefined,
+                });
+                await refresh();
+              }),
+          })
+          : undefined;
+        fsBody.push(
+          createCard({
+            tag: "article",
+            variant: "subtle",
+            padding: "sm",
+            eyebrow: FORESHADOW_LABELS[fs.status] ?? fs.status,
+            title: fs.title,
+            body: el("p", fs.note || "暂无备注", "setting-meta"),
+            ...(footer ? { footer } : {}),
+            className: "setting-item",
+          }),
         );
-        if (fs.status === "planted" || fs.status === "hinted") {
-          const actions = el("div", "", "actions");
-          const resolveBtn = el("button", "标记已在当前章回收", "primary");
-          resolveBtn.type = "button";
-          resolveBtn.onclick = () =>
-            void host.perform(async () => {
-              await host.request("foreshadow.patch", {
-                projectId,
-                id: fs.id,
-                status: "resolved",
-                resolvedChapterId: documentId || undefined,
-              });
-              await refresh();
-            });
-          actions.append(resolveBtn);
-          item.append(actions);
-        }
-        fsCard.append(item);
       }
     }
-    container.append(fsCard);
+    container.append(
+      createCard({
+        tag: "section",
+        variant: "default",
+        padding: "md",
+        title: `伏笔账本（${foreshadows.length}）`,
+        body: fsBody,
+      }),
+    );
   }
 
   return { refresh };

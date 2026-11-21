@@ -8,6 +8,7 @@ import {
   type ParagraphDiffSummary,
 } from "../diff.ts";
 import { el } from "../dom.ts";
+import { createButton } from "../ui/primitives.ts";
 
 export type DiffDisplayMode = "split" | "inline" | "raw";
 
@@ -70,9 +71,13 @@ function buildHunkControls(
   wrap.append(label);
 
   if (onLocate) {
-    const locBtn = el("button", { className: "diff-locate-btn", text: "📍 定位" });
-    locBtn.type = "button";
-    locBtn.onclick = () => onLocate(row.leftText || row.rightText, row.leftIndex);
+    const locBtn = createButton({
+      label: "定位",
+      variant: "ghost",
+      size: "sm",
+      className: "diff-locate-btn",
+      onClick: () => onLocate(row.leftText || row.rightText, row.leftIndex),
+    });
     wrap.append(locBtn);
   }
   return wrap;
@@ -138,14 +143,18 @@ export function createDiffView(container: HTMLElement, callbacks?: DiffViewCallb
       className: "diff-raw-banner-text tabular",
       text: `当前勾选 ${adopted.size} / ${hunkIndices.length} 处变更，采纳仍将按勾选合稿（不会整篇覆盖）`,
     });
-    const backBtn = el("button", { className: "diff-raw-back-btn", text: "返回并排对照" });
-    backBtn.type = "button";
-    backBtn.dataset.diffBackSplit = "true";
-    backBtn.onclick = () => {
-      mode = "split";
-      paintDiffSurfaceOnly();
-      paintMetadata();
-    };
+    const backBtn = createButton({
+      label: "返回并排对照",
+      variant: "secondary",
+      size: "sm",
+      className: "diff-raw-back-btn",
+      dataset: { diffBackSplit: "true" },
+      onClick: () => {
+        mode = "split";
+        paintDiffSurfaceOnly();
+        paintMetadata();
+      },
+    });
     banner.append(msg, backBtn);
     return banner;
   }
@@ -157,30 +166,39 @@ export function createDiffView(container: HTMLElement, callbacks?: DiffViewCallb
     status.dataset.mergeStatus = "true";
 
     const actions = el("div", { className: "actions" });
-    const allBtn = el("button", { text: "全选变更" });
-    allBtn.type = "button";
-    allBtn.onclick = () => {
-      pushUndo();
-      adopted = new Set(hunkIndices);
-      paintDiffSurfaceOnly();
-    };
-    const noneBtn = el("button", { text: "全不选" });
-    noneBtn.type = "button";
-    noneBtn.onclick = () => {
-      pushUndo();
-      adopted = new Set();
-      paintDiffSurfaceOnly();
-    };
-    const undoBtn = el("button", { text: "撤销选择" });
-    undoBtn.type = "button";
-    undoBtn.dataset.mergeUndo = "true";
-    undoBtn.disabled = undoStack.length === 0;
-    undoBtn.onclick = () => {
-      const prev = undoStack.pop();
-      if (!prev) return;
-      adopted = new Set(prev);
-      paintDiffSurfaceOnly();
-    };
+    const allBtn = createButton({
+      label: "全选变更",
+      variant: "secondary",
+      size: "sm",
+      onClick: () => {
+        pushUndo();
+        adopted = new Set(hunkIndices);
+        paintDiffSurfaceOnly();
+      },
+    });
+    const noneBtn = createButton({
+      label: "全不选",
+      variant: "secondary",
+      size: "sm",
+      onClick: () => {
+        pushUndo();
+        adopted = new Set();
+        paintDiffSurfaceOnly();
+      },
+    });
+    const undoBtn = createButton({
+      label: "撤销选择",
+      variant: "secondary",
+      size: "sm",
+      disabled: undoStack.length === 0,
+      dataset: { mergeUndo: "true" },
+      onClick: () => {
+        const prev = undoStack.pop();
+        if (!prev) return;
+        adopted = new Set(prev);
+        paintDiffSurfaceOnly();
+      },
+    });
     actions.append(allBtn, noneBtn, undoBtn);
     row.append(status, actions);
 
@@ -397,7 +415,7 @@ export function createDiffView(container: HTMLElement, callbacks?: DiffViewCallb
     };
   }
 
-  // FE-19: keyboard hunk jump (Alt+ArrowDown / Alt+ArrowUp or J / K when not typing in textarea)
+  // Keyboard hunk jump (Alt+ArrowDown / Alt+ArrowUp or J / K when not typing in textarea)
   const onKeyDown = (event: KeyboardEvent) => {
     if (mode === "raw" || hunkIndices.length === 0) return;
     const target = event.target as HTMLElement | null;

@@ -33,3 +33,8 @@ export {
   type SanitizedDiagnosticsReport,
   type ZhizhangConfigSchema,
 } from "./settings.ts";
+export {
+  createHostJobEngine,
+  type ActiveJobCounts,
+  type HostJobEngine,
+} from "./job-engine.ts";

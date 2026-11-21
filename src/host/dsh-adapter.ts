@@ -68,7 +68,7 @@ export interface HostServiceContract {
 }
 
 /**
- * One row per host service, mirrored in `docs/03-architecture.md`.
+ * One row per host service, mirrored in `docs/02-architecture.md`.
  * Required services go into `inject`; optional ones are resolved lazily through
  * `ctx.get(name)` and mounted in their own `ctx.inject([...])` sub-scope.
  */
@@ -88,13 +88,13 @@ export const HOST_SERVICE_CONTRACTS: readonly HostServiceContract[] = [
   {
     name: "tools",
     required: false,
-    purpose: "注册 7 个只读工具与 3 个提案工具",
+    purpose: "注册 11 个声明式对话工具（番茄 7 只读 + 3 提案，头条 1 只读）",
     source: "DsH 0.2.x plugin docs · ctx.tools.register（未录制）",
   },
   {
     name: "configForms",
     required: false,
-    purpose: "注册插件设置表单",
+    purpose: "注册插件设置表单（宿主机侧可选回退；Web UI 主入口由 client/slot.ts 挂载 settings.plugins.tab）",
     source: "DsH 0.2.x plugin docs · ctx.configForms.register（未录制）",
   },
 ];

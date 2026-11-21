@@ -4,6 +4,7 @@ import type {
 } from "../../../contracts/workspace-dto.ts";
 import type { WorkbenchShellHost } from "../plugins/types.ts";
 import { el } from "../store.ts";
+import { createButton } from "../ui/primitives.ts";
 
 const STATUS_LABELS: Readonly<Record<string, string>> = {
   included: "完整注入",
@@ -57,9 +58,13 @@ export function createContextPreviewPanel(container: HTMLElement, host: Workbenc
 
     const header = el("div", "", "context-header");
     header.append(el("h3", "上下文槽位装配器", "sub-heading"));
-    const refreshBtn = el("button", "刷新装配预览", "notice-dismiss");
-    refreshBtn.type = "button";
-    refreshBtn.onclick = () => void refresh();
+    const refreshBtn = createButton({
+      label: "刷新装配预览",
+      variant: "ghost",
+      size: "sm",
+      className: "notice-dismiss",
+      onClick: () => void refresh(),
+    });
     header.append(refreshBtn);
     container.append(header);
 
@@ -108,34 +113,34 @@ export function createContextPreviewPanel(container: HTMLElement, host: Workbenc
           rec.reasons.join(" · ") || `分类 ${rec.card.category}`,
           "setting-meta",
         );
-        const toggleBtn = el(
-          "button",
-          rec.mountedMode && rec.mountTarget === "chapter" ? "取消本章挂载" : "挂载到本章",
-          "notice-dismiss",
-        );
-        toggleBtn.type = "button";
-        toggleBtn.onclick = () =>
-          void host.perform(async () => {
-            if (rec.mountedMode && rec.mountTarget === "chapter") {
-              await host.request("library.unmount", {
-                projectId,
-                targetType: "chapter",
-                targetId: documentId,
-                itemKind: "technique",
-                itemId: rec.card.id,
-              });
-            } else {
-              await host.request("library.mount", {
-                projectId,
-                targetType: "chapter",
-                targetId: documentId,
-                itemKind: "technique",
-                itemId: rec.card.id,
-                mode: "pin",
-              });
-            }
-            await refresh();
-          });
+        const toggleBtn = createButton({
+          label: rec.mountedMode && rec.mountTarget === "chapter" ? "取消本章挂载" : "挂载到本章",
+          variant: "secondary",
+          size: "sm",
+          className: "notice-dismiss",
+          onClick: () =>
+            void host.perform(async () => {
+              if (rec.mountedMode && rec.mountTarget === "chapter") {
+                await host.request("library.unmount", {
+                  projectId,
+                  targetType: "chapter",
+                  targetId: documentId,
+                  itemKind: "technique",
+                  itemId: rec.card.id,
+                });
+              } else {
+                await host.request("library.mount", {
+                  projectId,
+                  targetType: "chapter",
+                  targetId: documentId,
+                  itemKind: "technique",
+                  itemId: rec.card.id,
+                  mode: "pin",
+                });
+              }
+              await refresh();
+            }),
+        });
         card.append(title, reason, toggleBtn);
         recList.append(card);
       }

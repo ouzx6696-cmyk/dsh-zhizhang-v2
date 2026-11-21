@@ -17,6 +17,10 @@
     "outDir": "dist",
     "types": []
   },
-  "include": ["src/client/slot.ts", "src/client/workbench/**/*.ts"],
+  "include": [
+    "src/client/slot.ts",
+    "src/client/contracts/protected-rules.ts",
+    "src/client/workbench/**/*.ts"
+  ],
   "exclude": ["dist", "node_modules"]
 }

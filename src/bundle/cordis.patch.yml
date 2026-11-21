@@ -2,4 +2,4 @@
     - id: zhizhang-workbench
       name: '@zhizhang/dsh-workbench'
       config:
-        dataDirectory: !!js dshHomePath('zhizhang-v2')
+        dataDirectory: !!js dshHomePath('zhizhang-v3')

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   assertChapterFinalizable,
+  assertChapterTransition,
   chapterLengthWarnings,
   EDITORIAL_REJECTION_LIMIT,
   OUTLINE_SECTIONS,
@@ -11,7 +12,6 @@ import {
 } from "../../domain/fanqie/index.ts";
 import { pointAtOffset } from "../../domain/shared/index.ts";
 import { stmt, type SqliteDatabase } from "../../storage/index.ts";
-import { createAuthorSchema } from "../../storage/author-schema.ts";
 import { projectReadUnit, type AuthorReadUnitFactory } from "../../workflow/author-reads.ts";
 import {
   count,
@@ -75,9 +75,9 @@ import {
   settingsPage,
   upsertForeshadow,
 } from "./fanqie/lore.ts";
-import {
-  searchFanqieWorkspace,
-} from "./fanqie/search.ts";
+import { searchFanqieWorkspace } from "./fanqie/search.ts";
+import { initFanqieSchema } from "./fanqie/schema.ts";
+import { createFanqieAgentTools } from "./fanqie/tools.ts";
 import {
   attachChapterToTree,
   createAct,
@@ -100,7 +100,7 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
   const runGeneration = createFanqieGenerationRunner();
 
   function initSchema(db: SqliteDatabase): void {
-    createAuthorSchema(db);
+    initFanqieSchema(db);
   }
 
   function recordEvidence(ctx: WorkspaceContext, row: DocumentRow, input: Input) {
@@ -172,6 +172,7 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
         refuse("chapter.review", "editorial-rejection-limit");
       }
       const state: ChapterState = input.accept ? "reviewed" : "drafted";
+      assertChapterTransition(current.state as ChapterState, state);
       stmt(ctx.db, `
         UPDATE author_documents
         SET state = ?, editorial_rejections = editorial_rejections + ?, updated_at = ?
@@ -491,5 +492,6 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
       return { settings: page.entries, settingsCursor: page.cursor };
     },
     readModels,
+    agentTools: createFanqieAgentTools,
   };
 }

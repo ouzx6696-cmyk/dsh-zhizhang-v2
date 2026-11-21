@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 
-const MIN_NODE = [24, 15, 0];
+const MIN_NODE = [22, 0, 0];
 
 function parseVersion(raw) {
   return raw.replace(/^v/, "").split(".").slice(0, 3).map((part) => Number.parseInt(part, 10) || 0);

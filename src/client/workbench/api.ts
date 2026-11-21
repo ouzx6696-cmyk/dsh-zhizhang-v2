@@ -1,4 +1,4 @@
-import type { WorkspaceStateResponse } from "../../contracts/workspace-dto.ts";
+import type { UnifiedJobSummaryDto, WorkspaceStateResponse } from "../../contracts/workspace-dto.ts";
 import { TITLE_MAX } from "../contracts/protected-rules.ts";
 
 interface ApiPacket<T> {
@@ -13,7 +13,9 @@ const REASON_MESSAGES: Readonly<Record<string, string>> = {
   "generation-in-progress": "该稿件已有活动任务，请先完成或取消当前任务。",
   "generation-needs-reconciliation": "上一次任务仍在结束或等待用量核对。请刷新任务查看状态。",
   "proposal-in-progress": "同类型 AI 提案任务正在生成中，请稍候。",
+  "rewrite-in-progress": "当前章节已有选段微改写在进行中，请稍候。",
   "proposal-stale": "提案生成后章节已被修改，请拒绝本提案并重新生成。",
+  "preview-no-llm-transport": "本地预览模式未连接 DsH 模型通道，可通过“手动导入候选稿”演练差异对照与采纳流。",
   "export.conflict": "目标文件与获批稿件不同，请处理同名文件后重试。",
   "revision-locked": "该稿件已锁定，无法继续修改正文。",
   "setting-is-locked": "该编号的设定已锁定，拒绝覆盖。",
@@ -39,9 +41,7 @@ export interface ApiRequestOptions {
 const READ_TIMEOUT_MS = 15_000;
 const WRITE_TIMEOUT_MS = 30_000;
 const IO_TIMEOUT_MS = 120_000;
-// FE-07: these actions wait synchronously on an LLM call, a full-database
-// copy, or a bundle write, so a 30s budget would abort work the server is
-// still completing (and leave a half-finished save behind).
+
 const IO_ACTIONS: ReadonlySet<string> = new Set([
   "project.export_bundle",
   "project.import_bundle",
@@ -53,7 +53,7 @@ const IO_ACTIONS: ReadonlySet<string> = new Set([
   "revisions.compact",
 ]);
 
-/** FE-07: state reads 15s, ordinary writes 30s, long-running actions 120s. */
+/** State reads 15s, ordinary writes 30s, long-running I/O & sync rewrite 120s. */
 export function actionTimeoutMs(action?: string): number {
   if (!action) return READ_TIMEOUT_MS;
   return IO_ACTIONS.has(action) ? IO_TIMEOUT_MS : WRITE_TIMEOUT_MS;
@@ -63,6 +63,42 @@ function timeoutMessage(timeoutMs: number): string {
   return `请求超过 ${Math.round(timeoutMs / 1000)} 秒未响应。本地草稿已保留，请刷新确认服务器状态后再重试。`;
 }
 
+function resolveEndpoint(
+  action?: string,
+  input?: Record<string, unknown>,
+): { readonly path: string; readonly method: "GET" | "POST"; readonly body?: Record<string, unknown> } {
+  if (!action) {
+    return { path: "./state", method: "GET" };
+  }
+  if (action === "jobs.list") {
+    return { path: "./jobs", method: "GET" };
+  }
+  if (action === "run.preview") {
+    return { path: "./jobs/preview", method: "POST", body: { ...(input ?? {}) } };
+  }
+  if (action === "run.generate") {
+    return { path: "./jobs/start", method: "POST", body: { ...(input ?? {}), kind: "draft_generation" } };
+  }
+  if (action === "proposal.generate") {
+    const proposalKind = typeof input?.kind === "string" ? input.kind : input?.proposalKind;
+    return {
+      path: "./jobs/start",
+      method: "POST",
+      body: { ...(input ?? {}), kind: "proposal_extraction", proposalKind },
+    };
+  }
+  if (action === "selection.rewrite") {
+    return { path: "./jobs/start", method: "POST", body: { ...(input ?? {}), kind: "selection_rewrite" } };
+  }
+  if (action === "run.cancel") {
+    return { path: "./jobs/cancel", method: "POST", body: { ...(input ?? {}), kind: "draft_generation" } };
+  }
+  if (action === "proposal.cancel") {
+    return { path: "./jobs/cancel", method: "POST", body: { ...(input ?? {}), kind: "proposal_extraction" } };
+  }
+  return { path: "./command", method: "POST", body: { action, ...(input ?? {}) } };
+}
+
 export async function apiRequest<T>(
   context: WorkbenchRequestContext,
   action?: string,
@@ -70,20 +106,27 @@ export async function apiRequest<T>(
   ifSequence?: number,
   options: ApiRequestOptions = {},
 ): Promise<T> {
-  const url = new URL(action ? "./mutate" : "./state", location.href);
-  if (context.projectId) url.searchParams.set("projectId", context.projectId);
-  if (context.documentId) url.searchParams.set("documentId", context.documentId);
-  if (ifSequence !== undefined) url.searchParams.set("ifSequence", String(ifSequence));
+  const endpoint = resolveEndpoint(action, input);
+  const url = new URL(endpoint.path, location.href);
+  if (endpoint.method === "GET") {
+    if (context.projectId) url.searchParams.set("projectId", context.projectId);
+    if (context.documentId) url.searchParams.set("documentId", context.documentId);
+    if (ifSequence !== undefined) url.searchParams.set("ifSequence", String(ifSequence));
+    if (action === "jobs.list" && input) {
+      if (typeof input.kind === "string" && input.kind) url.searchParams.set("kind", input.kind);
+      if (typeof input.limit === "number") url.searchParams.set("limit", String(input.limit));
+    }
+  }
 
   const timeoutMs = options.timeoutMs ?? actionTimeoutMs(action);
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const fetchOptions: RequestInit = {
-    ...(action
+    ...(endpoint.method === "POST"
       ? {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, ...input }),
-      }
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(endpoint.body ?? {}),
+        }
       : {}),
     signal: timeoutSignal,
   };
@@ -123,4 +166,11 @@ export async function fetchWorkspaceState(
   ifSequence?: number,
 ): Promise<WorkspaceStateResponse> {
   return apiRequest<WorkspaceStateResponse>(context, undefined, undefined, ifSequence);
+}
+
+export async function fetchWorkspaceJobs(
+  context: WorkbenchRequestContext,
+  limit = 20,
+): Promise<readonly UnifiedJobSummaryDto[]> {
+  return apiRequest<readonly UnifiedJobSummaryDto[]>(context, "jobs.list", { limit });
 }

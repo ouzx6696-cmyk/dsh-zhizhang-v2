@@ -2,6 +2,7 @@ import type { SelectionRewriteMode, SelectionRewriteResultDto } from "../../../c
 import { computeInlineDiff, countNonWhitespaceChars } from "../diff.ts";
 import { el } from "../dom.ts";
 import type { WorkbenchShellHost } from "../plugins/types.ts";
+import { createButton } from "../ui/primitives.ts";
 
 export interface SelectionMicrobarOptions {
   readonly getProviderModel: () => { readonly provider: string; readonly model: string };
@@ -32,7 +33,7 @@ const MAX_AI_UNDO_STEPS = 10;
  * Verifies that a captured selection still belongs to the active document and
  * resolves its safe replacement bounds. If edits before the selection shifted
  * its offset, relocates ONLY when `captured.text` appears uniquely in the body;
- * refuses on 0 matches, >1 ambiguous matches, or document change (FE-01).
+ * refuses on 0 matches, >1 ambiguous matches, or document change.
  */
 export function resolveCapturedSelection(
   captured: CapturedSelection,
@@ -67,7 +68,7 @@ export function resolveCapturedSelection(
  * Replaces the active `[start, end]` range in the `<textarea>`, preferring
  * `document.execCommand("insertText")` so native `Ctrl+Z` undo stays intact,
  * and falling back to `setRangeText(..., "select")` + `input` event dispatch
- * when `execCommand` is unavailable or returns `false` (FE-02).
+ * when `execCommand` is unavailable or returns `false`.
  *
  * Returns `true` when the `execCommand` path succeeded.
  */
@@ -150,9 +151,13 @@ export function createSelectionMicrobar(
   bar.hidden = true;
 
   const modeGroup = el("div", { className: "selection-mode-group" });
-  const undoBtn = el("button", { className: "selection-microbar-undo", text: "撤销上次 AI 替换" });
-  undoBtn.type = "button";
-  undoBtn.dataset.selectionUndo = "true";
+  const undoBtn = createButton({
+    label: "撤销上次 AI 替换",
+    variant: "secondary",
+    size: "sm",
+    className: "selection-microbar-undo",
+    dataset: { selectionUndo: "true" },
+  });
   undoBtn.hidden = true;
 
   const previewCard = el("div", { className: "selection-diff-card" });
@@ -348,44 +353,53 @@ export function createSelectionMicrobar(
     previewCard.append(diffBody);
 
     const actions = el("div", { className: "actions" });
-    const applyBtn = el("button", { className: "primary", text: "应用替换" });
-    applyBtn.type = "button";
-    applyBtn.dataset.selectionApply = "true";
-    applyBtn.onclick = () => {
-      const check = resolveCapturedSelection(captured, host.getState().documentId, editor.value);
-      if (!check.ok) {
+    const applyBtn = createButton({
+      label: "应用替换",
+      variant: "primary",
+      size: "sm",
+      dataset: { selectionApply: "true" },
+      onClick: () => {
+        const check = resolveCapturedSelection(captured, host.getState().documentId, editor.value);
+        if (!check.ok) {
+          hidePreview();
+          syncToolbarVisibility();
+          host.notice(failureNoticeForReason(check.reason), true);
+          return;
+        }
+        applySelectionReplacement(editor, check.start, check.end, res.rewrittenText);
+        pushAiUndo({
+          documentId: captured.documentId,
+          start: check.start,
+          before: captured.text,
+          after: res.rewrittenText,
+        });
+        hidePreview();
+        activeSelection = null;
+        syncToolbarVisibility();
+        host.notice("已替换选中片段（可点击“撤销上次 AI 替换”或 Ctrl+Z）");
+      },
+    });
+    const cancelBtn = createButton({
+      label: "取消",
+      variant: "secondary",
+      size: "sm",
+      onClick: () => {
         hidePreview();
         syncToolbarVisibility();
-        host.notice(failureNoticeForReason(check.reason), true);
-        return;
-      }
-      applySelectionReplacement(editor, check.start, check.end, res.rewrittenText);
-      pushAiUndo({
-        documentId: captured.documentId,
-        start: check.start,
-        before: captured.text,
-        after: res.rewrittenText,
-      });
-      hidePreview();
-      activeSelection = null;
-      syncToolbarVisibility();
-      host.notice("已替换选中片段（可点击“撤销上次 AI 替换”或 Ctrl+Z）");
-    };
-    const cancelBtn = el("button", { text: "取消" });
-    cancelBtn.type = "button";
-    cancelBtn.onclick = () => {
-      hidePreview();
-      syncToolbarVisibility();
-    };
+      },
+    });
     actions.append(applyBtn, cancelBtn);
     previewCard.append(actions);
   }
 
   for (const [mode, label] of modes) {
-    const btn = el("button", { text: label });
-    btn.type = "button";
-    btn.dataset.selectionMode = mode;
-    btn.onclick = () => void host.perform(() => triggerRewrite(mode));
+    const btn = createButton({
+      label,
+      variant: "secondary",
+      size: "sm",
+      dataset: { selectionMode: mode },
+      onClick: () => void host.perform(() => triggerRewrite(mode)),
+    });
     modeGroup.append(btn);
   }
   bar.append(modeGroup, undoBtn);

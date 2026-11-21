@@ -11,6 +11,7 @@ import {
   resumeExports,
 } from "./delivery.ts";
 import { buildToutiaoFrozenContext, createToutiaoGenerationRunner } from "./generation.ts";
+import { createToutiaoAgentTools } from "./tools.ts";
 import {
   acceptArticle,
   buildCandidateQa,
@@ -173,6 +174,7 @@ export function createToutiaoModule(
       };
     },
     readModels,
+    agentTools: createToutiaoAgentTools,
     onStartupRecover: (ctx) => resumeExports(ctx, writeDelivery),
   };
 }

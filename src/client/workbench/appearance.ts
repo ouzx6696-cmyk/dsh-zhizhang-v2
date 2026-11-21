@@ -162,6 +162,7 @@ export function createAppearancePopover(button: HTMLButtonElement) {
       options: ReadonlyArray<readonly [T, string]>,
       activeValue: T,
       onPick: (val: T) => void,
+      withSwatch = false,
     ) => {
       const wrap = document.createElement("div");
       wrap.className = "appearance-group";
@@ -174,6 +175,9 @@ export function createAppearancePopover(button: HTMLButtonElement) {
         const optBtn = document.createElement("button");
         optBtn.type = "button";
         optBtn.textContent = text;
+        if (withSwatch && optBtn.dataset) {
+          optBtn.dataset.swatch = String(val);
+        }
         if (val === activeValue) optBtn.className = "active";
         optBtn.onclick = (event?: MouseEvent) => {
           event?.stopPropagation?.();
@@ -195,6 +199,7 @@ export function createAppearancePopover(button: HTMLButtonElement) {
         (next) => {
           theme = next;
         },
+        true,
       ),
       makeGroup(
         "正文字体（仅画布）",

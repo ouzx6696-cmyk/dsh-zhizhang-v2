@@ -6,6 +6,7 @@ import type {
 } from "../../../contracts/workspace-dto.ts";
 import type { WorkbenchShellHost } from "../plugins/types.ts";
 import { el, formatCharCount } from "../store.ts";
+import { createButton, createCard, createInput } from "../ui/primitives.ts";
 
 export interface OutlineBoardOptions {
   readonly getProviderModel?: () => { readonly provider: string; readonly model: string };
@@ -112,88 +113,94 @@ export function createOutlineBoardView(
       el("h1", `共 ${tree.volumes.length} 卷 · ${tree.acts.length} 幕 · ${tree.chapters.length} 章 · ${formatCharCount(tree.totalChars)}`),
     );
     const headerControls = el("div", "", "actions");
-    const addVolBtn = el("button", "+ 新建卷", "primary");
-    addVolBtn.type = "button";
-    addVolBtn.onclick = () =>
-      void host.perform(async () => {
-        const title = await host.modal.prompt({
-          title: "新建卷",
-          message: "输入卷名，例如：第一卷 · 潜龙出渊",
-          label: "卷标题",
-          confirmLabel: "创建卷",
-        });
-        if (!title?.trim()) return;
-        await host.request("volume.create", { projectId, title: title.trim() });
-        await refresh();
-        await host.load();
-      });
+    const addVolBtn = createButton({
+      label: "+ 新建卷",
+      variant: "primary",
+      onClick: () =>
+        void host.perform(async () => {
+          const title = await host.modal.prompt({
+            title: "新建卷",
+            message: "输入卷名，例如：第一卷 · 潜龙出渊",
+            label: "卷标题",
+            confirmLabel: "创建卷",
+          });
+          if (!title?.trim()) return;
+          await host.request("volume.create", { projectId, title: title.trim() });
+          await refresh();
+          await host.load();
+        }),
+    });
 
-    const addChapterBtn = el("button", "+ 新建章节");
-    addChapterBtn.type = "button";
-    addChapterBtn.onclick = () =>
-      void host.perform(async () => {
-        const title = await host.modal.prompt({
-          title: "新建章节",
-          message: "输入章节标题：",
-          label: "章名",
-          confirmLabel: "创建章节",
-        });
-        if (!title?.trim()) return;
-        const created = await host.request<{ id: string }>("document.create", {
-          projectId,
-          title: title.trim(),
-          volumeId: [...expandedVolumes][0] ?? tree.volumes[0]?.id ?? null,
-        });
-        await host.selectDocument(created.id);
-        await refresh();
-      });
+    const addChapterBtn = createButton({
+      label: "+ 新建章节",
+      variant: "secondary",
+      onClick: () =>
+        void host.perform(async () => {
+          const title = await host.modal.prompt({
+            title: "新建章节",
+            message: "输入章节标题：",
+            label: "章名",
+            confirmLabel: "创建章节",
+          });
+          if (!title?.trim()) return;
+          const created = await host.request<{ id: string }>("document.create", {
+            projectId,
+            title: title.trim(),
+            volumeId: [...expandedVolumes][0] ?? tree.volumes[0]?.id ?? null,
+          });
+          await host.selectDocument(created.id);
+          await refresh();
+        }),
+    });
 
     headerControls.append(addVolBtn, addChapterBtn);
     header.append(titleWrap, headerControls);
     container.append(header);
 
     // Compass Control Plane (authorIntent + currentFocus) — collapsed by default for minimal DOM
-    const compassCard = el("section", "", "panel-card");
-    const compassHead = el("div", "", "outline-chapter-top");
-    compassHead.append(el("h2", "全书指南针与当前写作焦点"));
-    const compassToggle = el("button", controlsExpanded ? "收起" : "编辑控制面");
-    compassToggle.type = "button";
-    compassToggle.onclick = () => {
-      controlsExpanded = !controlsExpanded;
-      paint();
-    };
-    compassHead.append(compassToggle);
-    compassCard.append(compassHead);
-
+    const compassToggle = createButton({
+      label: controlsExpanded ? "收起" : "编辑控制面",
+      variant: "secondary",
+      size: "sm",
+      onClick: () => {
+        controlsExpanded = !controlsExpanded;
+        paint();
+      },
+    });
+    const compassBody: HTMLElement[] = [];
     if (controlsExpanded) {
       const form = el("div", "", "stack-form");
-      const intentInput = document.createElement("textarea");
-      intentInput.rows = 3;
-      intentInput.placeholder = "全书指南针（注入 Prefix 稳定区）：终局方向、核心卖点、活跃长线、明确禁区…";
-      intentInput.value = controls?.authorIntent ?? "";
-
-      const focusInput = document.createElement("textarea");
-      focusInput.rows = 2;
-      focusInput.placeholder = "当前焦点（注入动态尾区）：近 1–3 章主矛盾与情绪节奏…";
-      focusInput.value = controls?.currentFocus ?? "";
-
-      const saveCtrlBtn = el("button", "保存控制面", "primary");
-      saveCtrlBtn.type = "button";
-      saveCtrlBtn.onclick = () =>
-        void host.perform(async () => {
-          controls = await host.request<ProjectControlsDto>("controls.save", {
-            projectId,
-            authorIntent: intentInput.value,
-            currentFocus: focusInput.value,
-          });
-          host.notice("全书指南针与当前焦点已保存");
-          controlsExpanded = false;
-          paint();
-        });
-      form.append(intentInput, focusInput, saveCtrlBtn);
-      compassCard.append(form);
+      const intentField = createInput({
+        kind: "textarea",
+        rows: 3,
+        placeholder: "全书指南针（注入 Prefix 稳定区）：终局方向、核心卖点、活跃长线、明确禁区…",
+        value: controls?.authorIntent ?? "",
+      });
+      const focusField = createInput({
+        kind: "textarea",
+        rows: 2,
+        placeholder: "当前焦点（注入动态尾区）：近 1–3 章主矛盾与情绪节奏…",
+        value: controls?.currentFocus ?? "",
+      });
+      const saveCtrlBtn = createButton({
+        label: "保存控制面",
+        variant: "primary",
+        onClick: () =>
+          void host.perform(async () => {
+            controls = await host.request<ProjectControlsDto>("controls.save", {
+              projectId,
+              authorIntent: intentField.getValue(),
+              currentFocus: focusField.getValue(),
+            });
+            host.notice("全书指南针与当前焦点已保存");
+            controlsExpanded = false;
+            paint();
+          }),
+      });
+      form.append(intentField.root, focusField.root, saveCtrlBtn);
+      compassBody.push(form);
     } else if (controls?.authorIntent || controls?.currentFocus) {
-      compassCard.append(
+      compassBody.push(
         el(
           "p",
           [
@@ -204,59 +211,84 @@ export function createOutlineBoardView(
         ),
       );
     }
-    container.append(compassCard);
+    container.append(
+      createCard({
+        tag: "section",
+        title: "全书指南针与当前写作焦点",
+        headerAction: compassToggle,
+        body: compassBody.length > 0 ? compassBody : undefined,
+      }),
+    );
 
     if (arcProposals.length > 0 || summaryProposals.length > 0) {
-      const propSection = el("section", "", "panel-card");
-      propSection.append(el("h2", `待确认 AI 规划与摘要提案（${arcProposals.length + summaryProposals.length}）`));
+      const propRows: HTMLElement[] = [];
       for (const prop of arcProposals) {
         const row = el("div", "", "proposal-row");
         const actSummary = typeof prop.payload.actSummary === "string" ? prop.payload.actSummary : "";
         const nextTitle = typeof prop.payload.nextActTitle === "string" ? prop.payload.nextActTitle : "";
         row.append(el("p", `滚动幕规划「${prop.sourceRef || "当前幕"}」：${[actSummary, nextTitle && `下一幕：${nextTitle}`].filter(Boolean).join(" → ")}`));
         const actions = el("div", "", "actions");
-        const acceptBtn = el("button", "确认应用规划", "primary");
-        acceptBtn.type = "button";
-        acceptBtn.onclick = () =>
-          void host.perform(async () => {
-            await host.request("proposal.decide", { proposalId: prop.id, accept: true });
-            await refresh();
-          });
-        const rejectBtn = el("button", "拒绝");
-        rejectBtn.type = "button";
-        rejectBtn.onclick = () =>
-          void host.perform(async () => {
-            await host.request("proposal.decide", { proposalId: prop.id, accept: false });
-            await refresh();
-          });
+        const acceptBtn = createButton({
+          label: "确认应用规划",
+          variant: "primary",
+          size: "sm",
+          onClick: () =>
+            void host.perform(async () => {
+              await host.request("proposal.decide", { proposalId: prop.id, accept: true });
+              await refresh();
+            }),
+        });
+        const rejectBtn = createButton({
+          label: "拒绝",
+          variant: "secondary",
+          size: "sm",
+          onClick: () =>
+            void host.perform(async () => {
+              await host.request("proposal.decide", { proposalId: prop.id, accept: false });
+              await refresh();
+            }),
+        });
         actions.append(acceptBtn, rejectBtn);
         row.append(actions);
-        propSection.append(row);
+        propRows.push(row);
       }
       for (const prop of summaryProposals) {
         const row = el("div", "", "proposal-row");
         const summaryText = typeof prop.payload.summary === "string" ? prop.payload.summary : "";
         row.append(el("p", `${prop.sourceRef || prop.documentId || "章节"}：${summaryText}`));
         const actions = el("div", "", "actions");
-        const acceptBtn = el("button", "确认写入摘要", "primary");
-        acceptBtn.type = "button";
-        acceptBtn.onclick = () =>
-          void host.perform(async () => {
-            await host.request("proposal.decide", { proposalId: prop.id, accept: true });
-            await refresh();
-          });
-        const rejectBtn = el("button", "拒绝");
-        rejectBtn.type = "button";
-        rejectBtn.onclick = () =>
-          void host.perform(async () => {
-            await host.request("proposal.decide", { proposalId: prop.id, accept: false });
-            await refresh();
-          });
+        const acceptBtn = createButton({
+          label: "确认写入摘要",
+          variant: "primary",
+          size: "sm",
+          onClick: () =>
+            void host.perform(async () => {
+              await host.request("proposal.decide", { proposalId: prop.id, accept: true });
+              await refresh();
+            }),
+        });
+        const rejectBtn = createButton({
+          label: "拒绝",
+          variant: "secondary",
+          size: "sm",
+          onClick: () =>
+            void host.perform(async () => {
+              await host.request("proposal.decide", { proposalId: prop.id, accept: false });
+              await refresh();
+            }),
+        });
         actions.append(acceptBtn, rejectBtn);
         row.append(actions);
-        propSection.append(row);
+        propRows.push(row);
       }
-      container.append(propSection);
+      container.append(
+        createCard({
+          tag: "section",
+          variant: "elevated",
+          title: `待确认 AI 规划与摘要提案（${arcProposals.length + summaryProposals.length}）`,
+          body: propRows,
+        }),
+      );
     }
 
     // Group chapters & acts in single O(N) pass to keep 5,000-chapter paints fast
@@ -298,12 +330,15 @@ export function createOutlineBoardView(
           "muted-copy tabular",
         );
 
-        const editBtn = el("button", "展开编辑");
-        editBtn.type = "button";
-        editBtn.onclick = () => {
-          expandedChapterId = ch.id;
-          paint();
-        };
+        const editBtn = createButton({
+          label: "展开编辑",
+          variant: "secondary",
+          size: "sm",
+          onClick: () => {
+            expandedChapterId = ch.id;
+            paint();
+          },
+        });
         card.append(openBtn, meta, editBtn);
         return card;
       }
@@ -312,70 +347,77 @@ export function createOutlineBoardView(
       const openBtn = el("button", `#${ch.order} ${ch.title}`, "link-btn");
       openBtn.type = "button";
       openBtn.onclick = () => void host.perform(() => host.selectDocument(ch.id));
-      const collapseBtn = el("button", "收起");
-      collapseBtn.type = "button";
-      collapseBtn.onclick = () => {
-        expandedChapterId = null;
-        paint();
-      };
+      const collapseBtn = createButton({
+        label: "收起",
+        variant: "ghost",
+        size: "sm",
+        onClick: () => {
+          expandedChapterId = null;
+          paint();
+        },
+      });
       top.append(openBtn, collapseBtn);
 
-      const summaryInput = document.createElement("textarea");
-      summaryInput.rows = 2;
-      summaryInput.placeholder = "本章滚动摘要（供后续章节写作自动注入前文上下文）…";
-      summaryInput.value = ch.summary;
+      const summaryField = createInput({
+        kind: "textarea",
+        rows: 2,
+        placeholder: "本章滚动摘要（供后续章节写作自动注入前文上下文）…",
+        value: ch.summary,
+      });
 
       const rowActions = el("div", "", "actions");
-      const saveSummaryBtn = el("button", "保存摘要", "primary");
-      saveSummaryBtn.type = "button";
-      saveSummaryBtn.onclick = () =>
-        void host.perform(async () => {
-          await host.request("chapter.summary.save", { documentId: ch.id, summary: summaryInput.value });
-          host.notice("章节滚动摘要已保存");
-          await refresh();
-        });
+      const saveSummaryBtn = createButton({
+        label: "保存摘要",
+        variant: "primary",
+        size: "sm",
+        onClick: () =>
+          void host.perform(async () => {
+            await host.request("chapter.summary.save", { documentId: ch.id, summary: summaryField.getValue() });
+            host.notice("章节滚动摘要已保存");
+            await refresh();
+          }),
+      });
 
-      const moveSelect = document.createElement("select");
-      moveSelect.className = "inline-select";
-      for (const spec of moveSpecs) {
-        moveSelect.append(new Option(spec.label, spec.value));
-      }
-      moveSelect.onchange = () => {
-        const val = moveSelect.value;
-        if (!val) return;
-        moveSelect.value = "";
-        void host.perform(async () => {
-          const [kind, volId, actId] = val.split(":");
-          const payload =
-            kind === "ungrouped"
-              ? { documentId: ch.id, targetVolumeId: null, targetActId: null }
-              : kind === "vol"
-                ? { documentId: ch.id, targetVolumeId: volId, targetActId: null }
-                : { documentId: ch.id, targetVolumeId: volId, targetActId: actId };
-          const plan = await host.request<{
-            impact: readonly { id: string; relations: readonly { label: string }[] }[];
-            requiresAuthorConfirmation: boolean;
-            asOfSeq: number;
-          }>("chapter.move", { ...payload, preview: true });
-          const details = plan.impact.flatMap((item) => item.relations.map((r) => `${item.id} · ${r.label} 时序将翻转`));
-          if (plan.requiresAuthorConfirmation) {
-            const ok = await host.modal.confirm({
-              title: "确认跨卷幕移动章节",
-              message: "本次移动将翻转以下已确认设定的时间先后关系：",
-              details,
-              confirmLabel: "确认移动",
-            });
-            if (!ok) return;
-          }
-          await host.request("chapter.move", { ...payload, asOfSeq: plan.asOfSeq, confirmed: true });
-          host.notice("章节位置与目录树已更新");
-          await refresh();
-          await host.load();
-        });
-      };
+      const moveField = createInput({
+        kind: "select",
+        options: moveSpecs,
+        onChange: (val) => {
+          if (!val) return;
+          moveField.setValue("");
+          void host.perform(async () => {
+            const [kind, volId, actId] = val.split(":");
+            const payload =
+              kind === "ungrouped"
+                ? { documentId: ch.id, targetVolumeId: null, targetActId: null }
+                : kind === "vol"
+                  ? { documentId: ch.id, targetVolumeId: volId, targetActId: null }
+                  : { documentId: ch.id, targetVolumeId: volId, targetActId: actId };
+            const plan = await host.request<{
+              impact: readonly { id: string; relations: readonly { label: string }[] }[];
+              requiresAuthorConfirmation: boolean;
+              asOfSeq: number;
+            }>("chapter.move", { ...payload, preview: true });
+            const details = plan.impact.flatMap((item) => item.relations.map((r) => `${item.id} · ${r.label} 时序将翻转`));
+            if (plan.requiresAuthorConfirmation) {
+              const ok = await host.modal.confirm({
+                title: "确认跨卷幕移动章节",
+                message: "本次移动将翻转以下已确认设定的时间先后关系：",
+                details,
+                confirmLabel: "确认移动",
+              });
+              if (!ok) return;
+            }
+            await host.request("chapter.move", { ...payload, asOfSeq: plan.asOfSeq, confirmed: true });
+            host.notice("章节位置与目录树已更新");
+            await refresh();
+            await host.load();
+          });
+        },
+      });
+      moveField.control.classList.add("inline-select");
 
-      rowActions.append(saveSummaryBtn, moveSelect);
-      card.append(top, summaryInput, rowActions);
+      rowActions.append(saveSummaryBtn, moveField.root);
+      card.append(top, summaryField.root, rowActions);
       return card;
     }
 
@@ -384,7 +426,7 @@ export function createOutlineBoardView(
       const volChapters = chaptersByVol.get(vol.id) ?? [];
       const volChars = charsByVol.get(vol.id) ?? 0;
       const isExpanded = expandedVolumes.has(vol.id);
-      const volSection = el("section", "", "panel-card volume-card");
+      const volBody: HTMLElement[] = [];
       const volHead = el("div", "", "outline-chapter-top");
 
       const volToggle = el("button", `${isExpanded ? "▾" : "▸"} ${vol.title}（${volChapters.length} 章 · ${formatCharCount(volChars)}）`, "link-btn");
@@ -397,56 +439,70 @@ export function createOutlineBoardView(
       volHead.append(volToggle);
 
       if (!isExpanded) {
-        volSection.append(volHead);
-        container.append(volSection);
+        container.append(
+          createCard({
+            tag: "section",
+            className: "volume-card",
+            body: volHead,
+          }),
+        );
         continue;
       }
 
       const volBtns = el("div", "", "actions");
-      const addActBtn = el("button", "+ 新建幕");
-      addActBtn.type = "button";
-      addActBtn.onclick = () =>
-        void host.perform(async () => {
-          const title = await host.modal.prompt({
-            title: `在「${vol.title}」新建幕`,
-            message: "输入幕标题（例如：第一幕 · 退婚风波）：",
-            label: "幕标题",
-            confirmLabel: "创建幕",
-          });
-          if (!title?.trim()) return;
-          await host.request("act.create", { projectId, volumeId: vol.id, title: title.trim() });
-          await refresh();
-        });
+      const addActBtn = createButton({
+        label: "+ 新建幕",
+        variant: "secondary",
+        size: "sm",
+        onClick: () =>
+          void host.perform(async () => {
+            const title = await host.modal.prompt({
+              title: `在「${vol.title}」新建幕`,
+              message: "输入幕标题（例如：第一幕 · 退婚风波）：",
+              label: "幕标题",
+              confirmLabel: "创建幕",
+            });
+            if (!title?.trim()) return;
+            await host.request("act.create", { projectId, volumeId: vol.id, title: title.trim() });
+            await refresh();
+          }),
+      });
 
-      const rollPlanBtn = el("button", "滚动规划下一幕");
-      rollPlanBtn.type = "button";
-      rollPlanBtn.onclick = () =>
-        void host.perform(async () => {
-          const volActs = actsByVol.get(vol.id) ?? [];
-          const latestAct = volActs[volActs.length - 1];
-          const pm = options?.getProviderModel?.() ?? { provider: "deepseek-account", model: "deepseek-flash" };
-          await host.request("proposal.generate", {
-            kind: "arc_plan",
-            projectId,
-            volumeId: vol.id,
-            ...(latestAct ? { actId: latestAct.id } : {}),
-            provider: pm.provider,
-            model: pm.model,
-          });
-          host.notice("已提交滚动幕规划提案，请确认后创建下一幕");
-          await refresh();
-        });
+      const rollPlanBtn = createButton({
+        label: "滚动规划下一幕",
+        variant: "secondary",
+        size: "sm",
+        onClick: () =>
+          void host.perform(async () => {
+            const volActs = actsByVol.get(vol.id) ?? [];
+            const latestAct = volActs[volActs.length - 1];
+            const pm = options?.getProviderModel?.() ?? { provider: "deepseek-account", model: "deepseek-flash" };
+            await host.request("proposal.generate", {
+              kind: "arc_plan",
+              projectId,
+              volumeId: vol.id,
+              ...(latestAct ? { actId: latestAct.id } : {}),
+              provider: pm.provider,
+              model: pm.model,
+            });
+            host.notice("已提交滚动幕规划提案，请确认后创建下一幕");
+            await refresh();
+          }),
+      });
 
-      const delVolBtn = el("button", "删空卷", "danger");
-      delVolBtn.type = "button";
-      delVolBtn.onclick = () =>
-        void host.perform(async () => {
-          await host.request("volume.delete", { projectId, volumeId: vol.id });
-          await refresh();
-        });
+      const delVolBtn = createButton({
+        label: "删空卷",
+        variant: "danger",
+        size: "sm",
+        onClick: () =>
+          void host.perform(async () => {
+            await host.request("volume.delete", { projectId, volumeId: vol.id });
+            await refresh();
+          }),
+      });
       volBtns.append(addActBtn, rollPlanBtn, delVolBtn);
       volHead.append(volBtns);
-      volSection.append(volHead);
+      volBody.push(volHead);
 
       const volActs = actsByVol.get(vol.id) ?? [];
       if (volActs.length > 0) {
@@ -454,58 +510,74 @@ export function createOutlineBoardView(
           .slice(0, 3)
           .map((a) => `${a.title}${a.arcGoal || a.goal ? `(${(a.arcGoal || a.goal).slice(0, 16)})` : ""}`)
           .join(" · ");
-        volSection.append(el("p", `已建 ${volActs.length} 幕：${actsMeta}${volActs.length > 3 ? " …" : ""}`, "muted-copy"));
+        volBody.push(el("p", `已建 ${volActs.length} 幕：${actsMeta}${volActs.length > 3 ? " …" : ""}`, "muted-copy"));
       }
 
       const limit = volumeLimit(vol.id);
       const visibleChapters = volChapters.slice(0, limit);
       for (const ch of visibleChapters) {
-        volSection.append(renderChapterRow(ch));
+        volBody.push(renderChapterRow(ch));
       }
       if (volChapters.length > visibleChapters.length) {
-        const moreBtn = el(
-          "button",
-          `加载更多章节（已显示 ${visibleChapters.length} / ${volChapters.length}）`,
+        volBody.push(
+          createButton({
+            label: `加载更多章节（已显示 ${visibleChapters.length} / ${volChapters.length}）`,
+            variant: "secondary",
+            size: "sm",
+            onClick: () => {
+              chapterLimits.set(vol.id, limit + CHAPTER_PAGE_STEP);
+              paint();
+            },
+          }),
         );
-        moreBtn.type = "button";
-        moreBtn.onclick = () => {
-          chapterLimits.set(vol.id, limit + CHAPTER_PAGE_STEP);
-          paint();
-        };
-        volSection.append(moreBtn);
       }
-      container.append(volSection);
+      container.append(
+        createCard({
+          tag: "section",
+          className: "volume-card",
+          body: volBody,
+        }),
+      );
     }
 
     if (tree.volumes.length > volumesToShow.length) {
-      const moreVolsBtn = el(
-        "button",
-        `显示更多卷（剩余 ${tree.volumes.length - volumesToShow.length} 卷）`,
+      container.append(
+        createButton({
+          label: `显示更多卷（剩余 ${tree.volumes.length - volumesToShow.length} 卷）`,
+          variant: "secondary",
+          onClick: () => {
+            visibleVolumesLimit += VOLUME_PAGE_STEP;
+            paint();
+          },
+        }),
       );
-      moreVolsBtn.type = "button";
-      moreVolsBtn.onclick = () => {
-        visibleVolumesLimit += VOLUME_PAGE_STEP;
-        paint();
-      };
-      container.append(moreVolsBtn);
     }
 
     if (ungrouped.length > 0) {
-      const misc = el("section", "", "panel-card");
-      misc.append(el("h2", `未分卷章节（${ungrouped.length}）`));
+      const miscBody: HTMLElement[] = [];
       const limit = volumeLimit("__ungrouped__");
       const visible = ungrouped.slice(0, limit);
-      for (const ch of visible) misc.append(renderChapterRow(ch));
+      for (const ch of visible) miscBody.push(renderChapterRow(ch));
       if (ungrouped.length > visible.length) {
-        const moreBtn = el("button", `加载更多未分卷章节（已显示 ${visible.length} / ${ungrouped.length}）`);
-        moreBtn.type = "button";
-        moreBtn.onclick = () => {
-          chapterLimits.set("__ungrouped__", limit + CHAPTER_PAGE_STEP);
-          paint();
-        };
-        misc.append(moreBtn);
+        miscBody.push(
+          createButton({
+            label: `加载更多未分卷章节（已显示 ${visible.length} / ${ungrouped.length}）`,
+            variant: "secondary",
+            size: "sm",
+            onClick: () => {
+              chapterLimits.set("__ungrouped__", limit + CHAPTER_PAGE_STEP);
+              paint();
+            },
+          }),
+        );
       }
-      container.append(misc);
+      container.append(
+        createCard({
+          tag: "section",
+          title: `未分卷章节（${ungrouped.length}）`,
+          body: miscBody,
+        }),
+      );
     }
   }
 
