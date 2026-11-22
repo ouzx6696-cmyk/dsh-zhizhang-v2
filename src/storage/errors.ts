@@ -7,7 +7,7 @@
 // matching on a code string.
 
 import { ContractError } from "../contracts/errors.ts";
-import type { ErrorCode, ErrorDetails, ErrorEnvelope } from "../contracts/errors.ts";
+import type { ErrorCode, ErrorDetails } from "../contracts/errors.ts";
 
 export { ERROR_CODES } from "../contracts/errors.ts";
 export type { ErrorCode, ErrorDetails, ErrorEnvelope } from "../contracts/errors.ts";

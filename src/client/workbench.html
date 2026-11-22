@@ -148,6 +148,9 @@
           </div>
         </section>
 
+        <section id="agent-write-banner" class="agent-write-banner" aria-live="polite" hidden></section>
+        <section id="agent-handoff-strip" class="agent-handoff-strip" aria-live="polite" hidden></section>
+
         <div class="editor-shell">
           <label for="body" class="visually-hidden">正文</label>
           <textarea id="body" spellcheck="false" placeholder="写下正文……（支持 Ctrl/Cmd + S 快速保存）" rows="20"></textarea>
@@ -200,7 +203,7 @@
           <button type="button" role="tab" data-pipeline-tab="workflow" aria-selected="true" class="active">流转</button>
           <button type="button" role="tab" data-pipeline-tab="planning" aria-selected="false">规划</button>
           <button type="button" role="tab" id="tab-continuity" data-pipeline-tab="continuity" aria-selected="false">设定</button>
-          <button type="button" role="tab" data-pipeline-tab="runs" aria-selected="false">作业</button>
+          <button type="button" role="tab" data-pipeline-tab="runs" aria-selected="false">共创</button>
         </div>
 
         <section data-pipeline-panel="workflow" class="pipeline-panel">
@@ -324,59 +327,68 @@
         </section>
 
         <section data-pipeline-panel="runs" id="run-details" class="pipeline-panel" hidden>
-          <form id="start-run" class="stack-form">
-            <label>写作要求<textarea name="instruction" rows="3" required placeholder="说明本轮希望扩写、润色或续写的重点"></textarea></label>
-            <label>令牌预算<input name="tokenLimit" type="number" min="1" required></label>
-            <output id="budget-hint" class="muted-copy tabular"></output>
-            <label id="run-point">知情查询段落<input name="point" type="number" min="1" value="1"></label>
-            <div class="actions">
-              <button id="start-run-submit" type="submit" class="primary">创建写作任务</button>
-              <button type="button" id="estimate-budget">按当前修订核算</button>
-            </div>
-          </form>
+          <div id="agent-companion" class="agent-companion"></div>
 
-          <div id="context-preview-root" class="context-preview-box" hidden></div>
+          <details id="fallback-engine-drawer" class="disclosure fallback-engine-drawer">
+            <summary>内置批处理引擎（兜底 · 直连模型）</summary>
+            <div class="fallback-engine-body">
+              <form id="start-run" class="stack-form">
+                <label>写作要求<textarea name="instruction" rows="3" required placeholder="说明本轮希望扩写、润色或续写的重点"></textarea></label>
+                <label>令牌预算<input name="tokenLimit" type="number" min="1" required></label>
+                <output id="budget-hint" class="muted-copy tabular"></output>
+                <label id="run-point">知情查询段落<input name="point" type="number" min="1" value="1"></label>
+                <div class="actions">
+                  <button id="start-run-submit" type="submit" class="primary">创建写作任务</button>
+                  <button type="button" id="estimate-budget">按当前修订核算</button>
+                </div>
+              </form>
 
-          <div id="run-content" class="run-panel" hidden>
-            <hr class="hairline">
-            <p id="run-status" class="report-line tabular"></p>
-            <div class="actions">
-              <button type="button" id="run-detail">查看冻结输入与调用明细</button>
-              <button type="button" id="run-history">任务历史</button>
-              <button id="cancel" type="button" class="danger">取消任务</button>
-            </div>
+              <div id="context-preview-root" class="context-preview-box" hidden></div>
 
-            <div id="run-input" class="run-inspector" hidden></div>
-            <div id="run-history-list" class="history-list"></div>
+              <div id="run-content" class="run-panel" hidden>
+                <hr class="hairline">
+                <p id="run-status" class="report-line tabular"></p>
+                <div class="actions">
+                  <button type="button" id="run-detail">查看冻结输入与调用明细</button>
+                  <button type="button" id="run-history">任务历史</button>
+                  <button id="cancel" type="button" class="danger">取消任务</button>
+                </div>
 
-            <form id="reconcile" class="stack-form" hidden>
-              <label>未记账的令牌数<input name="tokens" type="number" min="0" required></label>
-              <button type="submit" class="primary">确认用量对账</button>
-            </form>
+                <div id="run-input" class="run-inspector" hidden></div>
+                <div id="run-history-list" class="history-list"></div>
 
-            <form id="generate-run" class="stack-form">
-              <h3 class="sub-heading">通过 DsH 生成候选稿</h3>
-              <label>DsH 模型提供方<input name="provider" value="deepseek-account" required></label>
-              <label>模型<input name="model" value="deepseek-flash" required></label>
-              <label id="automatic-qa" class="check" hidden>
-                <input name="autoQa" type="checkbox">生成后质检，最多自动回改两轮
-              </label>
-              <div class="actions">
-                <button type="submit" class="primary">开始生成</button>
-                <button type="button" id="refresh-run">刷新状态</button>
+                <form id="reconcile" class="stack-form" hidden>
+                  <label>未记账的令牌数<input name="tokens" type="number" min="0" required></label>
+                  <button type="submit" class="primary">确认用量对账</button>
+                </form>
+
+                <form id="generate-run" class="stack-form">
+                  <h3 class="sub-heading">通过 DsH 生成候选稿</h3>
+                  <label>DsH 模型提供方<input name="provider" value="deepseek-account" required></label>
+                  <label>模型<input name="model" value="deepseek-flash" required></label>
+                  <label id="automatic-qa" class="check" hidden>
+                    <input name="autoQa" type="checkbox">生成后质检，最多自动回改两轮
+                  </label>
+                  <div class="actions">
+                    <button type="submit" class="primary">开始生成</button>
+                    <button type="button" id="refresh-run">刷新状态</button>
+                  </div>
+                </form>
+
+                <form id="complete-run" class="stack-form">
+                  <h3 class="sub-heading">手动导入候选稿</h3>
+                  <label>候选正文<textarea name="body" rows="5" required></textarea></label>
+                  <label>实际令牌用量<input name="tokens" type="number" min="0" required></label>
+                  <button type="submit">导入候选稿</button>
+                </form>
               </div>
-            </form>
 
-            <form id="complete-run" class="stack-form">
-              <h3 class="sub-heading">手动导入候选稿</h3>
-              <label>候选正文<textarea name="body" rows="5" required></textarea></label>
-              <label>实际令牌用量<input name="tokens" type="number" min="0" required></label>
-              <button type="submit">导入候选稿</button>
-            </form>
-          </div>
+              <div id="autopilot-fallback-slot"></div>
 
-          <hr class="hairline">
-          <div id="job-center" class="job-center"></div>
+              <hr class="hairline">
+              <div id="job-center" class="job-center"></div>
+            </div>
+          </details>
         </section>
       </div>
     </aside>

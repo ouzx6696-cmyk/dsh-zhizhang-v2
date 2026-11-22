@@ -30,50 +30,8 @@ export type AiProposalKind =
   | "summary"
   | "fact_sync"
   | "chapter_review"
-  | "arc_plan";
-
-export interface ChapterReadDto {
-  readonly id: string;
-  readonly projectId: string;
-  readonly title: string;
-  readonly state: string;
-  readonly revisionId: string | null;
-  readonly body: string | null;
-  readonly charCount: number;
-  readonly summary: string;
-  readonly locked: boolean;
-  readonly volumeId: string | null;
-  readonly actId: string | null;
-  readonly updatedAt: number;
-}
-
-export interface CreationProcessReportDto {
-  readonly documentId: string;
-  readonly title: string;
-  readonly totalChars: number;
-  readonly revisionCount: number;
-  readonly manualSaveCount: number;
-  readonly adoptedCandidateCount: number;
-  readonly candidateOriginRatio: number;
-  readonly postAdoptionEditedChars: number;
-  readonly outlineAuthorConfirmed: boolean;
-  readonly approvedSettingsCount: number;
-  readonly generatedAt: string;
-}
-
-export interface DailyOutputDayDto {
-  readonly date: string;
-  readonly charsAdded: number;
-  readonly saves: number;
-}
-
-export interface DailyOutputStatsDto {
-  readonly projectId: string;
-  readonly todayChars: number;
-  readonly last7DaysChars: number;
-  readonly dailyTarget: number;
-  readonly days: readonly DailyOutputDayDto[];
-}
+  | "arc_plan"
+  | "outline";
 
 export interface SettingFactDto {
   readonly id: string;
@@ -126,6 +84,42 @@ export interface ActDto {
   readonly createdAt: number;
 }
 
+export interface ContextTuningConfigDto {
+  // 1. Context lengths & tier budgets
+  readonly defaultTokenLimit: number;
+  readonly inputBudgetRatio: number;
+  readonly l1BudgetTokens: number;
+  readonly l1DirtyThreshold: number;
+  readonly l2MilestoneChunkSize: number;
+
+  // 2. Reading windows & recall
+  readonly prevTailChars: number;
+  readonly rollingSummaryCount: number;
+  readonly relatedHistoryTopK: number;
+  readonly relatedHistoryRecentExclude: number;
+  readonly antiEchoWindow: number;
+  readonly staleForeshadowGap: number;
+
+  // 3. Context slot toggles
+  readonly includeL1BookBible: boolean;
+  readonly includeL2VolumeMilestones: boolean;
+  readonly includePovBoundary: boolean;
+  readonly includeDueForeshadows: boolean;
+  readonly includeAntiEchoGuard: boolean;
+  readonly includeTechniques: boolean;
+  readonly includeDeconstructions: boolean;
+  readonly includeCurrentFocus: boolean;
+  readonly includeRelatedHistory: boolean;
+  readonly includeRollingSummaries: boolean;
+  readonly includePrevTail: boolean;
+
+  // 4. Library & per-slot truncation caps
+  readonly maxActiveTechniques: number;
+  readonly maxActiveDeconstructions: number;
+  readonly techniqueExampleChars: number;
+  readonly deconstructionExcerptChars: number;
+}
+
 export interface ProjectControlsDto {
   readonly projectId: string;
   readonly authorIntent: string;
@@ -136,6 +130,10 @@ export interface ProjectControlsDto {
   readonly dailyTarget?: number;
   readonly staleForeshadowGap?: number;
   readonly tokenCalibration?: Readonly<Record<string, number>>;
+  readonly contextTuning?: ContextTuningConfigDto;
+  readonly isDefaultContextTuning?: boolean;
+  readonly collaborationMode?: "cautious" | "co_create";
+  readonly agentPromptInjection?: boolean;
   readonly updatedAt: number;
 }
 
@@ -250,6 +248,11 @@ export interface TechniqueCardDto {
   readonly constraints: string;
   readonly antiPatterns: string;
   readonly exampleExcerpt: string;
+  readonly positiveExample?: string;
+  readonly negativeExample?: string;
+  readonly conflictGroup?: string;
+  readonly appliedCount?: number;
+  readonly avgQualityDelta?: number;
   readonly priority: number;
   readonly status: LibraryStatus;
   readonly sourceKind: string;
@@ -314,10 +317,36 @@ export interface AiSlopReportDto {
   readonly monotoneRuns?: number;
 }
 
+export interface PovLeakWarningDto {
+  readonly factId: string;
+  readonly entityName: string;
+  readonly matchedTerm: string;
+  readonly paragraphIndex: number;
+  readonly excerpt: string;
+}
+
+export interface ChapterQualityV2Dto {
+  readonly endingHookScore: number;
+  readonly endingHookStatus: "pass" | "warn";
+  readonly endingHookSummary: string;
+  readonly paragraphLeadRepetitions: readonly {
+    readonly lead: string;
+    readonly paragraphs: readonly number[];
+  }[];
+  readonly crossChapterEchoes: readonly {
+    readonly phrase: string;
+    readonly currentCount: number;
+    readonly recentCount: number;
+  }[];
+  readonly povLeakWarnings: readonly PovLeakWarningDto[];
+  readonly compositeScore: number;
+}
+
 export interface ChapterDiagnosticsReportDto {
   readonly documentId: string;
   readonly goldenThree: GoldenThreeReportDto;
   readonly aiSlop: AiSlopReportDto;
+  readonly qualityV2?: ChapterQualityV2Dto;
 }
 
 export interface SlopConfigDto {
@@ -436,3 +465,198 @@ export interface ProjectImportSummaryDto {
   readonly foreshadowsImported?: number;
   readonly mountsRestored?: number;
 }
+
+// --- Non-Standard Material Normalization & Re-Ingestion ---
+
+export type MaterialChunkRole =
+  | "completed_chapter"
+  | "rough_draft"
+  | "lore_note"
+  | "outline_note"
+  | "foreshadow_note"
+  | "ignore";
+
+export type MaterialIngestStatus =
+  | "chunked"
+  | "extracting"
+  | "ready_for_review"
+  | "committed"
+  | "discarded"
+  | "failed";
+
+export interface MaterialChunkDto {
+  readonly id: string;
+  readonly sourcePath: string;
+  readonly lineStart: number;
+  readonly lineEnd: number;
+  readonly title: string;
+  readonly volumeTitle?: string;
+  readonly role: MaterialChunkRole;
+  readonly loreCategoryHint?: LoreCategory;
+  readonly charCount: number;
+  readonly content: string;
+  readonly warnings: readonly string[];
+  readonly duplicateOfExistingTitle?: string | null;
+}
+
+export interface MaterialProposedChapterDto {
+  readonly id: string;
+  readonly volumeTitle: string;
+  readonly actTitle: string;
+  readonly title: string;
+  readonly state: "planned" | "drafting" | "drafted";
+  readonly summary: string;
+  readonly body: string;
+  readonly viewpoint?: string;
+  readonly conflictStatus: "new" | "update_draft" | "skip_locked_final";
+  readonly selected: boolean;
+}
+
+export interface MaterialProposedLoreDto {
+  readonly id: string;
+  readonly factId: string;
+  readonly category: LoreCategory;
+  readonly entityName: string;
+  readonly note: string;
+  readonly aliases: readonly string[];
+  readonly lockedSuggested: boolean;
+  readonly effectiveChapterTitle?: string;
+  readonly knownBy: readonly { readonly character: string; readonly chapterTitle?: string }[];
+  readonly conflictStatus: "new" | "update_unlocked" | "skip_locked";
+  readonly conflictNote?: string;
+  readonly selected: boolean;
+}
+
+export interface MaterialProposedForeshadowDto {
+  readonly id: string;
+  readonly title: string;
+  readonly status: ForeshadowStatus;
+  readonly plantedChapterTitle?: string;
+  readonly targetChapterTitle?: string;
+  readonly note: string;
+  readonly selected: boolean;
+}
+
+export interface MaterialProposedBundleDto {
+  readonly authorIntent?: string;
+  readonly currentFocus?: string;
+  readonly pacingTier?: string;
+  readonly genreTags?: readonly string[];
+  readonly chapters: readonly MaterialProposedChapterDto[];
+  readonly lore: readonly MaterialProposedLoreDto[];
+  readonly foreshadows: readonly MaterialProposedForeshadowDto[];
+  readonly warnings: readonly string[];
+}
+
+export interface MaterialCommitSummaryDto {
+  readonly sessionId: string;
+  readonly projectId: string;
+  readonly volumesCreated: number;
+  readonly actsCreated: number;
+  readonly chaptersCreated: number;
+  readonly chaptersUpdated: number;
+  readonly chaptersSkippedLocked: number;
+  readonly loreCommitted: number;
+  readonly loreSkippedLocked: number;
+  readonly foreshadowsCommitted: number;
+  readonly controlsUpdated: boolean;
+  readonly l1SnapshotVersion: number;
+}
+
+export interface MaterialIngestSessionDto {
+  readonly id: string;
+  readonly projectId: string;
+  readonly sourceOrigin: "workbench_upload" | "dsh_agent";
+  readonly status: MaterialIngestStatus;
+  readonly totalFiles: number;
+  readonly totalChars: number;
+  readonly cleaningWarnings: readonly string[];
+  readonly chunks: readonly MaterialChunkDto[];
+  readonly proposedBundle: MaterialProposedBundleDto | null;
+  readonly committedReport: MaterialCommitSummaryDto | null;
+  readonly error: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+// --- Tiered Autonomous Writing Workflow (Autopilot) ---
+
+export type AutopilotScope = "single_chapter" | "multi_chapter";
+export type AutopilotAutonomyMode = "redline_pause" | "chapter_gate";
+export type AutopilotAdoptionPolicy = "working_draft_snapshot" | "candidate_only";
+export type AutopilotBatchStatus =
+  | "running"
+  | "paused_redline"
+  | "paused_gate"
+  | "completed"
+  | "cancelled"
+  | "failed";
+
+export type AutopilotStepKind =
+  | "beat_plan"
+  | "draft_write"
+  | "offline_qa"
+  | "model_review"
+  | "surgical_refine"
+  | "fact_sync"
+  | "arc_roll";
+
+export type AutopilotRedLineKind =
+  | "locked_lore_conflict"
+  | "pov_leak"
+  | "quality_below_floor"
+  | "high_severity_review"
+  | "budget_cap"
+  | "consecutive_errors"
+  | "chapter_gate_checkpoint";
+
+export interface AutopilotPauseReasonDto {
+  readonly kind: AutopilotRedLineKind;
+  readonly documentId: string;
+  readonly chapterTitle: string;
+  readonly message: string;
+  readonly details: readonly string[];
+  readonly problemParagraphs: readonly number[];
+}
+
+export interface AutopilotStepDto {
+  readonly id: string;
+  readonly batchId: string;
+  readonly documentId: string;
+  readonly chapterTitle: string;
+  readonly stepKind: AutopilotStepKind;
+  readonly round: number;
+  readonly status: "completed" | "failed" | "paused" | "skipped";
+  readonly inputRevisionId: string | null;
+  readonly outputRevisionId: string | null;
+  readonly scoreBefore: number | null;
+  readonly scoreAfter: number | null;
+  readonly tokensUsed: number;
+  readonly cacheHitRate: number | null;
+  readonly summary: string;
+  readonly error: string | null;
+  readonly createdAt: number;
+}
+
+export interface AutopilotBatchDto {
+  readonly id: string;
+  readonly projectId: string;
+  readonly scope: AutopilotScope;
+  readonly autonomyMode: AutopilotAutonomyMode;
+  readonly adoptionPolicy: AutopilotAdoptionPolicy;
+  readonly status: AutopilotBatchStatus;
+  readonly chapterIds: readonly string[];
+  readonly currentChapterIndex: number;
+  readonly currentStep: AutopilotStepKind | null;
+  readonly tokenBudget: number;
+  readonly tokensSpent: number;
+  readonly refineRoundsUsed: number;
+  readonly provider: string;
+  readonly model: string;
+  readonly pauseReason: AutopilotPauseReasonDto | null;
+  readonly preBatchRevisions: Readonly<Record<string, string | null>>;
+  readonly steps: readonly AutopilotStepDto[];
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+

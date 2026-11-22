@@ -227,6 +227,36 @@ export function createCoreSchema(db: SqliteDatabase): void {
       quarantined_at INTEGER NOT NULL DEFAULT 0
     ) STRICT;
 
+    CREATE TABLE IF NOT EXISTS author_workspace_focus (
+      id TEXT PRIMARY KEY CHECK (id = 'default'),
+      project_id TEXT,
+      document_id TEXT,
+      view_mode TEXT NOT NULL DEFAULT 'main',
+      updated_at INTEGER NOT NULL DEFAULT 0
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS author_project_collaboration (
+      project_id TEXT PRIMARY KEY REFERENCES author_projects(id),
+      collaboration_mode TEXT NOT NULL DEFAULT 'cautious' CHECK (collaboration_mode IN ('cautious', 'co_create')),
+      agent_prompt_injection INTEGER NOT NULL DEFAULT 1,
+      updated_at INTEGER NOT NULL DEFAULT 0
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS author_agent_writes (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES author_projects(id),
+      document_id TEXT NOT NULL REFERENCES author_documents(id),
+      mode TEXT NOT NULL CHECK (mode IN ('candidate', 'direct_write')),
+      run_id TEXT,
+      candidate_id TEXT,
+      previous_revision_id TEXT,
+      new_revision_id TEXT,
+      summary TEXT NOT NULL DEFAULT '',
+      technique_ids_json TEXT NOT NULL DEFAULT '[]',
+      rolled_back INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL DEFAULT 0
+    ) STRICT;
+
     CREATE INDEX IF NOT EXISTS author_documents_by_project ON author_documents(project_id);
     CREATE INDEX IF NOT EXISTS author_documents_by_tree_sort ON author_documents(project_id, volume_id, act_id, sort_key);
     CREATE INDEX IF NOT EXISTS author_runs_by_document ON author_runs(document_id);
@@ -241,6 +271,8 @@ export function createCoreSchema(db: SqliteDatabase): void {
     CREATE INDEX IF NOT EXISTS author_job_calls_by_job ON author_job_calls(job_id);
     CREATE INDEX IF NOT EXISTS author_read_checkpoints_lru ON author_read_checkpoints(last_used_at ASC);
     CREATE INDEX IF NOT EXISTS event_log_quarantine_by_project ON event_log_quarantine(project_id, seq);
+    CREATE INDEX IF NOT EXISTS author_agent_writes_by_doc ON author_agent_writes(document_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS author_agent_writes_by_project ON author_agent_writes(project_id, created_at DESC);
   `);
 
   if (hasTable(db, "revisions")) {

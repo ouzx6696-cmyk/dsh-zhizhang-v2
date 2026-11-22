@@ -33,7 +33,10 @@ export interface SanitizedDiagnosticsReport {
   readonly activeJobs: ActiveJobCounts;
   readonly agentToolsEnabled: boolean;
   readonly agentToolsRegistered: boolean;
+  readonly agentToolCount: number;
   readonly agentToolsError: string | null;
+  readonly systemPromptRegistered: boolean;
+  readonly systemPromptError: string | null;
 }
 
 export function createZhizhangConfigSchema(initial?: {
@@ -103,7 +106,10 @@ export function buildSanitizedDiagnostics(
     readonly usageConsistencyIssues?: number;
     readonly agentToolsEnabled: boolean;
     readonly agentToolsRegistered?: boolean;
+    readonly agentToolCount?: number;
     readonly agentToolsError?: string | null;
+    readonly systemPromptRegistered?: boolean;
+    readonly systemPromptError?: string | null;
   },
 ): SanitizedDiagnosticsReport {
   const journalRow = stmt(db, "PRAGMA journal_mode;").get() as { journal_mode?: string } | undefined;
@@ -153,6 +159,9 @@ export function buildSanitizedDiagnostics(
     activeJobs: runtimeInfo.activeJobs,
     agentToolsEnabled: runtimeInfo.agentToolsEnabled,
     agentToolsRegistered: runtimeInfo.agentToolsRegistered ?? false,
+    agentToolCount: runtimeInfo.agentToolCount ?? 0,
     agentToolsError: runtimeInfo.agentToolsError ?? null,
+    systemPromptRegistered: runtimeInfo.systemPromptRegistered ?? false,
+    systemPromptError: runtimeInfo.systemPromptError ?? null,
   };
 }

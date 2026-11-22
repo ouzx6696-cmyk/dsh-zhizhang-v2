@@ -265,7 +265,38 @@ export function createStrictToolRegistrar({ failOn = null, failWith = null } = {
   };
 }
 
-export function createMockDsHHost({ llm, readAsset, tools, configForms, cordis = false } = {}) {
+export function createMockSystemPromptRegistrar({ fail = false } = {}) {
+  const sections = [];
+  const disposed = [];
+  const register = (section) => {
+    if (fail) throw new Error("systemPrompt registrar rejected section");
+    if (!section || typeof section !== "object" || typeof section.id !== "string" || typeof section.render !== "function") {
+      throw new TypeError("invalid systemPrompt section");
+    }
+    sections.push(section);
+    return () => {
+      const idx = sections.indexOf(section);
+      if (idx >= 0) sections.splice(idx, 1);
+      disposed.push(section.id);
+    };
+  };
+  return {
+    sections,
+    disposed,
+    register,
+    async renderAll(context) {
+      const sorted = [...sections].sort((a, b) => (a.weight ?? 0) - (b.weight ?? 0));
+      const parts = [];
+      for (const sec of sorted) {
+        const out = await sec.render(context);
+        if (typeof out === "string" && out.trim()) parts.push(out.trim());
+      }
+      return parts.join("\n\n");
+    },
+  };
+}
+
+export function createMockDsHHost({ llm, readAsset, tools, configForms, systemPrompt, cordis = false } = {}) {
   const routes = new Map();
   const disposedPaths = [];
   const logs = [];
@@ -305,9 +336,10 @@ export function createMockDsHHost({ llm, readAsset, tools, configForms, cordis =
 
   if (!cordis && tools !== undefined) ctx.tools = tools;
   if (!cordis && configForms !== undefined) ctx.configForms = configForms;
+  if (!cordis && systemPrompt !== undefined) ctx.systemPrompt = systemPrompt;
 
   if (cordis) {
-    const services = { connection: ctx.connection, llm: ctx.llm, tools, configForms };
+    const services = { connection: ctx.connection, llm: ctx.llm, tools, configForms, systemPrompt };
     ctx.get = (name) => services[name];
     ctx.inject = (deps, callback) => {
       if (!deps.every((dep) => services[dep] !== undefined)) return () => {};

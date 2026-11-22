@@ -1,4 +1,5 @@
 import { currentSeq, stmt } from "../storage/index.ts";
+import { getLatestAgentWriteForDoc, getProjectCollaboration } from "./collaboration.ts";
 import type { WorkspaceContext } from "./context.ts";
 import type { ProductLineRegistry } from "./product-line.ts";
 
@@ -97,6 +98,8 @@ export function createSnapshotService(ctx: WorkspaceContext, registry: ProductLi
         updatedAt: j.updatedAt,
       }));
 
+    const collab = getProjectCollaboration(ctx, projectId);
+    const latestAgentWrite = active ? getLatestAgentWriteForDoc(ctx, active.id) : null;
     const productContribution = activeModule ? activeModule.contributeSnapshot(ctx, projectId, active) : {};
 
     return {
@@ -114,6 +117,10 @@ export function createSnapshotService(ctx: WorkspaceContext, registry: ProductLi
       report: null,
       planning: active ? ctx.planning(active.id) : null,
       scenario: null,
+      collaborationMode: collab.collaborationMode,
+      agentPromptInjection: collab.agentPromptInjection,
+      latestAgentWrite,
+      pendingProposalCount: 0,
       ...productContribution,
       asOfSeq: currentSeq(db, projectId),
     };

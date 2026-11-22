@@ -11,6 +11,7 @@ export const DOCUMENT_BOUND_PROPOSAL_KINDS = [
   "summary",
   "fact_sync",
   "chapter_review",
+  "outline",
 ] as const satisfies readonly AiProposalKind[];
 
 const DOCUMENT_BOUND_SET: ReadonlySet<string> = new Set(DOCUMENT_BOUND_PROPOSAL_KINDS);

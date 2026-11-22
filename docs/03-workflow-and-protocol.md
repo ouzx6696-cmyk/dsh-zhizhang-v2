@@ -1,93 +1,103 @@
-# 统一工作流、`zhizhang/3.0` 协议与 Agent 集成
+# 03 · DsH 共创协议、23 个 Agent 工具与统一作业内核（Zhizhang 3.0）
 
-Zhizhang 3.0 将此前分散的写作运行、局部改写与 AI 提案提取三条异步链路彻底融合为**单一统一作业内核（Unified Job Kernel）**，并在后端 HTTP API、Agent 工具注册与前端作业中心之间实现端到端对齐。
+本文档定义织章 3.0 与 **DeepSeek Harness（DsH）** 对话宿主、前端伴生工作台以及兜底异步作业内核之间的全部协议与接口。
 
 ---
 
-## 1. 统一作业内核（Unified Job Kernel）
+## 1. DsH Agent 共创桥接
 
-### 三类统一作业（`LedgerJobKind`）
+### 1.1 `ctx.systemPrompt` 渐进披露注入（`src/host/system-prompt.ts`）
 
-| 作业类型 | 触发场景 | 并发约束 | 输出去向 |
+插件通过 `runInServiceScope(ctx, ["systemPrompt"], ...)` 注册动态片段 `zhizhang.cocreation`（`weight: 40`；若宿主未提供 `systemPrompt` 服务则静默降级）。该片段始终控制在约 **200–380 tokens**，动态拼装：
+
+1. **当前焦点**：由前端工作台切换书/章时自动同步的 `projectId`、`documentId`、文档状态与字数（`author_workspace_focus`）。
+2. **本书作者主权模式**：明确告知 Agent 当前处于 `审慎模式（cautious）` 还是 `共创模式（co_create）` 及锁定红线。
+3. **产品线方法论提示**：
+   - 番茄：节奏档位、近期焦点、创作指南针、本章视角与目标字数，以及最多 8 条已挂载/推荐 Skill 的**目录索引**（`[id] 标题 ★置顶 — 触发条件 [互斥组]`，不展开步骤正文）。
+   - 头条：34 字 / 84 分 / 2 轮受保护硬规则、当前体裁与条线对应的推荐驱动/开篇/收束方法论、以及非微头条 5 选 ≥3 母题标题矩阵指引。
+4. **待审提示与协同准则**：待作者审阅的候选稿/提案数，以及「按需拉取上下文与技法全文、局部修改优先用段落补丁、设定伏笔仅提提案」准则。
+
+### 1.2 23 个确定性排序 Agent 工具（`src/host/tools.ts`）
+
+所有工具在注册前按 `name` 字典序排列，并通过 `canonicalizeJsonKeys` 递归排序 Schema 键名，确保宿主多轮对话前缀 KV 缓存 100% 稳定。
+
+#### 核心工作区工具（3 个，`src/application/author-workspace.ts`）
+
+| 工具名 | 权限 | 说明 |
+| --- | --- | --- |
+| `zhizhang_read_focus` | 只读 | 读取当前焦点作品/章节、协作模式、是否开启提示注入及作品列表 |
+| `zhizhang_submit_draft` | 写入 | 提交整章/整篇草稿：审慎模式落候选区待 Diff 采纳；共创模式直写未定稿草稿并记录 `previousRevisionId` 快照供回滚；已定稿/已验收/已交稿严格拒绝；返回离线诊断摘要 |
+| `zhizhang_patch_paragraphs` | 写入 | 按 1-based 段落序号外科手术式局部精修，保持未改段落逐字不变；同样遵循本书协作模式与锁定保护 |
+
+#### 番茄长篇工具（18 个，`src/application/products/fanqie/tools.ts`）
+
+| 分组 | 工具名 | 权限 | 说明 |
 | --- | --- | --- | --- |
-| `draft_generation` | 番茄章节生成、头条成稿 + 自动 QA 回改 | 同文档同类型仅允许 1 个活跃作业（SQLite 部分唯一索引 `ux_author_jobs_active_scope` 兜底） | `candidates` 候选表（待作者 Diff 采纳） |
-| `selection_rewrite` | 编辑器划词润色 / 扩写 / 对话 / 续写 / 自定义改写 | 同文档同类型互斥 | 返回局部改写片段（作者确认替换，不直接改稿） |
-| `proposal_extraction` | AI 拆书、设定提取、技法卡提取、审稿观察提取 | 同项目/文档同类型互斥 | `author_ai_proposals` 提案队列（作者逐条批准） |
+| **上下文与检索** | `zhizhang_read_tree` | 只读 | 读取卷 → 幕 → 章三级目录、字数与滚动摘要 |
+| | `zhizhang_read_chapter` | 只读 | 读取章节当前正文、状态、章纲元数据与面包屑 |
+| | `zhizhang_read_context` | 只读 | 按需装配并返回完整 L1/L2/L3 四层上下文与预算报告 |
+| | `zhizhang_read_known_facts` | 只读 | 查询某角色在指定章/段锚点之前可见的已批准设定 |
+| | `zhizhang_read_controls` | 只读 | 读取指南针（`authorIntent`）、近期焦点与可调上下文参数 |
+| | `zhizhang_search_workspace` | 只读 | BM25+RRF 全文检索（覆盖章节、设定、拆书、技法） |
+| **离线体检** | `zhizhang_check_conflicts` | 只读 | 扫描设定有效区间与角色知情时间线冲突 |
+| | `zhizhang_diagnose_chapter` | 只读 | 零 Token 黄金三章、AI 腔、章末钩子、跨章回声与视角越权诊断 |
+| **渐进 Skill 库** | `zhizhang_list_skills` | 只读 | 返回轻量技法目录索引（传 `documentId` 时按当前章推荐排序） |
+| | `zhizhang_load_skill` | 只读 | 按 ID 加载单张技法卡或拆书的完整步骤、约束与正反例 |
+| | `zhizhang_mount_skill` | 写入 | 将技法卡或拆书挂载（`include` / `pin` / `exclude`）或卸载到书/卷/幕/章 |
+| **结构与章纲** | `zhizhang_create_structure` | 写入 | 创建新卷、新幕或新章节 |
+| | `zhizhang_plan_chapter` | 写入 | 提交/更新章纲（视角、字数、节拍、锁定事实）；审慎模式生成 `outline` 提案，共创模式直写 |
+| **提案入库** | `zhizhang_propose_setting` | 仅提案 | 向 `author_settings` 提交待审设定提案（绝不自动生效） |
+| | `zhizhang_propose_foreshadow` | 仅提案 | 向提案箱提交伏笔埋设/推进/回收提案 |
+| | `zhizhang_propose_technique` | 仅提案 | 向提案箱提交新技法卡提案 |
+| **非标材料** | `zhizhang_ingest_preview` | 只读 | 读取本地切片清洗后的非标准材料会话与分块列表 |
+| | `zhizhang_propose_material_bundle` | 仅提案 | 提交标准化提案包（章/设定/伏笔/指南针）供作者四栏预览后原子入库 |
 
-### 持久化、精确结算与有界排空
+#### 头条创作工具（2 个，`src/application/products/toutiao/tools.ts`）
 
-- **`author_jobs`（STRICT 表）**：记录作业生命周期状态（`prepared` → `inflight` → `received` → `completed` / `failed` / `cancelled` / `uncertain` / `reconciled`）、冻结作用域键（`scope_key`）、预算预留（`reserved`）、已结算用量（`settled`）、取消后晚到回执累计（`late_usage`）、关联 `run_id` / `proposal_id` 与错误摘要。
-- **`author_job_calls`（STRICT 表）**：记录每一次底层模型调用回执（`phase`、`input_reserve`、`max_output`、`usage`、`prefix_sha256`、`l1_version`、`cache_strategy`），支撑 `verifyUsageConsistency()` 四类用量恒等校验、缓存命中率与费用节省估算及前缀变更归因。
-- **三层分工**：
-  1. `src/storage/job-ledger.ts`：原子建单、并发冲突拒绝、状态流转、回执记账与启动扫描。
-  2. `src/application/job-service.ts`：预算预估、并发/对账门禁、候选采纳、头条自动 QA 回改次数预留、统一作业摘要查询与缓存归因诊断（`diagnoseCacheBehavior`）。
-  3. `src/host/job-engine.ts`：`HostJobEngine` 负责模型调用编排、取消信号（`AbortController`）与插件卸载排空（`shutdownDrain()`）——当在途任务超出排空预算时自动中止并采用有界宽限期收尾，防止失联的模型传输阻塞宿主卸载。
-
-### 四层长篇 Prompt Cache 架构（L0–L3）
-
-长篇连载期间，`draft_generation`、`selection_rewrite` 与 `proposal_extraction` 三类作业统一复用同一套四层前缀结构（`src/workflow/cache-layer.ts` + `src/application/products/fanqie/cache-snapshot.ts`）：
-
-- **L0 共享系统内核（`SHARED_WORKBENCH_SYSTEM_KERNEL`）**：所有番茄作业共用 Token 0 逐字一致的系统提示词，具体任务角色与输出格式统一置于 L3 文末协议区。
-- **L1 版本钉住全书圣经（`author_book_prefix_cache`）**：按独立固定配额（默认 `8192` tokens，与单次 `tokenLimit` 及写作 `stage` 完全解耦）编译指南针、创作约定、客观世界观与全书级挂载技法；零散设定修改（`< 10` 次）仅走 L3 增量补丁而不破坏 L1 哈希，达到阈值、冷窗口（`> 25 min`）或作者手动触发 `cache.rebuild` 时才升级快照版本。
-- **L2 仅追加卷幕与十章里程碑**：归档已定稿卷幕摘要、每 10 章闭合里程碑块与按 `id` 确定性排序的活跃伏笔，禁止在前缀中段改写。
-- **L3 每次请求动态尾**：L1 增量补丁、POV 视角知情与严禁泄露边界、阶段/本章技法、当前十章窗口摘要、远期 Top-4 召回、工作稿与任务协议（规范化 Markdown，不再将原始 `JSON.stringify` 置于起始字节）。
-- **多供应商协议适配（`buildLayeredStreamPayload`）**：彻底移除非标准 `streamOptions.cachePrefix`，按 `(provider, model)` 自动路由至 DeepSeek 隐式前缀（`deepseek-implicit`）、Anthropic 显式断点（`anthropic-breakpoints` + `cache_control: { type: "ephemeral" }`）、OpenAI 隐式路由键（`openai-implicit` + `prompt_cache_key`）或本地小模型紧凑模式（`compact-local`）。
+| 工具名 | 权限 | 说明 |
+| --- | --- | --- |
+| `zhizhang_read_article` | 只读 | 读取文章正文、场景矩阵、最新 QA 报告与审批/交付状态 |
+| `zhizhang_plan_toutiao_article` | 写入 | 保存驱动/开篇/收束与 5 选「标题\|母题」矩阵；代码强制校验 34 字上限、≥3 母题、微头条禁标题与 `已验收`/`已交稿` 锁 |
 
 ---
 
-## 2. `zhizhang/3.0` Next-Gen HTTP 协议
+## 2. `zhizhang/3.0` HTTP 协议与安全信封
 
-插件默认挂载于 `/api/zhizhang`（本地预览服务 `scripts/dev-server.mjs` 直接暴露相同根路径），严格采用洁净 3.0 路由面（无历史兼容壳）：
+插件挂载于 `/api/zhizhang`（本地开发服务暴露同构路径），无历史兼容壳：
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/workbench` | 工作台 HTML 入口（`src/client/workbench.html`） |
-| `GET` | `/workbench.css` | 工作台全量主题与统一组件样式表（纯 CSS，零外部依赖与 `data:` URL） |
-| `GET` | `/workbench/*.js`、`/contracts/protected-rules.js` | 由 `src/client/manifest.ts`（`CLIENT_JS_MODULES`）精确枚举托管的编译后 ES 模块 |
-| `GET` | `/state` | 读取完整工作台快照（支持 `?projectId=...&documentId=...&ifSequence=...` 增量序列比对） |
-| `GET` | `/jobs` | 统一作业列表查询（支持 `?projectId=...&documentId=...&kind=...&limit=...`） |
-| `GET` | `/diag` | 脱敏诊断端点（返回版本、Schema ID、作业/对账统计与安全摘要，绝不泄露密钥、目录路径或正文） |
-| `POST` | `/command` | 同步命令执行入口（JSON 对象 `{ action, ...input }`，经 `AuthorWorkspace.mutation` 分发） |
-| `POST` | `/jobs/preview` | 统一作业启动前零 Token 预算与冻结上下文装配预估 |
-| `POST` | `/jobs/start` | 启动三类统一异步作业（`draft_generation` / `proposal_extraction` / `selection_rewrite`） |
-| `POST` | `/jobs/cancel` | 取消运行中作业（支持 `runId` / `proposalId` / `jobId`），触发 `AbortController` 并保留晚到用量审计 |
+| `GET` | `/workbench` | 工作台 HTML 入口（支持 `?view=conversation` 窄栏伴生分屏与 `?view=settings`） |
+| `GET` | `/workbench.css` | 完整样式表（零外部 CDN、零 `data:` URL） |
+| `GET` | `/workbench/*.js`、`/contracts/protected-rules.js` | 由 `CLIENT_JS_MODULES` 白名单精确托管的 ES 模块 |
+| `GET` | `/state` | 读取工作台快照（支持 `?projectId=&documentId=&ifSequence=` 增量序列跳过） |
+| `GET` | `/jobs` | 统一作业列表查询（支持 `?projectId=&documentId=&kind=&limit=`） |
+| `GET` | `/diag` | 脱敏运行时诊断（版本、Schema、作业对账、工具与提示词注册状态） |
+| `POST` | `/command` | 同步命令分发（`{ action, ...input }`，严格对应 `WorkspaceAction` 契约） |
+| `POST` | `/jobs/preview` | 兜底作业启动前零 Token 预算与上下文装配预估 |
+| `POST` | `/jobs/start` | 启动统一异步作业 |
+| `POST` | `/jobs/cancel` | 取消在途作业并记录晚到用量审计 |
 
-### 统一响应安全策略与封闭错误信封
-
-- **安全响应头**：静态页面与脚本统一附带 `Content-Security-Policy`（`default-src 'self'`）、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer` 与 `Cache-Control: no-store`；所有 `POST` 接口强制校验 `Content-Type: application/json` 并限制单请求体 `<= 2 MiB`。
-- **封闭错误信封**：所有预期业务失败均返回 `{ ok: false, code, details, diagnosticId }`，由 `src/contracts/errors.ts` 封闭限定为 11 个标准错误码：
-  `version.conflict`、`auth.denied`、`gate.denied`、`budget.exhausted`、`idempotency.mismatch`、`stage.output_invalid`、`usage.uncertain`、`storage.format_unsupported`、`input.invalid`、`input.not_found`、`dependency.unavailable`。
-- **未预期异常脱敏**：服务端及本地预览服务遇到非预期异常时均只返回 `{ ok: false, code: "internal.error", diagnosticId }`，不向客户端暴露内部异常堆栈或敏感路径。
+**封闭错误信封**：所有预期业务拒绝统一返回 `{ ok: false, code, details, diagnosticId }`，`code` 严格限定在 11 个标准码内：`version.conflict`、`auth.denied`、`gate.denied`、`budget.exhausted`、`idempotency.mismatch`、`stage.output_invalid`、`usage.uncertain`、`storage.format_unsupported`、`input.invalid`、`input.not_found`、`dependency.unavailable`。非预期异常仅返回 `internal.error` + `diagnosticId`，严禁泄露堆栈或本机路径。
 
 ---
 
-## 3. 声明式 Agent 工具体系（11 个严格受限工具）
+## 3. 统一作业内核（兜底直连与批处理引擎）
 
-`src/host/tools.ts` 通过 `ProductLineRegistry.collectAgentTools()` 自动向 DsH Agent 注册工具，宿主层本身零硬编码。所有工具均遵循**「只读检索 + 提案草拟，零直接写稿」**红线：
+当作者使用折叠兜底区发起直连生成、划词改写、AI 提案抽取、非标材料自动提炼或分级自治多章连跑时，全部收敛至单一 `author_jobs` + `author_job_calls` STRICT 台账：
 
-- **番茄产品线（10 个：`src/application/products/fanqie/tools.ts`）**
-  - **7 个只读工具**：
-    - `zhizhang_read_tree`（读取卷/幕/章结构树）
-    - `zhizhang_read_chapter`（读取章节摘要与当前正文）
-    - `zhizhang_read_known_facts`（读取指定锚点可见的世界观设定）
-    - `zhizhang_read_controls`（读取节奏、挂载技法卡与控制参数）
-    - `zhizhang_search_workspace`（FTS5 + 2 字中文双通道全文检索）
-    - `zhizhang_check_conflicts`（检查设定区间与伏笔时序冲突）
-    - `zhizhang_diagnose_chapter`（离线黄金三章与 AI 腔体检）
-  - **3 个仅提案工具**：
-    - `zhizhang_propose_setting`（提出待审世界观设定）
-    - `zhizhang_propose_foreshadow`（提出待审伏笔条目）
-    - `zhizhang_propose_technique`（提出待审写作技法卡）
-- **头条产品线（1 个：`src/application/products/toutiao/tools.ts`）**
-  - **1 个只读工具**：`zhizhang_read_article`（读取文章策划、标题、QA 与正文只读快照）
+| 作业类型（`UnifiedJobKind`） | 并发锁范围 | 产物落点 |
+| --- | --- | --- |
+| `draft_generation` | 同文档同类型互斥 | `candidates` 隔离候选区（待 Diff 采纳） |
+| `selection_rewrite` | 同文档同类型互斥 | 返回局部改写片段（作者确认替换） |
+| `proposal_extraction` | 同项目/文档同类型互斥 | `author_ai_proposals` 提案箱（逐条审批） |
+| `autopilot_pipeline` | 同批次互斥 | `author_autopilot_batches` / `steps` + 每章批次前快照回滚 |
+| `material_normalize` | 同导入会话互斥 | `author_material_ingests` 四栏预览后原子入库 |
 
----
+### L0–L3 四层 Prompt Cache 架构（`src/workflow/cache-layer.ts`）
 
-## 4. 前端工作台对齐（三区布局 + 统一组件 + 作业中心）
-
-前端位于 `src/client/`，与 3.0 协议无缝对接：
-
-1. **客户端 API 适配层（`src/client/workbench/api.ts`）**：按操作语义自动分流至 `./state`、`./jobs`、`./command`、`./jobs/preview`、`./jobs/start`、`./jobs/cancel`，配合 `renderGate` 与 `actionCoordinator` 防止重复点击与后台轮询覆盖用户输入。
-2. **三区顶栏与六视图切换（`workbench.html` + `workbench.css` + `ui/primitives.ts`）**：左区品牌印章与当前作品面包屑、中区 **6 个核心工作视图**（写作 / 卷幕大纲 / 设定库 / 拆书库 / 技法卡 / 导入导出）、右区三纸面主题切换（墨纸 / 青简 / 夜航）与命令面板快捷入口。
-3. **统一作业中心（`src/client/workbench/views/job-center.ts`）**：挂载于右侧栏「作业」页签（`#job-center`），统一展示写作生成、局部改写与 AI 提案提取三类作业的实时进度、Token 消耗、失败恢复建议（`recoveryHints`）、取消按钮与 Diff/结果快速查看入口；存在活跃作业时按 `1.5s` 自动轻量轮询，全部结束后自动停轮询。
-4. **本地草稿保险箱与安全交互（`draft-vault.ts` + `modal.ts`）**：未保存正文按文档隔离暂存于浏览器存储，检测修订冲突并提供一键恢复；全部确认/输入弹窗均基于无障碍 `<dialog>` 与统一基础组件渲染，全前端零 `innerHTML` 与零原生阻塞弹窗。
+- **L0 共享系统内核（`SHARED_WORKBENCH_SYSTEM_KERNEL`）**：全书所有作业在 Token 0 逐字一致，具体任务角色与输出格式统一置于 L3 文末协议区。
+- **L1 版本钉住全书圣经（`author_book_prefix_cache`）**：按独立配额（默认 `8192` tokens）固化指南针、全书约定、客观设定与全书挂载技法；零散设定修改（`< l1DirtyThreshold`）走 L3 增量补丁，不破坏 L1 前缀哈希。
+- **L2 仅追加卷幕与里程碑**：归档已定稿卷幕摘要与每 N 章（默认 `10` 章）闭合里程碑，前缀中段只增不改。
+- **L3 每次请求动态尾**：L1 增量补丁、POV 知情与严禁泄露边界、当前阶段技法、近期窗口摘要、远期 Top-K 召回、工作稿正文与任务协议。
+- **供应商路由（`buildLayeredStreamPayload`）**：按 `(provider, model)` 自动选择 `deepseek-implicit`、`anthropic-breakpoints`（`cache_control: { type: "ephemeral" }`）、`openai-implicit`（`prompt_cache_key`）或 `compact-local`。

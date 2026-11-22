@@ -60,11 +60,11 @@ export function createStudyHome(container: HTMLElement, callbacks: StudyHomeCall
     const wrap = el("div", { className: "study-home" });
     const intro = el("header", { className: "study-intro" });
     intro.append(
-      el("p", { className: "eyebrow study-eyebrow", text: "DeepSeek Harness 作者工作台 · 书斋" }),
+      el("p", { className: "eyebrow study-eyebrow", text: "DeepSeek Harness 创作协同插件 · 书斋" }),
       el("h1", { text: "从这里落笔" }),
       el("p", {
         className: "lead",
-        text: "作者主权三态隔离、人物视角知情边界与逐段合稿在同一书斋内闭环运行。",
+        text: "把创作交给 DsH Agent，把流程、上下文与作者主权交给织章——双模式协作、渐进技法卡与逐段 Diff 审阅同台闭环。",
       }),
     );
     wrap.append(intro);

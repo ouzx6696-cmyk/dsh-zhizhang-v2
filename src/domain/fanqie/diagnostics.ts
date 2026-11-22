@@ -1,8 +1,10 @@
 import type {
   AiSlopReportDto,
   ChapterDiagnosticsReportDto,
+  ChapterQualityV2Dto,
   GoldenThreeDimensionDto,
   GoldenThreeReportDto,
+  PovLeakWarningDto,
   SlopHitDto,
 } from "../../contracts/workspace-dto.ts";
 import { splitChapterParagraphs } from "../shared/anchors.ts";
@@ -730,14 +732,409 @@ export function diagnoseGoldenThree(body: string, options?: GoldenThreeOptions):
   return { isGoldenThreeChapter: true, overallScore, dimensions, warnings };
 }
 
+export interface HiddenFactHint {
+  readonly factId: string;
+  readonly entityName: string;
+  readonly note: string;
+  readonly aliases?: readonly string[];
+}
+
+export interface QualityV2Options {
+  readonly pacingTier?: string;
+  readonly recentChapterBodies?: readonly string[];
+  readonly hiddenFacts?: readonly HiddenFactHint[];
+  readonly viewpoint?: string | null;
+  readonly goldenThree?: GoldenThreeReportDto;
+  readonly aiSlop?: AiSlopReport;
+}
+
+export interface ParagraphPatchInput {
+  readonly paragraphIndex: number;
+  readonly replacement: string;
+}
+
+const ENDING_HOOK_MARKERS: readonly string[] = [
+  "突然",
+  "骤然",
+  "就在",
+  "门外",
+  "脚步声",
+  "手机",
+  "铃声",
+  "震动",
+  "黑影",
+  "血迹",
+  "倒计时",
+  "推开",
+  "踹开",
+  "响起",
+  "不对",
+  "不可能",
+  "是谁",
+  "等等",
+  "来了",
+  "露馅",
+  "曝光",
+  "死讯",
+  "失踪",
+  "抬头",
+  "转身",
+  "冷笑",
+  "碎了",
+  "警报",
+  "系统",
+  "提示",
+  "真相",
+  "却",
+];
+
+const FLAT_CLOSURE_MARKERS: readonly string[] = [
+  "一切终于结束了",
+  "这一天就这样过去了",
+  "从此以后",
+  "安心地睡去",
+  "总而言之",
+  "明天又是新的一天",
+  "一切归于平静",
+];
+
+const ECHO_STOP_PHRASES = new Set<string>([
+  "没有什么",
+  "不知道为",
+  "这个时候",
+  "就在这个",
+  "没有任何",
+  "怎么回事",
+  "怎么可能",
+  "不是因为",
+  "自己也不",
+  "看起来像",
+  "这样一来",
+  "与此同时",
+]);
+
+const COGNITIVE_LEAK_VERBS: readonly string[] = [
+  "知道",
+  "明白",
+  "清楚",
+  "原来",
+  "早就",
+  "其实",
+  "果然",
+  "想起",
+  "记得",
+  "认出",
+  "知晓",
+  "察觉",
+  "识破",
+  "真相",
+  "秘密",
+  "隐瞒",
+  "背后",
+];
+
+/** Evaluates chapter-ending cliffhanger / pull strength (zero-token). */
+export function analyzeEndingHook(
+  body: string,
+  pacingTier?: string,
+): {
+  readonly endingHookScore: number;
+  readonly endingHookStatus: "pass" | "warn";
+  readonly endingHookSummary: string;
+} {
+  const spans = splitChapterParagraphs(body);
+  if (spans.length === 0) {
+    return { endingHookScore: 0, endingHookStatus: "warn", endingHookSummary: "正文为空，缺少章末钩子。" };
+  }
+  const tailParas = spans.slice(-2).map((s) => s.text.trim());
+  const tailText = tailParas.join("\n");
+  const lastPara = tailParas[tailParas.length - 1] ?? "";
+
+  let score = 46;
+  const hasStrongPunct = /[？！?!…]$/u.test(lastPara) || /[？！?!…][”」』"']$/u.test(lastPara);
+  const hasDialogueCut = HAS_QUOTE_RE.test(lastPara);
+  const hookHits = ENDING_HOOK_MARKERS.filter((m) => tailText.includes(m)).length;
+  const flatHits = FLAT_CLOSURE_MARKERS.filter((m) => tailText.includes(m)).length;
+
+  if (hasStrongPunct) score += 20;
+  if (hasDialogueCut) score += 14;
+  if (hookHits > 0) score += Math.min(22, hookHits * 10);
+  if (nonWhitespaceLength(lastPara) <= 45 && nonWhitespaceLength(lastPara) >= 6) score += 8;
+  if (flatHits > 0) score -= flatHits * 25;
+  if (pacingTier === "快爽" && !hasStrongPunct && hookHits === 0) score -= 8;
+
+  const clamped = Math.max(0, Math.min(100, score));
+  const status: "pass" | "warn" = clamped >= 65 ? "pass" : "warn";
+  const summary =
+    flatHits > 0
+      ? "章末存在平淡总结式收尾，建议截断在冲突升级或悬念抛出瞬间。"
+      : status === "pass"
+        ? "章末具备明确的对话截断、动作转折或悬念牵引力。"
+        : "章末牵引力偏弱，建议在尾段抛出新威胁、反转信息或悬念问句。";
+  return { endingHookScore: clamped, endingHookStatus: status, endingHookSummary: summary };
+}
+
+/** Detects repetitive paragraph openings (consecutive or >=3 repeated 2-char CJK leads). */
+export function analyzeParagraphLeadRepetition(
+  body: string,
+): readonly { readonly lead: string; readonly paragraphs: readonly number[] }[] {
+  const spans = splitChapterParagraphs(body);
+  const leadMap = new Map<string, number[]>();
+  const consecutivePairs = new Set<string>();
+  let prevLead = "";
+
+  for (const span of spans) {
+    const trimmed = span.text.trim();
+    if (!trimmed || HAS_QUOTE_RE.test(trimmed[0])) {
+      prevLead = "";
+      continue;
+    }
+    const cjkPrefix = trimmed.replace(/^[^\u4e00-\u9fff]+/u, "").slice(0, 2);
+    if (cjkPrefix.length < 2) {
+      prevLead = "";
+      continue;
+    }
+    const list = leadMap.get(cjkPrefix);
+    if (list) list.push(span.index);
+    else leadMap.set(cjkPrefix, [span.index]);
+
+    if (prevLead === cjkPrefix) {
+      consecutivePairs.add(cjkPrefix);
+    }
+    prevLead = cjkPrefix;
+  }
+
+  const results: Array<{ readonly lead: string; readonly paragraphs: readonly number[] }> = [];
+  for (const [lead, paragraphs] of leadMap.entries()) {
+    if (paragraphs.length >= 3 || (paragraphs.length >= 2 && consecutivePairs.has(lead))) {
+      results.push({ lead, paragraphs });
+    }
+  }
+  return results
+    .sort((a, b) => b.paragraphs.length - a.paragraphs.length || a.lead.localeCompare(b.lead))
+    .slice(0, 8);
+}
+
+function extractFourCharNgrams(text: string): Map<string, number> {
+  const counts = new Map<string, number>();
+  // Strip dialogue quotes so character catchphrases don't dominate narration echo counts
+  const narration = text.replace(DIALOGUE_SPAN_RE, " ");
+  const segments = narration.match(/[\u4e00-\u9fff]{4,}/gu) ?? [];
+  for (const seg of segments) {
+    for (let i = 0; i <= seg.length - 4; i += 1) {
+      const gram = seg.slice(i, i + 4);
+      if (ECHO_STOP_PHRASES.has(gram)) continue;
+      counts.set(gram, (counts.get(gram) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
+/** Detects overused 4-char narration phrases echoed across recent chapters (zero-token). */
+export function detectCrossChapterEchoes(
+  body: string,
+  recentChapterBodies: readonly string[] = [],
+): readonly { readonly phrase: string; readonly currentCount: number; readonly recentCount: number }[] {
+  if (!body.trim() || recentChapterBodies.length === 0) return [];
+  const currentCounts = extractFourCharNgrams(body);
+  if (currentCounts.size === 0) return [];
+
+  const recentCounts = new Map<string, number>();
+  for (const recentBody of recentChapterBodies) {
+    if (!recentBody?.trim()) continue;
+    const map = extractFourCharNgrams(recentBody);
+    for (const [gram, count] of map.entries()) {
+      recentCounts.set(gram, (recentCounts.get(gram) ?? 0) + count);
+    }
+  }
+
+  const hits: Array<{ readonly phrase: string; readonly currentCount: number; readonly recentCount: number }> = [];
+  for (const [phrase, currentCount] of currentCounts.entries()) {
+    const recentCount = recentCounts.get(phrase) ?? 0;
+    if ((currentCount >= 2 && recentCount >= 2) || (currentCount >= 1 && recentCount >= 4)) {
+      hits.push({ phrase, currentCount, recentCount });
+    }
+  }
+
+  // Deduplicate overlapping substrings by keeping the higher-scoring gram first
+  hits.sort((a, b) => b.currentCount + b.recentCount - (a.currentCount + a.recentCount) || a.phrase.localeCompare(b.phrase));
+  const deduped: typeof hits = [];
+  for (const hit of hits) {
+    if (deduped.some((kept) => kept.phrase.includes(hit.phrase.slice(1, 3)) && kept.phrase !== hit.phrase && kept.recentCount >= hit.recentCount)) {
+      continue;
+    }
+    deduped.push(hit);
+    if (deduped.length >= 8) break;
+  }
+  return deduped;
+}
+
+/** Heuristic zero-token detector for potential POV information leaks against hidden facts. */
+export function detectPovLeakHeuristics(
+  body: string,
+  hiddenFacts: readonly HiddenFactHint[] = [],
+  viewpoint?: string | null,
+): readonly PovLeakWarningDto[] {
+  const pov = viewpoint?.trim() ?? "";
+  if (!pov || !body.trim() || hiddenFacts.length === 0) return [];
+
+  const spans = splitChapterParagraphs(body);
+  const warnings: PovLeakWarningDto[] = [];
+  const seenKeys = new Set<string>();
+
+  for (const fact of hiddenFacts) {
+    const terms = new Set<string>();
+    const entity = fact.entityName.trim();
+    if (entity.length >= 2 && entity !== pov) terms.add(entity);
+    for (const alias of fact.aliases ?? []) {
+      const a = alias.trim();
+      if (a.length >= 2 && a !== pov) terms.add(a);
+    }
+    // Extract quoted secret terms inside fact.note (e.g. 「暗门」 / 《秘录》 / “内鬼”)
+    for (const match of fact.note.matchAll(/[「『《“"]([^」』》”"\n]{2,12})[」』》”"]/gu)) {
+      const inner = match[1].trim();
+      if (inner.length >= 2 && inner !== pov) terms.add(inner);
+    }
+    if (terms.size === 0) continue;
+
+    for (const span of spans) {
+      const narration = span.text.replace(DIALOGUE_SPAN_RE, " ");
+      const hasCognitive = COGNITIVE_LEAK_VERBS.some((v) => narration.includes(v));
+      for (const term of terms) {
+        const idx = narration.indexOf(term);
+        if (idx < 0) continue;
+        // Flag if narration combines the hidden entity/secret with cognitive awareness,
+        // or mentions a quoted secret term directly in POV narration.
+        const isDirectSecret = term !== entity && fact.note.includes(term);
+        if (!hasCognitive && !isDirectSecret) continue;
+
+        const key = `${fact.factId}:${span.index}:${term}`;
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+
+        const winStart = Math.max(0, idx - 14);
+        const winEnd = Math.min(narration.length, idx + term.length + 14);
+        warnings.push({
+          factId: fact.factId,
+          entityName: fact.entityName,
+          matchedTerm: term,
+          paragraphIndex: span.index,
+          excerpt: narration.slice(winStart, winEnd).trim(),
+        });
+        if (warnings.length >= 10) return warnings;
+      }
+    }
+  }
+
+  return warnings;
+}
+
+/** Computes comprehensive Quality v2 report combining ending hook, repetition, echoes, POV leak, and composite score. */
+export function diagnoseQualityV2(body: string, options?: QualityV2Options): ChapterQualityV2Dto {
+  const ending = analyzeEndingHook(body, options?.pacingTier);
+  const paragraphLeadRepetitions = analyzeParagraphLeadRepetition(body);
+  const crossChapterEchoes = detectCrossChapterEchoes(body, options?.recentChapterBodies);
+  const povLeakWarnings = detectPovLeakHeuristics(body, options?.hiddenFacts, options?.viewpoint);
+
+  const goldenScore = options?.goldenThree ? options.goldenThree.overallScore : 75;
+  const slopDensity = options?.aiSlop ? options.aiSlop.weightedDensityPer1000Chars : 0;
+  const slopScore = Math.max(0, Math.min(100, Math.round(100 - slopDensity * 10 - (options?.aiSlop?.rhythmMonotone ? 10 : 0))));
+
+  let composite = Math.round(goldenScore * 0.4 + slopScore * 0.3 + ending.endingHookScore * 0.3);
+  composite -= Math.min(18, paragraphLeadRepetitions.length * 6);
+  composite -= Math.min(15, crossChapterEchoes.length * 4);
+  composite -= Math.min(30, povLeakWarnings.length * 15);
+  const compositeScore = Math.max(0, Math.min(100, composite));
+
+  return {
+    endingHookScore: ending.endingHookScore,
+    endingHookStatus: ending.endingHookStatus,
+    endingHookSummary: ending.endingHookSummary,
+    paragraphLeadRepetitions,
+    crossChapterEchoes,
+    povLeakWarnings,
+    compositeScore,
+  };
+}
+
+/**
+ * Applies paragraph-level surgical patches while preserving all untouched paragraphs
+ * and original line breaks verbatim.
+ */
+export function applyParagraphPatches(
+  body: string,
+  patches: readonly ParagraphPatchInput[],
+): {
+  readonly body: string;
+  readonly appliedCount: number;
+  readonly preservedRatio: number;
+  readonly skippedIndices: readonly number[];
+} {
+  const spans = splitChapterParagraphs(body);
+  if (spans.length === 0 || patches.length === 0) {
+    return {
+      body,
+      appliedCount: 0,
+      preservedRatio: 1,
+      skippedIndices: patches.map((p) => p.paragraphIndex),
+    };
+  }
+
+  const spanByIndex = new Map<number, (typeof spans)[number]>();
+  for (const span of spans) {
+    spanByIndex.set(span.index, span);
+  }
+
+  const byIndex = new Map<number, string>();
+  const skippedIndices: number[] = [];
+  for (const patch of patches) {
+    const clean = patch.replacement.replace(/^\[P\d+\]\s*/u, "").trim();
+    if (!clean || !spanByIndex.has(patch.paragraphIndex)) {
+      skippedIndices.push(patch.paragraphIndex);
+      continue;
+    }
+    byIndex.set(patch.paragraphIndex, clean);
+  }
+  if (byIndex.size === 0) {
+    return { body, appliedCount: 0, preservedRatio: 1, skippedIndices };
+  }
+
+  // Apply replacements from end to start so earlier UTF-16 offsets stay valid
+  const sortedIndices = [...byIndex.keys()].sort((a, b) => {
+    const sa = spanByIndex.get(a)!;
+    const sb = spanByIndex.get(b)!;
+    return sb.start - sa.start;
+  });
+  let nextBody = body;
+  for (const idx of sortedIndices) {
+    const span = spanByIndex.get(idx)!;
+    const replacement = byIndex.get(idx)!;
+    nextBody = `${nextBody.slice(0, span.start)}${replacement}${nextBody.slice(span.end)}`;
+  }
+
+  const preservedRatio = round3(Math.max(0, (spans.length - byIndex.size) / spans.length));
+  return { body: nextBody, appliedCount: byIndex.size, preservedRatio, skippedIndices };
+}
+
 export function diagnoseChapterOffline(
   documentId: string,
   body: string,
-  options?: GoldenThreeOptions & AiSlopScanConfig,
+  options?: GoldenThreeOptions & AiSlopScanConfig & Omit<QualityV2Options, "goldenThree" | "aiSlop">,
 ): ChapterDiagnosticsReport {
+  const goldenThree = diagnoseGoldenThree(body, options);
+  const aiSlop = scanAiSlop(body, options);
+  const qualityV2 = diagnoseQualityV2(body, {
+    pacingTier: options?.pacingTier,
+    recentChapterBodies: options?.recentChapterBodies,
+    hiddenFacts: options?.hiddenFacts,
+    viewpoint: options?.viewpoint,
+    goldenThree,
+    aiSlop,
+  });
   return {
     documentId,
-    goldenThree: diagnoseGoldenThree(body, options),
-    aiSlop: scanAiSlop(body, options),
+    goldenThree,
+    aiSlop,
+    qualityV2,
   };
 }

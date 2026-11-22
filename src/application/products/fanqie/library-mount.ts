@@ -10,13 +10,16 @@ import type {
   WritingStageBinding,
 } from "../../../contracts/workspace-dto.ts";
 import {
+  normalizeContextTuning,
   normalizeStageBindings,
   rankTechniquesForChapter,
   resolveEffectiveMount,
+  selectNonConflictingTechniques,
   validatePacingLabel,
 } from "../../../domain/fanqie/index.ts";
 import { stmt } from "../../../storage/index.ts";
 import { count, invalid, optionalText, requiredRow, text, type DocumentRow, type Input, type WorkspaceContext } from "../../context.ts";
+import { loadProjectControls } from "./controls.ts";
 import { queryDeconstructions, queryTechniques } from "./library-crud.ts";
 import { markBookPrefixDirty } from "./cache-snapshot.ts";
 import { assertFanqieProject } from "./shared.ts";
@@ -151,6 +154,7 @@ export function queryTechniqueRecommendations(
 ): TechniqueRecommendationDto[] {
   const cards = queryTechniques(ctx, { projectId: row.projectId });
   const mounts = queryLibraryMounts(ctx, row.projectId);
+  const controls = loadProjectControls(ctx, row.projectId);
   const order = ctx.chapterOrder(row.projectId);
   const plan = ctx.planning(row.id);
   const outlineText = [row.title, row.summary, instruction, plan ? JSON.stringify(plan) : ""].join("\n");
@@ -158,7 +162,8 @@ export function queryTechniqueRecommendations(
     cards,
     mounts,
     contextIds: { projectId: row.projectId, volumeId: row.volumeId, actId: row.actId, chapterId: row.id },
-    pacing,
+    pacing: pacing || controls.pacingTier || "",
+    genreTags: controls.genreTags,
     outlineText,
     chapterIndex: Math.max(0, order.indexOf(row.id)),
     stage,
@@ -193,32 +198,35 @@ export function resolveMountedLibraryForChapter(
 ): {
   readonly techniques: TechniqueCardDto[];
   readonly deconstructions: DeconstructionDto[];
+  readonly autoMatchedIds: readonly string[];
+  readonly conflictSkippedIds: readonly string[];
 } {
+  const controls = loadProjectControls(ctx, row.projectId);
+  const tuning = normalizeContextTuning(controls.contextTuning);
   const mounts = queryLibraryMounts(ctx, row.projectId);
   const contextIds = { projectId: row.projectId, volumeId: row.volumeId, actId: row.actId, chapterId: row.id };
 
-  const stageMatchedCards = queryTechniques(ctx, { projectId: row.projectId }).filter((card) => {
-    const bindings = card.stageBindings && card.stageBindings.length > 0 ? card.stageBindings : ["write"];
-    return bindings.includes(stage);
-  });
-  const explicitTechs = stageMatchedCards.filter((card) => {
-    const mount = resolveEffectiveMount(mounts, "technique", card.id, contextIds, card.overrideOfId);
-    return mount !== null && mount.mode !== "exclude";
-  });
-  const recommended = queryTechniqueRecommendations(ctx, row, pacing, instruction, stage)
-    .filter((entry) => entry.mountedMode === null && entry.score >= 85)
-    .slice(0, 2)
-    .map((entry) => entry.card);
-  const techniques = [
-    ...explicitTechs,
-    ...recommended.filter((card) => !explicitTechs.some((item) => item.id === card.id)),
-  ];
+  const ranked = queryTechniqueRecommendations(ctx, row, pacing, instruction, stage);
+  // Only allow unmounted auto-matched cards that exceed the relevance threshold (>= 85)
+  const eligible = ranked.filter((entry) => entry.mountedMode !== null || entry.score >= 85);
+  const selection = tuning.maxActiveTechniques > 0
+    ? selectNonConflictingTechniques(eligible, tuning.maxActiveTechniques)
+    : { selected: [], autoMatchedIds: [], conflictSkippedIds: [] };
+  const techniques = selection.selected.map((entry) => entry.card as TechniqueCardDto);
 
   const allDeconstructs = queryDeconstructions(ctx, { projectId: row.projectId });
-  const deconstructions = allDeconstructs.filter((sample) => {
+  const mountedDeconstructions = allDeconstructs.filter((sample) => {
     const mount = resolveEffectiveMount(mounts, "deconstruction", sample.id, contextIds, sample.overrideOfId);
     return mount !== null && mount.mode !== "exclude";
   });
+  const deconstructions = tuning.maxActiveDeconstructions > 0
+    ? mountedDeconstructions.slice(0, tuning.maxActiveDeconstructions)
+    : [];
 
-  return { techniques, deconstructions };
+  return {
+    techniques,
+    deconstructions,
+    autoMatchedIds: selection.autoMatchedIds,
+    conflictSkippedIds: selection.conflictSkippedIds,
+  };
 }

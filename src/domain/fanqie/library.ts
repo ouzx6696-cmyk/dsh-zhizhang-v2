@@ -29,6 +29,11 @@ export interface TechniqueCardForRank {
   readonly executionSteps: string;
   readonly constraints: string;
   readonly antiPatterns: string;
+  readonly positiveExample?: string;
+  readonly negativeExample?: string;
+  readonly conflictGroup?: string;
+  readonly appliedCount?: number;
+  readonly avgQualityDelta?: number;
   readonly priority: number;
   readonly status: "proposed" | "approved" | "archived";
   readonly assetKind?: "technique" | "skill";
@@ -50,6 +55,12 @@ export interface TechniqueMatchResult {
   readonly mountedMode: "include" | "exclude" | "pin" | null;
   readonly mountTarget: "project" | "volume" | "act" | "chapter" | null;
   readonly reasons: readonly string[];
+}
+
+export interface TechniqueSelectionResult {
+  readonly selected: readonly TechniqueMatchResult[];
+  readonly autoMatchedIds: readonly string[];
+  readonly conflictSkippedIds: readonly string[];
 }
 
 const TARGET_PRECEDENCE: Readonly<Record<LibraryMountRule["targetType"], number>> = {
@@ -281,6 +292,21 @@ export function rankTechniquesForChapter(params: {
       }
     }
 
+    // Historical effectiveness feedback (requires >= 2 recorded applications)
+    if (
+      typeof card.appliedCount === "number" &&
+      card.appliedCount >= 2 &&
+      typeof card.avgQualityDelta === "number" &&
+      Number.isFinite(card.avgQualityDelta) &&
+      card.avgQualityDelta !== 0
+    ) {
+      const deltaBoost = Math.max(-25, Math.min(35, Math.round(card.avgQualityDelta * 3)));
+      if (deltaBoost !== 0) {
+        score += deltaBoost;
+        reasons.push(deltaBoost > 0 ? `历史质量增效 +${deltaBoost}` : `历史质量回落 ${deltaBoost}`);
+      }
+    }
+
     results.push({
       card,
       score,
@@ -291,4 +317,50 @@ export function rankTechniquesForChapter(params: {
   }
 
   return results.sort((a, b) => b.score - a.score || a.card.title.localeCompare(b.card.title));
+}
+
+/**
+ * Selects active techniques for a chapter while enforcing `conflictGroup` mutual
+ * exclusion: pinned/explicitly mounted techniques take priority, followed by top
+ * auto-matched techniques up to `maxAuto`. Lower-ranked cards in an already claimed
+ * conflict group are skipped and recorded in `conflictSkippedIds`.
+ */
+export function selectNonConflictingTechniques(
+  ranked: readonly TechniqueMatchResult[],
+  maxAuto = 3,
+): TechniqueSelectionResult {
+  const selected: TechniqueMatchResult[] = [];
+  const autoMatchedIds: string[] = [];
+  const conflictSkippedIds: string[] = [];
+  const claimedGroups = new Set<string>();
+
+  const explicit = ranked.filter((item) => item.mountedMode === "pin" || item.mountedMode === "include");
+  const unmounted = ranked.filter((item) => item.mountedMode === null);
+
+  for (const item of explicit) {
+    const group = item.card.conflictGroup?.trim().toLowerCase() ?? "";
+    if (group && claimedGroups.has(group)) {
+      conflictSkippedIds.push(item.card.id);
+      continue;
+    }
+    if (group) claimedGroups.add(group);
+    selected.push(item);
+  }
+
+  let autoCount = 0;
+  for (const item of unmounted) {
+    if (autoCount >= maxAuto) break;
+    if (item.score <= 0) continue;
+    const group = item.card.conflictGroup?.trim().toLowerCase() ?? "";
+    if (group && claimedGroups.has(group)) {
+      conflictSkippedIds.push(item.card.id);
+      continue;
+    }
+    if (group) claimedGroups.add(group);
+    selected.push(item);
+    autoMatchedIds.push(item.card.id);
+    autoCount += 1;
+  }
+
+  return { selected, autoMatchedIds, conflictSkippedIds };
 }

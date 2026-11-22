@@ -124,11 +124,60 @@ export interface ProductLineModule {
     readonly layered?: LayeredPromptPayload;
   };
   onJobCacheHit?(ctx: WorkspaceContext, projectId: string): void;
+  runMaterialNormalize?(
+    ctx: WorkspaceContext,
+    params: {
+      readonly sessionId: string;
+      readonly instruction?: string;
+      readonly caller: SingleShotLlmCaller;
+      readonly signal: AbortSignal;
+    },
+  ): Promise<unknown>;
+  runAutopilotPipeline?(
+    ctx: WorkspaceContext,
+    params: {
+      readonly batchId: string;
+      readonly caller: SingleShotLlmCaller;
+      readonly signal: AbortSignal;
+      readonly saveDraft: (row: DocumentRow, body: string) => { readonly revisionId: string };
+      readonly instruction?: string;
+      readonly overrideRedLine?: boolean;
+    },
+  ): Promise<unknown>;
   contributeSnapshot(
     ctx: WorkspaceContext,
     projectId: string,
     active: DocumentRow | undefined,
   ): Record<string, unknown>;
+
+  /** Optional lightweight progressive-disclosure contribution for DsH ctx.systemPrompt. */
+  contributeSystemPrompt?(
+    ctx: WorkspaceContext,
+    projectId: string,
+    active: DocumentRow | undefined,
+  ): {
+    readonly lines: readonly string[];
+    readonly mountedSkills?: readonly {
+      readonly id: string;
+      readonly title: string;
+      readonly category: string;
+      readonly triggerWhen: string;
+      readonly conflictGroup?: string;
+      readonly mountedMode?: string | null;
+    }[];
+    readonly pendingProposalCount?: number;
+  };
+
+  /** Optional deterministic zero-token diagnostics returned to DsH Agent after draft submission. */
+  diagnoseForAgent?(ctx: WorkspaceContext, row: DocumentRow, body: string): Readonly<Record<string, unknown>> | null;
+
+  /** Optional hook to record technique effectiveness when Agent writes with techniques. */
+  onAgentDraftRecorded?(
+    ctx: WorkspaceContext,
+    row: DocumentRow,
+    techniqueIds: readonly string[],
+    diagnosticsSummary: Readonly<Record<string, unknown>> | null,
+  ): void;
 
   readonly readModels: Readonly<Record<string, AuthorReadUnitFactory>>;
   readonly agentTools?: (workspace: ProductAgentToolFacade) => readonly ProductAgentToolSpec[];

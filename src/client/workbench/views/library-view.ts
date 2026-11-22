@@ -8,6 +8,7 @@ import type {
 import type { WorkbenchShellHost } from "../plugins/types.ts";
 import { el } from "../store.ts";
 import { createButton, createCard, createInput } from "../ui/primitives.ts";
+import { dispatchAgentHandoff } from "./agent-companion.ts";
 
 const TECHNIQUE_CATEGORIES = [
   { value: "opening", label: "开篇" },
@@ -299,13 +300,19 @@ export function createLibraryView(
         });
       };
 
+      const createDrawer = document.createElement("details");
+      createDrawer.className = "disclosure";
+      const createSummary = document.createElement("summary");
+      createSummary.textContent = "手动新增拆书样本（也可交由 DsH Agent 拆解后提案入库）";
+      createDrawer.append(createSummary, form);
+
       container.append(
         createCard({
           tag: "section",
           variant: "default",
           padding: "md",
           title: "新增拆书样本",
-          body: form,
+          body: createDrawer,
         }),
       );
     } else {
@@ -357,6 +364,25 @@ export function createLibraryView(
         name: "antiPatterns",
         rows: 2,
       });
+      const conflictGroupField = createInput({
+        label: "互斥冲突组（可选，同组技法仅生效最高分 1 张）",
+        name: "conflictGroup",
+        placeholder: "例如：dialogue_style / pacing_hook",
+      });
+      const positiveExampleField = createInput({
+        kind: "textarea",
+        label: "正例范文片段（可选，写作阶段直接示范）",
+        name: "positiveExample",
+        rows: 2,
+        placeholder: "简短展示该技法落地时的具体动作与台词示例",
+      });
+      const negativeExampleField = createInput({
+        kind: "textarea",
+        label: "反例警示片段（可选，审稿与精修阶段重点查杀）",
+        name: "negativeExample",
+        rows: 2,
+        placeholder: "展示容易写坏或空洞说教的典型反例",
+      });
       const projectOnlyCheck = createCheckboxField("projectOnly", "仅存为当前项目专属（不进全局库）");
       const submitBtn = createButton({
         label: "保存技法卡片",
@@ -369,10 +395,13 @@ export function createLibraryView(
         categoryField.root,
         pacingField.root,
         sceneTagsField.root,
+        conflictGroupField.root,
         triggerField.root,
         stepsField.root,
         constraintsField.root,
         antiPatternsField.root,
+        positiveExampleField.root,
+        negativeExampleField.root,
         projectOnlyCheck,
         submitBtn,
       );
@@ -389,10 +418,13 @@ export function createLibraryView(
             category: String(fd.get("category") ?? "narrative"),
             pacing: String(fd.get("pacing") ?? ""),
             sceneTags: String(fd.get("sceneTags") ?? ""),
+            conflictGroup: String(fd.get("conflictGroup") ?? "").trim(),
             triggerWhen: String(fd.get("triggerWhen") ?? ""),
             executionSteps: String(fd.get("executionSteps") ?? ""),
             constraints: String(fd.get("constraints") ?? ""),
             antiPatterns: String(fd.get("antiPatterns") ?? ""),
+            positiveExample: String(fd.get("positiveExample") ?? "").trim(),
+            negativeExample: String(fd.get("negativeExample") ?? "").trim(),
           });
           form.reset();
           categoryField.setValue("narrative");
@@ -401,13 +433,19 @@ export function createLibraryView(
         });
       };
 
+      const createDrawer = document.createElement("details");
+      createDrawer.className = "disclosure";
+      const createSummary = document.createElement("summary");
+      createSummary.textContent = "手动新增写作技法卡片（也可导入 SKILL.md 或由 DsH Agent 提案入库）";
+      createDrawer.append(createSummary, form);
+
       container.append(
         createCard({
           tag: "section",
           variant: "default",
           padding: "md",
           title: "新增写作技法卡片",
-          body: form,
+          body: createDrawer,
         }),
       );
     }
@@ -435,11 +473,22 @@ export function createLibraryView(
           const tech = item as TechniqueCardDto;
           const stageNote = tech.stageBindings?.length ? `阶段: ${tech.stageBindings.join("/")}` : "";
           const refNote = tech.references?.length ? `参考附件 ${tech.references.length} 份` : "";
-          const metaLine = [tech.category, stageNote, refNote, tech.triggerWhen, tech.sceneTags.join("、")]
+          const groupNote = tech.conflictGroup ? `互斥组: ${tech.conflictGroup}` : "";
+          const statsNote =
+            tech.appliedCount && tech.appliedCount > 0
+              ? `实测应用 ${tech.appliedCount} 次 · 均分变化 ${(tech.avgQualityDelta ?? 0) >= 0 ? "+" : ""}${(tech.avgQualityDelta ?? 0).toFixed(1)}`
+              : "";
+          const metaLine = [tech.category, groupNote, stageNote, refNote, statsNote, tech.triggerWhen, tech.sceneTags.join("、")]
             .filter(Boolean)
             .join(" · ");
-          if (metaLine) itemBody.push(el("p", metaLine, "setting-meta"));
+          if (metaLine) itemBody.push(el("p", metaLine, "setting-meta tabular"));
           itemBody.push(el("p", tech.executionSteps));
+          if (tech.positiveExample) {
+            itemBody.push(el("p", `正例示范：${tech.positiveExample}`, "setting-meta"));
+          }
+          if (tech.negativeExample) {
+            itemBody.push(el("p", `反例警示：${tech.negativeExample}`, "setting-meta"));
+          }
         }
 
         const actions = el("div", "", "actions");
@@ -490,6 +539,28 @@ export function createLibraryView(
                   }),
               }),
             );
+            if (kind === "techniques") {
+              actions.append(
+                createButton({
+                  label: "带此技法交办 Agent",
+                  variant: "secondary",
+                  size: "sm",
+                  onClick: () => {
+                    dispatchAgentHandoff({
+                      title: `应用技法「${item.title}」写作/精修《${active.title}》`,
+                      prompt: [
+                        `请对当前章节《${active.title}》（projectId=${projectId}, documentId=${documentId}）应用技法卡片「${item.title}」（skillId=${item.id}）：`,
+                        `1. 调用 \`zhizhang_load_skill({ id: "${item.id}", kind: "technique" })\` 读取该技法完整执行步骤与正反例；`,
+                        "2. 调用 `zhizhang_read_context` 核对当前章节上下文；",
+                        "3. 落地该技法后，通过 `zhizhang_patch_paragraphs` 或 `zhizhang_submit_draft` 提交修订。",
+                      ].join("\n"),
+                      context: { projectId, documentId, techniqueId: item.id },
+                    });
+                    host.switchWorkspaceView("writing");
+                  },
+                }),
+              );
+            }
           }
 
           if (item.scope === "global") {
@@ -527,6 +598,9 @@ export function createLibraryView(
                         executionSteps: tech.executionSteps,
                         constraints: tech.constraints,
                         antiPatterns: tech.antiPatterns,
+                        ...(tech.conflictGroup ? { conflictGroup: tech.conflictGroup } : {}),
+                        ...(tech.positiveExample ? { positiveExample: tech.positiveExample } : {}),
+                        ...(tech.negativeExample ? { negativeExample: tech.negativeExample } : {}),
                         ...(tech.assetKind ? { assetKind: tech.assetKind } : {}),
                         ...(tech.stageBindings ? { stageBindings: tech.stageBindings } : {}),
                         ...(tech.references ? { references: tech.references } : {}),

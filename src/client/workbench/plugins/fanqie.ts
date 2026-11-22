@@ -7,6 +7,7 @@ import type {
 } from "../../../contracts/workspace-dto.ts";
 import { EDITORIAL_REJECTION_LIMIT } from "../../contracts/protected-rules.ts";
 import { byId, el } from "../dom.ts";
+import { createAutopilotPanel } from "../views/autopilot-panel.ts";
 import { createContextPreviewPanel } from "../views/context-preview.ts";
 import { createDiagnosticsPanel } from "../views/diagnostics-panel.ts";
 import { createIoView } from "../views/io-view.ts";
@@ -66,8 +67,14 @@ export const fanqieUiModule: ProductLineUiModule = {
     const deconstructView = createLibraryView(byId("view-deconstruct"), host, "deconstruct");
     const techniqueView = createLibraryView(byId("view-techniques"), host, "techniques");
     const ioView = createIoView(byId("view-io"), host);
+    const autopilotRoot = el("div", "", "autopilot-root");
     const diagnosticsRoot = el("div", "", "diagnostics-root");
+    const autopilotHost = document.getElementById("autopilot-fallback-slot") ?? byId("fanqie-actions");
+    autopilotHost.append(autopilotRoot);
     byId("fanqie-actions").append(diagnosticsRoot);
+    const autopilotPanel = createAutopilotPanel(autopilotRoot, host, {
+      getProviderModel: getRunProviderModel,
+    });
     const diagnosticsPanel = createDiagnosticsPanel(diagnosticsRoot, host, {
       getProviderModel: getRunProviderModel,
       getRunDefaults: () => {
@@ -412,6 +419,7 @@ export const fanqieUiModule: ProductLineUiModule = {
           planDocument = undefined;
           contextDoc = undefined;
           contextPreview.clear();
+          autopilotPanel.clear();
           diagnosticsPanel.clear();
           return;
         }
@@ -440,6 +448,7 @@ export const fanqieUiModule: ProductLineUiModule = {
         if (contextDoc !== `${active.id}:${snapshot.asOfSeq ?? 0}`) {
           contextDoc = `${active.id}:${snapshot.asOfSeq ?? 0}`;
           void contextPreview.refresh();
+          void autopilotPanel.refreshForDocument(active.id, projectId);
           void diagnosticsPanel.refreshForDocument(active.id, projectId);
         }
 

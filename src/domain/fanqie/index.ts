@@ -79,12 +79,14 @@ export {
   rankTechniquesForChapter,
   resolveEffectiveMount,
   resolveScopedItems,
+  selectNonConflictingTechniques,
   validatePacingLabel,
   validateTechniqueCategory,
   type LibraryMountRule,
   type TechniqueCardForRank,
   type TechniqueCategory,
   type TechniqueMatchResult,
+  type TechniqueSelectionResult,
   type WritingStageBinding,
 } from "./library.ts";
 
@@ -92,15 +94,34 @@ export {
   AI_SLOP_CATEGORY_WEIGHTS,
   DEFAULT_AI_SLOP_PATTERNS,
   OBSERVATION_DIMENSIONS,
+  analyzeEndingHook,
+  analyzeParagraphLeadRepetition,
+  applyParagraphPatches,
+  detectCrossChapterEchoes,
+  detectPovLeakHeuristics,
   diagnoseChapterOffline,
   diagnoseGoldenThree,
+  diagnoseQualityV2,
   scanAiSlop,
   type AiSlopPattern,
   type AiSlopReport,
   type AiSlopScanConfig,
   type ChapterDiagnosticsReport,
   type GoldenThreeOptions,
+  type HiddenFactHint,
+  type ParagraphPatchInput,
+  type QualityV2Options,
 } from "./diagnostics.ts";
+
+export {
+  buildLocalProposedBundle,
+  cleanRawMaterialText,
+  preprocessNonStandardMaterials,
+  type ExistingChapterRef,
+  type ExistingLoreRef,
+  type MaterialPreprocessResult,
+  type RawMaterialFileInput,
+} from "./material-parser.ts";
 
 export {
   countEntityMentionsWithAliases,
@@ -113,3 +134,13 @@ export {
   type RelatedChapterMatch,
   type RelatedChaptersInput,
 } from "./related-chapters.ts";
+
+export {
+  CONTEXT_TUNING_BOUNDS,
+  DEFAULT_CONTEXT_TUNING,
+  countCustomizedContextFields,
+  isDefaultContextTuning,
+  normalizeContextTuning,
+  type ContextTuningConfig,
+  type NumericBound,
+} from "./context-tuning.ts";

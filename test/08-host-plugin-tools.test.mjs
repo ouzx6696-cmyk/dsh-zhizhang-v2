@@ -12,19 +12,21 @@ import {
 import { applyWorkbench, name as pluginName } from "../src/host/plugin.ts";
 import {
   createMockDsHHost,
+  createMockSystemPromptRegistrar,
   createStrictToolRegistrar,
   withTempDir,
 } from "../support/harness.mjs";
 
-test("applyWorkbench serves Next-Gen HTTP routes, static assets, security headers, and sanitized /diag", async () => {
+test("applyWorkbench serves Next-Gen HTTP routes, static assets, security headers, systemPrompt, and sanitized /diag", async () => {
   assert.equal(pluginName, "zhizhang-workbench");
   const patchYml = readFileSync(new URL("../src/bundle/cordis.patch.yml", import.meta.url), "utf8");
   assert.match(patchYml, /dshHomePath\('zhizhang-v3'\)/);
 
   await withTempDir("zhizhang-host-", async (dataDirectory) => {
     const toolReg = createStrictToolRegistrar();
+    const promptReg = createMockSystemPromptRegistrar();
     const configForms = { forms: [], register(form) { this.forms.push(form); return () => {}; } };
-    const host = createMockDsHHost({ tools: toolReg, configForms, cordis: true });
+    const host = createMockDsHHost({ tools: toolReg, configForms, systemPrompt: promptReg, cordis: true });
 
     applyWorkbench(
       host.ctx,
@@ -62,11 +64,19 @@ test("applyWorkbench serves Next-Gen HTTP routes, static assets, security header
       assert.equal(badCt.status, 400);
       assert.equal(badCt.headers.get("x-content-type-options"), "nosniff");
 
+      assert.equal(promptReg.sections.length, 1);
+      assert.equal(promptReg.sections[0].id, "zhizhang.cocreation");
+      const idlePrompt = await promptReg.renderAll();
+      assert.match(idlePrompt, /zhizhang_read_focus/);
+
       const diag = await host.getDiag();
       assert.equal(diag.status, 200);
       assert.equal(diag.body.result.version, "3.0.0");
       assert.equal(diag.body.result.schemaId, "zhizhang/3.0");
       assert.equal(diag.body.result.agentToolsRegistered, true);
+      assert.equal(diag.body.result.agentToolCount, 23);
+      assert.equal(diag.body.result.systemPromptRegistered, true);
+      assert.equal(diag.body.result.systemPromptError, null);
       assert.equal(JSON.stringify(diag.body).includes(dataDirectory), false);
 
       assert.equal(configForms.forms.length, 1);
@@ -74,31 +84,48 @@ test("applyWorkbench serves Next-Gen HTTP routes, static assets, security header
       await host.close();
     }
     assert.equal(host.routes.size, 0);
+    assert.equal(promptReg.sections.length, 0);
   });
 });
 
-test("declarative product Agent tools register 11 strict tools (7+3 Fanqie, 1 Toutiao) and never mutate drafts", async () => {
+test("declarative Agent tools register 23 strict sorted tools (3 core + 18 Fanqie + 2 Toutiao) and degrade gracefully without systemPrompt", async () => {
   await withTempDir("zhizhang-tools-", async (dataDirectory) => {
     const toolReg = createStrictToolRegistrar();
     const host = createMockDsHHost({ tools: toolReg });
     applyWorkbench(host.ctx, { dataDirectory }, { readAsset: host.readAsset });
 
     try {
+      const diag = await host.getDiag();
+      assert.equal(diag.body.result.systemPromptRegistered, false);
+      assert.equal(diag.body.result.agentToolCount, 23);
+
       const registeredOrder = toolReg.tools.map((t) => t.name);
       const sortedNames = [...registeredOrder].sort();
       assert.deepEqual(registeredOrder, sortedNames, "DsH Agent tools must register in deterministic sorted order for KV-cache stability");
       assert.deepEqual(registeredOrder, [
         "zhizhang_check_conflicts",
+        "zhizhang_create_structure",
         "zhizhang_diagnose_chapter",
+        "zhizhang_ingest_preview",
+        "zhizhang_list_skills",
+        "zhizhang_load_skill",
+        "zhizhang_mount_skill",
+        "zhizhang_patch_paragraphs",
+        "zhizhang_plan_chapter",
+        "zhizhang_plan_toutiao_article",
         "zhizhang_propose_foreshadow",
+        "zhizhang_propose_material_bundle",
         "zhizhang_propose_setting",
         "zhizhang_propose_technique",
         "zhizhang_read_article",
         "zhizhang_read_chapter",
+        "zhizhang_read_context",
         "zhizhang_read_controls",
+        "zhizhang_read_focus",
         "zhizhang_read_known_facts",
         "zhizhang_read_tree",
         "zhizhang_search_workspace",
+        "zhizhang_submit_draft",
       ]);
 
       // Upstream wire objects must never leak non-standard proposalOnly keys and must keep sorted property keys
@@ -110,14 +137,21 @@ test("declarative product Agent tools register 11 strict tools (7+3 Fanqie, 1 To
 
       const writeTools = toolReg.tools.filter((t) => !t.readOnly).map((t) => t.name).sort();
       assert.deepEqual(writeTools, [
+        "zhizhang_create_structure",
+        "zhizhang_mount_skill",
+        "zhizhang_patch_paragraphs",
+        "zhizhang_plan_chapter",
+        "zhizhang_plan_toutiao_article",
         "zhizhang_propose_foreshadow",
+        "zhizhang_propose_material_bundle",
         "zhizhang_propose_setting",
         "zhizhang_propose_technique",
+        "zhizhang_submit_draft",
       ]);
 
       const fanqieProj = (await host.command("project.create", { product: "fanqie", name: "测试书" })).body.result.id;
       const chId = (await host.command("document.create", { projectId: fanqieProj, title: "第一章" })).body.result.id;
-      await host.command("draft.save", { documentId: chId, baseRevisionId: null, body: "作者原文不可被工具直写。" });
+      await host.command("draft.save", { documentId: chId, baseRevisionId: null, body: "作者原文在审慎模式下不可被工具直写。" });
 
       const treeOut = await toolReg.invoke("zhizhang_read_tree", { projectId: fanqieProj });
       assert.equal(treeOut.chapters.length, 1);
@@ -133,7 +167,7 @@ test("declarative product Agent tools register 11 strict tools (7+3 Fanqie, 1 To
 
       // Author draft unchanged and proposed setting remains pending (unconfirmed)
       const st = (await host.getState({ projectId: fanqieProj, documentId: chId })).body.result;
-      assert.equal(st.active.body, "作者原文不可被工具直写。");
+      assert.equal(st.active.body, "作者原文在审慎模式下不可被工具直写。");
       assert.equal(st.settings[0].decision, "pending");
 
       // Toutiao read tool

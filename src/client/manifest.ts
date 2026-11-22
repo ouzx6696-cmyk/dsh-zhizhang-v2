@@ -34,5 +34,8 @@ export const CLIENT_JS_MODULES = [
   "workbench/views/worldbook-view.js",
   "workbench/views/library-view.js",
   "workbench/views/io-view.js",
+  "workbench/views/autopilot-panel.js",
+  "workbench/views/material-ingest-view.js",
+  "workbench/views/agent-companion.js",
   "contracts/protected-rules.js",
 ] as const;

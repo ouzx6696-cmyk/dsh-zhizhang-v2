@@ -1,12 +1,15 @@
 export {
   deleteDeconstruction,
   deleteTechnique,
+  getDeconstructionById,
+  getTechniqueById,
   listDeconstructions,
   listTechniques,
   persistDeconstruction,
   persistTechniqueCard,
   queryDeconstructions,
   queryTechniques,
+  recordTechniqueOutcome,
   saveDeconstruction,
   saveTechnique,
 } from "./library-crud.ts";

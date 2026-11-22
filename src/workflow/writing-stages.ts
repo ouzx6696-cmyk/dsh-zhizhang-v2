@@ -14,6 +14,9 @@ export const WRITING_STAGE_IDS = {
   chapterReview: "novel.chapter.review",
   arcPlan: "novel.arc.plan",
   selectionRewrite: "draft.selection.rewrite",
+  beatPlan: "novel.beat.plan",
+  surgicalPatch: "novel.surgical.patch",
+  materialNormalize: "novel.material.normalize",
 } as const;
 
 export type WritingPhase = keyof typeof WRITING_STAGE_IDS;
@@ -27,6 +30,9 @@ const JSON_STAGE_PHASES: ReadonlySet<WritingPhase> = new Set([
   "factSync",
   "chapterReview",
   "arcPlan",
+  "beatPlan",
+  "surgicalPatch",
+  "materialNormalize",
 ]);
 
 export function isJsonStagePhase(phase: WritingPhase): boolean {
@@ -266,6 +272,36 @@ export function isValidArcPlanPayload(output: unknown): boolean {
   return hasTextField || hasBeats;
 }
 
+export function isValidBeatPlanPayload(output: unknown): boolean {
+  if (!isRecord(output)) return false;
+  return (
+    Array.isArray(output.beats) &&
+    output.beats.length > 0 &&
+    output.beats.every((b) => isRecord(b) && (isNonEmptyString(b.scene) || isNonEmptyString(b.conflict)))
+  );
+}
+
+export function isValidSurgicalPatchPayload(output: unknown): boolean {
+  if (!isRecord(output) || !Array.isArray(output.patches)) return false;
+  return output.patches.every(
+    (p) =>
+      isRecord(p) &&
+      typeof p.paragraphIndex === "number" &&
+      Number.isSafeInteger(p.paragraphIndex) &&
+      p.paragraphIndex >= 0 &&
+      isNonEmptyString(p.replacement),
+  );
+}
+
+export function isValidMaterialNormalizePayload(output: unknown): boolean {
+  if (!isRecord(output)) return false;
+  const chaptersOk = output.chapters === undefined || (Array.isArray(output.chapters) && output.chapters.every(isRecord));
+  const loreOk = output.lore === undefined || (Array.isArray(output.lore) && output.lore.every(isRecord));
+  const foreshadowsOk =
+    output.foreshadows === undefined || (Array.isArray(output.foreshadows) && output.foreshadows.every(isRecord));
+  return chaptersOk && loreOk && foreshadowsOk;
+}
+
 /**
  * Creates a StageRegistry pre-populated with the author-workbench model stages.
  * Every stage id satisfies the frozen `domain.entity.action@version` contract
@@ -338,6 +374,24 @@ export function createWritingStageRegistry(): StageRegistry {
     version: 1,
     execution: "model",
     validateOutput: isValidCandidateText,
+  });
+  registerStage(registry, {
+    id: WRITING_STAGE_IDS.beatPlan,
+    version: 1,
+    execution: "model",
+    validateOutput: isValidBeatPlanPayload,
+  });
+  registerStage(registry, {
+    id: WRITING_STAGE_IDS.surgicalPatch,
+    version: 1,
+    execution: "model",
+    validateOutput: isValidSurgicalPatchPayload,
+  });
+  registerStage(registry, {
+    id: WRITING_STAGE_IDS.materialNormalize,
+    version: 1,
+    execution: "model",
+    validateOutput: isValidMaterialNormalizePayload,
   });
   return registry;
 }

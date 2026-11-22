@@ -281,8 +281,7 @@ function backfillAllFtsMapsAndRebuild(db: SqliteDatabase): void {
 
 /**
  * Creates External Content FTS5 trigram virtual tables, `fts_rowid_map`, read-only
- * views, ranked BM25 configuration (DB-05), and column-scoped incremental triggers
- * (DB-17) idempotently, migrating legacy v2.1.0/v2.2.0 structures automatically.
+ * views, ranked BM25 configuration, and column-scoped incremental triggers idempotently.
  */
 export function createFtsSchema(db: SqliteDatabase): void {
   const chaptersSql = masterObjectSql(db, "table", "fts_chapters");

@@ -47,6 +47,7 @@ export interface UiInputOptions {
   readonly rows?: number;
   readonly min?: string;
   readonly max?: string;
+  readonly step?: string;
   readonly maxLength?: number;
   readonly ariaLabel?: string;
   readonly options?: readonly UiSelectOption[];
@@ -228,6 +229,7 @@ export function createInput(options: UiInputOptions): UiInputResult {
     inp.className = "ui-input";
     if (options.min !== undefined) inp.min = options.min;
     if (options.max !== undefined) inp.max = options.max;
+    if (options.step !== undefined) inp.step = options.step;
     if (options.maxLength !== undefined) inp.maxLength = options.maxLength;
     control = inp;
   }

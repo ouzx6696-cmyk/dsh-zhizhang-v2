@@ -3,6 +3,7 @@ import { computeInlineDiff, countNonWhitespaceChars } from "../diff.ts";
 import { el } from "../dom.ts";
 import type { WorkbenchShellHost } from "../plugins/types.ts";
 import { createButton } from "../ui/primitives.ts";
+import { dispatchAgentHandoff } from "./agent-companion.ts";
 
 export interface SelectionMicrobarOptions {
   readonly getProviderModel: () => { readonly provider: string; readonly model: string };
@@ -391,6 +392,34 @@ export function createSelectionMicrobar(
     actions.append(applyBtn, cancelBtn);
     previewCard.append(actions);
   }
+
+  const handoffBtn = createButton({
+    label: "交给 Agent 改写",
+    variant: "primary",
+    size: "sm",
+    dataset: { selectionAgentHandoff: "true" },
+    onClick: () => {
+      const sel = currentSelection() ?? activeSelection;
+      if (!sel) return;
+      const { projectId, documentId, snapshot } = host.getState();
+      if (!documentId) return;
+      const before = editor.value.slice(0, sel.start);
+      const paragraphIndex = before.trim().length === 0 ? 1 : before.split(/\r?\n\s*\r?\n/).length;
+      const title = snapshot.active?.title || "当前文档";
+      dispatchAgentHandoff({
+        title: `精修《${title}》第 ${paragraphIndex} 段选区`,
+        prompt: [
+          `请改写《${title}》（documentId=${documentId}）第 ${paragraphIndex} 段中的选中片段，并使用 \`zhizhang_patch_paragraphs\` 定点替换该段（保留其他段落不变）：`,
+          "```",
+          sel.text,
+          "```",
+          "请先按需调用 `zhizhang_read_context` 核对人物视角与锁定设定，再交付更凝练有张力的版本。",
+        ].join("\n"),
+        context: { projectId, documentId, paragraphIndex },
+      });
+    },
+  });
+  modeGroup.append(handoffBtn);
 
   for (const [mode, label] of modes) {
     const btn = createButton({

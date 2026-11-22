@@ -7,6 +7,10 @@ import type {
   WritingStageBinding,
 } from "../../../contracts/workspace-dto.ts";
 import {
+  DEFAULT_CONTEXT_TUNING,
+  countCustomizedContextFields,
+  detectCrossChapterEchoes,
+  normalizeContextTuning,
   normalizeStageBindings,
   rankRelatedChapters,
   settingsAt,
@@ -25,6 +29,7 @@ import {
   type LayeredPromptPayload,
 } from "../../../workflow/cache-layer.ts";
 import { assembleContextBundle, type ContextSlotInput } from "../../../workflow/context-slots.ts";
+import { buildFanqieWritingDirective } from "../../../workflow/prompts/index.ts";
 import { estimateTokenCount, WRITER_SYSTEM } from "../../../workflow/writing-budget.ts";
 import type { WritingPhase } from "../../../workflow/writing-stages.ts";
 import { count, invalid, type DocumentRow, type Input, type WorkspaceContext } from "../../context.ts";
@@ -93,16 +98,29 @@ export function buildFanqieLayeredPayload(
   };
 }
 
-export function formatTechniquesBlock(cards: readonly TechniqueCardDto[]): string {
+export function formatTechniquesBlock(
+  cards: readonly TechniqueCardDto[],
+  stage: WritingStageBinding = "write",
+  exampleCharLimit = DEFAULT_CONTEXT_TUNING.techniqueExampleChars,
+): string {
   if (cards.length === 0) return "";
+  const isReviewLike = stage === "review" || stage === "deslop" || stage === "refine";
   return cards
     .map((card) => {
       const kindTag = card.assetKind === "skill" ? "Skill" : "技法";
       const parts = [`## ${kindTag}：${card.title}（${card.category}）`];
       if (card.triggerWhen) parts.push(`适用场景：${card.triggerWhen}`);
-      if (card.executionSteps) parts.push(`执行步骤：${card.executionSteps}`);
-      if (card.constraints) parts.push(`关键约束：${card.constraints}`);
-      if (card.antiPatterns) parts.push(`禁忌反例：${card.antiPatterns}`);
+      if (isReviewLike) {
+        if (card.constraints) parts.push(`关键审查约束：${card.constraints}`);
+        if (card.antiPatterns) parts.push(`禁忌反例：${card.antiPatterns}`);
+        if (card.negativeExample) parts.push(`反例警示：\n${card.negativeExample.slice(0, exampleCharLimit)}`);
+        if (card.executionSteps) parts.push(`修正要领：${card.executionSteps}`);
+      } else {
+        if (card.executionSteps) parts.push(`执行步骤：${card.executionSteps}`);
+        if (card.positiveExample) parts.push(`正例示范：\n${card.positiveExample.slice(0, exampleCharLimit)}`);
+        if (card.constraints) parts.push(`关键约束：${card.constraints}`);
+        if (card.antiPatterns) parts.push(`规避反例：${card.antiPatterns}`);
+      }
       if (card.references && card.references.length > 0) {
         const sortedRefs = [...card.references].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
         for (const ref of sortedRefs) {
@@ -114,7 +132,10 @@ export function formatTechniquesBlock(cards: readonly TechniqueCardDto[]): strin
     .join("\n\n");
 }
 
-function formatDeconstructionsBlock(samples: readonly DeconstructionDto[]): string {
+function formatDeconstructionsBlock(
+  samples: readonly DeconstructionDto[],
+  excerptCharLimit = DEFAULT_CONTEXT_TUNING.deconstructionExcerptChars,
+): string {
   if (samples.length === 0) return "";
   return samples
     .map((sample) => {
@@ -123,7 +144,7 @@ function formatDeconstructionsBlock(samples: readonly DeconstructionDto[]): stri
       if (sample.conflictBeats) parts.push(`冲突节拍：${sample.conflictBeats}`);
       if (sample.payoffRhythm) parts.push(`爽点节奏：${sample.payoffRhythm}`);
       if (sample.proseNotes) parts.push(`文笔批注：${sample.proseNotes}`);
-      if (sample.excerpt) parts.push(`片段节选：\n${sample.excerpt.slice(0, 600)}`);
+      if (sample.excerpt) parts.push(`片段节选：\n${sample.excerpt.slice(0, excerptCharLimit)}`);
       return parts.join("\n");
     })
     .join("\n\n");
@@ -133,25 +154,48 @@ function formatPovBoundaryBlock(
   viewpoint: string | undefined,
   knownFacts: readonly SettingFact[],
   allFacts: readonly SettingFact[],
+  loreMetaByFactId: ReadonlyMap<string, { readonly entityName: string; readonly category: string }>,
 ): string {
   if (!viewpoint) return "";
   const knownIds = new Set(knownFacts.map((f) => f.id));
   const lines: string[] = [];
+
+  // Character voice anchor for the active POV character
+  const voiceFacts = allFacts.filter((f) => {
+    const meta = loreMetaByFactId.get(f.id);
+    if (!meta || meta.category !== "character") return false;
+    return meta.entityName === viewpoint || (f.aliases ?? []).includes(viewpoint);
+  });
+  if (voiceFacts.length > 0) {
+    lines.push(
+      `当前视角人物「${viewpoint}」声线与性格锚点：`,
+      ...voiceFacts.slice(0, 3).map((f) => `- ${f.note.slice(0, 160)}`),
+    );
+  }
+
   if (knownFacts.length > 0) {
     lines.push(
       `当前视角人物「${viewpoint}」已获知设定（允许直接描写）：`,
-      ...knownFacts.map((fact) => `- [${fact.id}] ${fact.note}（来源：${fact.source}）`),
+      ...knownFacts.map((fact) => {
+        const meta = loreMetaByFactId.get(fact.id);
+        const label = meta?.entityName ? `${meta.entityName} · ` : "";
+        return `- [${fact.id}] ${label}${fact.note}（来源：${fact.source}）`;
+      }),
     );
   } else {
     lines.push(`当前视角人物「${viewpoint}」暂无已获知专项设定。`);
   }
-  const hiddenIds = allFacts
+
+  const hiddenEntries = allFacts
     .filter((f) => f.kind !== "agreement" && !knownIds.has(f.id))
-    .map((f) => f.id)
-    .sort();
-  if (hiddenIds.length > 0) {
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map((f) => {
+      const meta = loreMetaByFactId.get(f.id);
+      return meta?.entityName ? `[${f.id}] ${meta.entityName}` : `[${f.id}]`;
+    });
+  if (hiddenEntries.length > 0) {
     lines.push(
-      `【严禁泄露】以下 L1 客观设定在当前章节对「${viewpoint}」仍属未知，切勿通过内心独白或对话提前泄露：${hiddenIds.join("、")}`,
+      `【严禁泄露】以下 L1 客观设定在当前章节对「${viewpoint}」仍属未知，切勿通过内心独白、旁白识破或对话提前泄露：${hiddenEntries.slice(0, 24).join("、")}`,
     );
   }
   return lines.join("\n");
@@ -236,17 +280,21 @@ export function buildFanqieFrozenContext(
   const viewpoint = typeof plan?.viewpoint === "string" ? plan.viewpoint : undefined;
   const knownFacts = viewpoint ? settingsAt(facts, order, at, viewpoint) : [];
 
+  const controls = loadProjectControls(ctx, row.projectId);
+  const tuning = normalizeContextTuning(controls.contextTuning);
+  const customizedCount = countCustomizedContextFields(tuning);
+
   const instruction = typeof input.instruction === "string" ? input.instruction.trim() : "";
   const tokenLimit = typeof input.tokenLimit === "number" && Number.isSafeInteger(input.tokenLimit) && input.tokenLimit > 0
     ? input.tokenLimit
-    : 16_000;
-  const maxInputTokens = Math.max(512, Math.floor(tokenLimit * 0.72));
+    : tuning.defaultTokenLimit;
+  const maxInputTokens = Math.max(512, Math.floor(tokenLimit * tuning.inputBudgetRatio));
 
-  // L1 (Version-Pinned Book Bible) + L2 (Append-Only Volume/Act & 10-Chapter Milestones)
+  // L1 (Version-Pinned Book Bible) + L2 (Append-Only Volume/Act & Milestone Ledger)
   // Completely decoupled from per-run `tokenLimit` and `stage`!
   const shared = buildFanqieSharedLayeredPrefix(ctx, row.projectId, row, { readOnly: options.readOnly });
-  const l1TechSet = new Set(shared.l1.projectMountedTechniqueIds);
-  const l1DeconstructSet = new Set(shared.l1.projectMountedDeconstructionIds);
+  const l1TechSet = new Set(tuning.includeL1BookBible ? shared.l1.projectMountedTechniqueIds : []);
+  const l1DeconstructSet = new Set(tuning.includeL1BookBible ? shared.l1.projectMountedDeconstructionIds : []);
 
   // Targeted author-selected qualitative observations (optional refine / deslop focus)
   const rawObsIds = Array.isArray(input.observationIds)
@@ -280,13 +328,19 @@ export function buildFanqieFrozenContext(
 
   // Stage-specific / chapter-scoped techniques & deconstructions NOT already pinned in L1 go to L3
   const pacing = typeof input.pacing === "string" ? input.pacing : "";
-  const mounted = resolveMountedLibraryForChapter(ctx, row, instruction, pacing, stage);
-  const allTechniques = [...mounted.techniques].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  const allDeconstructions = [...mounted.deconstructions].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const mounted = (tuning.includeTechniques || tuning.includeDeconstructions)
+    ? resolveMountedLibraryForChapter(ctx, row, instruction, pacing, stage)
+    : { techniques: [], deconstructions: [], autoMatchedIds: [], conflictSkippedIds: [] };
+  const allTechniques = tuning.includeTechniques
+    ? [...mounted.techniques].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    : [];
+  const allDeconstructions = tuning.includeDeconstructions
+    ? [...mounted.deconstructions].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    : [];
   const l3Techniques = allTechniques.filter((card) => !l1TechSet.has(card.id) || stage !== "write");
   const l3Deconstructions = allDeconstructions.filter((item) => !l1DeconstructSet.has(item.id));
 
-  // 4D Zero-token related historical chapter recall (outside recent 5 chapters)
+  // 4D Zero-token related historical chapter recall (outside configured recent window)
   const currentIdx = order.indexOf(row.id);
   const foreshadowRows = stmt(ctx.db, `
     SELECT title, planted_chapter_id AS plantedChapterId, target_chapter_id AS targetChapterId, status, note
@@ -300,74 +354,131 @@ export function buildFanqieFrozenContext(
     status: string;
     note: string;
   }[];
-  const chapterRows = stmt(ctx.db, `
-    SELECT id AS chapterId, title, summary FROM author_documents WHERE project_id = ?;
-  `).all(row.projectId) as readonly RelatedChapterCandidate[];
-  const entityMentions = stmt(ctx.db, `
-    SELECT document_id AS documentId, entity_name AS entityName, mention_count AS mentionCount
-    FROM author_chapter_entities
-    WHERE project_id = ?;
-  `).all(row.projectId) as readonly ChapterEntityMention[];
-  const currentEntityNames = entityMentions
-    .filter((entry) => entry.documentId === row.id && entry.mentionCount > 0)
-    .map((entry) => entry.entityName);
-  const queryTerms = collectSemanticQueryTerms(row, plan, instruction, currentEntityNames);
-  const recentAndCurrentIds = currentIdx >= 0
-    ? order.slice(Math.max(0, currentIdx - 5), currentIdx + 1)
-    : [row.id];
-  const ftsMatches = searchRelatedChaptersByFts(ctx.db, {
-    projectId: row.projectId,
-    queryTerms,
-    excludeIds: recentAndCurrentIds,
-    limit: 12,
-  });
-  const semanticScores = Object.fromEntries(ftsMatches.map((hit) => [hit.documentId, hit.score]));
-  const relatedChapters = rankRelatedChapters({
-    currentChapterId: row.id,
-    chapterOrder: order,
-    chapters: chapterRows,
-    foreshadows: foreshadowRows,
-    facts,
-    entityMentions,
-    viewpoint,
-    currentEntityNames,
-    currentOutlineText: formatOutlineBlock(plan, row.title) + "\n" + instruction,
-    semanticScores,
-    recentWindow: 5,
-    topK: 4,
-  });
 
-  // Recent unarchived rolling summaries (chapters after L2 archivedLimit, up to 9 chapters) & prev tail
+  let relatedChapters: readonly RelatedChapterMatch[] = [];
+  if (tuning.includeRelatedHistory && tuning.relatedHistoryTopK > 0) {
+    const chapterRows = stmt(ctx.db, `
+      SELECT id AS chapterId, title, summary FROM author_documents WHERE project_id = ?;
+    `).all(row.projectId) as readonly RelatedChapterCandidate[];
+    const entityMentions = stmt(ctx.db, `
+      SELECT document_id AS documentId, entity_name AS entityName, mention_count AS mentionCount
+      FROM author_chapter_entities
+      WHERE project_id = ?;
+    `).all(row.projectId) as readonly ChapterEntityMention[];
+    const currentEntityNames = entityMentions
+      .filter((entry) => entry.documentId === row.id && entry.mentionCount > 0)
+      .map((entry) => entry.entityName);
+    const queryTerms = collectSemanticQueryTerms(row, plan, instruction, currentEntityNames);
+    const recentAndCurrentIds = currentIdx >= 0
+      ? order.slice(Math.max(0, currentIdx - tuning.relatedHistoryRecentExclude), currentIdx + 1)
+      : [row.id];
+    const ftsMatches = searchRelatedChaptersByFts(ctx.db, {
+      projectId: row.projectId,
+      queryTerms,
+      excludeIds: recentAndCurrentIds,
+      limit: Math.max(12, tuning.relatedHistoryTopK * 3),
+    });
+    const semanticScores = Object.fromEntries(ftsMatches.map((hit) => [hit.documentId, hit.score]));
+    relatedChapters = rankRelatedChapters({
+      currentChapterId: row.id,
+      chapterOrder: order,
+      chapters: chapterRows,
+      foreshadows: foreshadowRows,
+      facts,
+      entityMentions,
+      viewpoint,
+      currentEntityNames,
+      currentOutlineText: formatOutlineBlock(plan, row.title) + "\n" + instruction,
+      semanticScores,
+      recentWindow: tuning.relatedHistoryRecentExclude,
+      topK: tuning.relatedHistoryTopK,
+    });
+  }
+
+  // Recent unarchived rolling summaries & previous chapter tail
   let prevChapterTail = "";
   const summaryLines: string[] = [];
   if (currentIdx > 0) {
-    const prevId = order[currentIdx - 1];
-    const prevRow = stmt(ctx.db, `
-      SELECT a.title, r.body
-      FROM author_documents a
-      JOIN documents d ON d.document_id = a.id
-      LEFT JOIN revisions r ON r.revision_id = d.current_revision_id
-      WHERE a.id = ?;
-    `).get(prevId) as { title: string; body: string | null } | undefined;
-    if (prevRow?.body) {
-      const tail = prevRow.body.trimEnd();
-      prevChapterTail = tail.length > 1200
-        ? `《${prevRow.title}》末尾衔接：\n…${tail.slice(-1200)}`
-        : `《${prevRow.title}》末尾衔接：\n${tail}`;
+    if (tuning.includePrevTail && tuning.prevTailChars > 0) {
+      const prevId = order[currentIdx - 1];
+      const prevRow = stmt(ctx.db, `
+        SELECT a.title, r.body
+        FROM author_documents a
+        JOIN documents d ON d.document_id = a.id
+        LEFT JOIN revisions r ON r.revision_id = d.current_revision_id
+        WHERE a.id = ?;
+      `).get(prevId) as { title: string; body: string | null } | undefined;
+      if (prevRow?.body) {
+        const tail = prevRow.body.trimEnd();
+        prevChapterTail = tail.length > tuning.prevTailChars
+          ? `《${prevRow.title}》末尾衔接：\n…${tail.slice(-tuning.prevTailChars)}`
+          : `《${prevRow.title}》末尾衔接：\n${tail}`;
+      }
     }
 
-    const recentStart = Math.max(shared.l2.archivedLimit, currentIdx - 9);
-    const prevSlice = order.slice(recentStart, currentIdx);
-    const getSummary = stmt(ctx.db, "SELECT title, summary FROM author_documents WHERE id = ?;");
-    for (const id of prevSlice) {
-      const ch = getSummary.get(id) as { title: string; summary: string } | undefined;
-      if (ch && ch.summary.trim()) {
-        summaryLines.push(`- 《${ch.title}》：${ch.summary.trim()}`);
+    if (tuning.includeRollingSummaries && tuning.rollingSummaryCount > 0) {
+      const l2Floor = tuning.includeL2VolumeMilestones ? shared.l2.archivedLimit : 0;
+      const recentStart = Math.max(l2Floor, currentIdx - tuning.rollingSummaryCount);
+      const prevSlice = order.slice(recentStart, currentIdx);
+      const getSummary = stmt(ctx.db, "SELECT title, summary FROM author_documents WHERE id = ?;");
+      for (const id of prevSlice) {
+        const ch = getSummary.get(id) as { title: string; summary: string } | undefined;
+        if (ch && ch.summary.trim()) {
+          summaryLines.push(`- 《${ch.title}》：${ch.summary.trim()}`);
+        }
       }
     }
   }
 
-  const controls = loadProjectControls(ctx, row.projectId);
+  const loreMetaRows = stmt(ctx.db, `
+    SELECT fact_id AS factId, entity_name AS entityName, category
+    FROM author_lore_current WHERE project_id = ?;
+  `).all(row.projectId) as readonly { factId: string; entityName: string; category: string }[];
+  const loreMetaByFactId = new Map(
+    loreMetaRows.map((m) => [m.factId, { entityName: m.entityName, category: m.category }]),
+  );
+
+  // Due & overdue foreshadows for current chapter (high-priority L3 slot)
+  const staleGap = tuning.staleForeshadowGap;
+  const dueForeshadowLines: string[] = [];
+  if (tuning.includeDueForeshadows) {
+    for (const fs of foreshadowRows) {
+      const isDueNow = fs.targetChapterId === row.id;
+      const plantedIdx = fs.plantedChapterId ? order.indexOf(fs.plantedChapterId) : -1;
+      const gap = plantedIdx >= 0 && currentIdx >= 0 ? currentIdx - plantedIdx : 0;
+      const isOverdue = gap >= staleGap;
+      if (isDueNow) {
+        dueForeshadowLines.push(`- [本章预定回收] ${fs.title}${fs.note ? `：${fs.note}` : ""}`);
+      } else if (isOverdue) {
+        dueForeshadowLines.push(`- [已超期 ${gap} 章未呼应] ${fs.title}${fs.note ? `：${fs.note}` : ""}`);
+      }
+    }
+  }
+
+  // Recent chapters anti-echo guard (zero-token cross-chapter repetition check)
+  const recentBodiesForEcho: string[] = [];
+  if (tuning.includeAntiEchoGuard && tuning.antiEchoWindow > 0 && currentIdx > 0) {
+    const echoIds = order.slice(Math.max(0, currentIdx - tuning.antiEchoWindow), currentIdx);
+    const readEchoBody = stmt(ctx.db, `
+      SELECT r.body FROM documents d
+      LEFT JOIN revisions r ON r.revision_id = d.current_revision_id
+      WHERE d.document_id = ?;
+    `);
+    for (const prevId of echoIds) {
+      const prev = readEchoBody.get(prevId) as { body?: string | null } | undefined;
+      if (prev?.body) recentBodiesForEcho.push(prev.body);
+    }
+  }
+  const echoReferenceBody = (row.body && row.body.trim().length > 60)
+    ? row.body
+    : recentBodiesForEcho.join("\n");
+  const antiEchoHits = recentBodiesForEcho.length > 0
+    ? detectCrossChapterEchoes(echoReferenceBody, recentBodiesForEcho).slice(0, 6)
+    : [];
+  const antiEchoContent = antiEchoHits.length > 0
+    ? `近 ${tuning.antiEchoWindow} 章高频复读短语（本章请更换动词与意象，避免重复）：${antiEchoHits.map((h) => `「${h.phrase}」(${h.recentCount}次)`).join("、")}`
+    : "";
+
   const activeAct = row.actId
     ? (stmt(ctx.db, `
         SELECT title, goal, arc_goal AS arcGoal, pacing_template AS pacingTemplate
@@ -377,18 +488,31 @@ export function buildFanqieFrozenContext(
         | undefined)
     : undefined;
   const focusParts: string[] = [];
-  if (controls.currentFocus) focusParts.push(controls.currentFocus);
-  if (activeAct) {
-    const actGoalText = activeAct.arcGoal || activeAct.goal;
-    focusParts.push(
-      `当前幕：${activeAct.title}${activeAct.pacingTemplate ? `（节奏：${activeAct.pacingTemplate}）` : ""}${actGoalText ? ` · 目标：${actGoalText}` : ""}`,
-    );
+  if (tuning.includeCurrentFocus) {
+    if (controls.currentFocus) focusParts.push(controls.currentFocus);
+    if (activeAct) {
+      const actGoalText = activeAct.arcGoal || activeAct.goal;
+      focusParts.push(
+        `当前幕：${activeAct.title}${activeAct.pacingTemplate ? `（节奏：${activeAct.pacingTemplate}）` : ""}${actGoalText ? ` · 目标：${actGoalText}` : ""}`,
+      );
+    }
   }
   const focusContent = focusParts.join("\n");
 
-  // L3 Dynamic Slots only — L1 and L2 are immutable prefix layers never trimmed by `tokenLimit`.
+  // L3 Dynamic Slots — L1 and L2 are immutable prefix layers never trimmed by `tokenLimit`.
+  const disabledSlotIds = new Set<string>();
+  if (!tuning.includePovBoundary) disabledSlotIds.add("povBoundary");
+  if (!tuning.includeDueForeshadows) disabledSlotIds.add("dueForeshadows");
+  if (!tuning.includeAntiEchoGuard || tuning.antiEchoWindow === 0) disabledSlotIds.add("antiEchoGuard");
+  if (!tuning.includeTechniques || tuning.maxActiveTechniques === 0) disabledSlotIds.add("chapterTechniques");
+  if (!tuning.includeDeconstructions || tuning.maxActiveDeconstructions === 0) disabledSlotIds.add("chapterDeconstructions");
+  if (!tuning.includeCurrentFocus) disabledSlotIds.add("currentFocus");
+  if (!tuning.includeRelatedHistory || tuning.relatedHistoryTopK === 0) disabledSlotIds.add("relatedHistory");
+  if (!tuning.includeRollingSummaries || tuning.rollingSummaryCount === 0) disabledSlotIds.add("rollingSummaries");
+  if (!tuning.includePrevTail || tuning.prevTailChars === 0) disabledSlotIds.add("prevTail");
+
   const l3Slots: readonly ContextSlotInput[] = [
-    ...(shared.l1.pendingDeltaText
+    ...(tuning.includeL1BookBible && shared.l1.pendingDeltaText
       ? [
           {
             id: "l1DeltaPatch",
@@ -407,31 +531,59 @@ export function buildFanqieFrozenContext(
       group: "dynamic",
       tier: "l3",
       priority: "high",
-      content: formatPovBoundaryBlock(viewpoint, knownFacts, facts),
+      content: tuning.includePovBoundary
+        ? formatPovBoundaryBlock(viewpoint, knownFacts, facts, loreMetaByFactId)
+        : "",
       maxShare: 0.2,
     },
-    ...(l3Techniques.length > 0
+    ...(dueForeshadowLines.length > 0 || !tuning.includeDueForeshadows
       ? [
           {
-            id: "chapterTechniques",
-            label: `阶段与本章技法（${stage}）`,
+            id: "dueForeshadows",
+            label: `本期到期与超期伏笔（${dueForeshadowLines.length}）`,
+            group: "dynamic" as const,
+            tier: "l3" as const,
+            priority: "high" as const,
+            content: dueForeshadowLines.join("\n"),
+            maxShare: 0.1,
+          },
+        ]
+      : []),
+    ...(antiEchoContent || disabledSlotIds.has("antiEchoGuard")
+      ? [
+          {
+            id: "antiEchoGuard",
+            label: `近 ${tuning.antiEchoWindow} 章去重与防复读护栏`,
             group: "dynamic" as const,
             tier: "l3" as const,
             priority: "medium" as const,
-            content: formatTechniquesBlock(l3Techniques),
+            content: antiEchoContent,
+            maxShare: 0.08,
+          },
+        ]
+      : []),
+    ...(l3Techniques.length > 0 || disabledSlotIds.has("chapterTechniques")
+      ? [
+          {
+            id: "chapterTechniques",
+            label: `阶段与本章技法（${stage} · 上限 ${tuning.maxActiveTechniques}）`,
+            group: "dynamic" as const,
+            tier: "l3" as const,
+            priority: "medium" as const,
+            content: formatTechniquesBlock(l3Techniques, stage, tuning.techniqueExampleChars),
             maxShare: 0.18,
           },
         ]
       : []),
-    ...(l3Deconstructions.length > 0
+    ...(l3Deconstructions.length > 0 || disabledSlotIds.has("chapterDeconstructions")
       ? [
           {
             id: "chapterDeconstructions",
-            label: "本章挂载拆书范本",
+            label: `本章挂载拆书范本（上限 ${tuning.maxActiveDeconstructions}）`,
             group: "dynamic" as const,
             tier: "l3" as const,
             priority: "optional" as const,
-            content: formatDeconstructionsBlock(l3Deconstructions),
+            content: formatDeconstructionsBlock(l3Deconstructions, tuning.deconstructionExcerptChars),
             maxShare: 0.14,
           },
         ]
@@ -455,7 +607,7 @@ export function buildFanqieFrozenContext(
     },
     {
       id: "relatedHistory",
-      label: "相关远期历史章召回（Top 4）",
+      label: `相关远期历史章召回（Top ${tuning.relatedHistoryTopK}）`,
       group: "dynamic",
       tier: "l3",
       priority: "medium",
@@ -464,7 +616,7 @@ export function buildFanqieFrozenContext(
     },
     {
       id: "rollingSummaries",
-      label: "当前十章窗口内前文摘要",
+      label: `近期窗口前文摘要（近 ${tuning.rollingSummaryCount} 章）`,
       group: "dynamic",
       tier: "l3",
       priority: "optional",
@@ -474,7 +626,7 @@ export function buildFanqieFrozenContext(
     },
     {
       id: "prevTail",
-      label: "上一章末尾衔接段",
+      label: `上一章末尾衔接段（${tuning.prevTailChars} 字）`,
       group: "dynamic",
       tier: "l3",
       priority: "medium",
@@ -512,8 +664,10 @@ export function buildFanqieFrozenContext(
     },
   ];
 
-  const l1Tokens = shared.l1.snapshot.tokenCount;
-  const l2Tokens = shared.l2.tokenCount;
+  const effectiveBookPrefix = tuning.includeL1BookBible ? shared.l1.compiledText : "";
+  const effectiveVolumePrefix = tuning.includeL2VolumeMilestones ? shared.l2.volumePrefix : "";
+  const l1Tokens = tuning.includeL1BookBible ? shared.l1.snapshot.tokenCount : 0;
+  const l2Tokens = tuning.includeL2VolumeMilestones ? shared.l2.tokenCount : 0;
   const l3Budget = Math.max(512, maxInputTokens - l1Tokens - l2Tokens);
   const assembledL3 = assembleContextBundle({
     slots: l3Slots,
@@ -522,7 +676,19 @@ export function buildFanqieFrozenContext(
     activeDeconstructionIds: allDeconstructions.map((d) => d.id),
   });
 
-  const protocolFooter = buildTaskProtocolSection(stage === "refine" ? "refine" : "write");
+  const reportedL3Slots: ContextSlotReportDto[] = assembledL3.report.slots.map((slot) =>
+    disabledSlotIds.has(slot.id)
+      ? { ...slot, rawTokens: 0, includedTokens: 0, status: "disabled" }
+      : slot,
+  );
+
+  const extraDirective = buildFanqieWritingDirective({
+    mode: stage === "refine" ? "targeted" : (row.body?.trim() ? "continue" : "rewrite"),
+    pacingTier: controls.pacingTier,
+    isGoldenThree: currentIdx >= 0 && currentIdx < 3,
+    targetLength: typeof plan?.target === "number" ? plan.target : null,
+  });
+  const protocolFooter = buildTaskProtocolSection(stage === "refine" ? "refine" : "write", extraDirective);
   const dynamicTail = normalizeCacheText(
     [assembledL3.dynamicTail, protocolFooter].filter(Boolean).join("\n\n"),
   );
@@ -530,7 +696,7 @@ export function buildFanqieFrozenContext(
   const l0Tokens = estimateTokenCount(SHARED_WORKBENCH_SYSTEM_KERNEL);
   const prefixTokens = l1Tokens + l2Tokens;
   const totalEstimatedTokens = prefixTokens + l3Tokens;
-  const combinedPrefix = [SHARED_WORKBENCH_SYSTEM_KERNEL, shared.l1.compiledText, shared.l2.volumePrefix]
+  const combinedPrefix = [SHARED_WORKBENCH_SYSTEM_KERNEL, effectiveBookPrefix, effectiveVolumePrefix]
     .filter(Boolean)
     .join("\n\n===\n\n");
   const prefixSha256 = sha256Prefix(combinedPrefix);
@@ -545,7 +711,7 @@ export function buildFanqieFrozenContext(
       priority: "critical",
       rawTokens: l1Tokens,
       includedTokens: l1Tokens,
-      status: l1Tokens > 0 ? "included" : "empty",
+      status: !tuning.includeL1BookBible ? "disabled" : l1Tokens > 0 ? "included" : "empty",
     },
     {
       id: "l2VolumeMilestones",
@@ -557,11 +723,11 @@ export function buildFanqieFrozenContext(
       priority: "high",
       rawTokens: l2Tokens,
       includedTokens: l2Tokens,
-      status: l2Tokens > 0 ? "included" : "empty",
+      status: !tuning.includeL2VolumeMilestones ? "disabled" : l2Tokens > 0 ? "included" : "empty",
     },
   ];
 
-  const stablePrefix = [shared.l1.compiledText, shared.l2.volumePrefix].filter(Boolean).join("\n\n===\n\n");
+  const stablePrefix = [effectiveBookPrefix, effectiveVolumePrefix].filter(Boolean).join("\n\n===\n\n");
 
   return {
     projectId: row.projectId,
@@ -571,11 +737,11 @@ export function buildFanqieFrozenContext(
     scenario: null,
     contextBundle: {
       stablePrefix,
-      bookPrefix: shared.l1.compiledText,
-      bookPrefixSha256: shared.l1.snapshot.prefixSha256,
+      bookPrefix: effectiveBookPrefix,
+      bookPrefixSha256: tuning.includeL1BookBible ? shared.l1.snapshot.prefixSha256 : "",
       bookSnapshotVersion: shared.l1.snapshot.version,
-      volumePrefix: shared.l2.volumePrefix,
-      volumePrefixSha256: shared.l2.volumePrefixSha256,
+      volumePrefix: effectiveVolumePrefix,
+      volumePrefixSha256: tuning.includeL2VolumeMilestones ? shared.l2.volumePrefixSha256 : "",
       dynamicTail,
       report: {
         maxInputTokens,
@@ -587,12 +753,18 @@ export function buildFanqieFrozenContext(
         l3Tokens,
         l1Version: shared.l1.snapshot.version,
         l1DirtyCount: shared.l1.snapshot.dirtyMutations,
+        l1DirtyThreshold: tuning.l1DirtyThreshold,
         l1Budget: shared.l1.snapshot.budgetTokens,
+        contextCustomizedCount: customizedCount,
         prefixSha256,
-        l2Sha256: shared.l2.volumePrefixSha256,
+        l2Sha256: tuning.includeL2VolumeMilestones ? shared.l2.volumePrefixSha256 : "",
         estimatedCacheableRatio,
+        dueForeshadowCount: dueForeshadowLines.length,
+        antiEchoPhraseCount: antiEchoHits.length,
+        autoMatchedTechniqueIds: mounted.autoMatchedIds,
+        conflictSkippedTechniqueIds: mounted.conflictSkippedIds,
         overBudget: totalEstimatedTokens > maxInputTokens,
-        slots: [...prefixSlots, ...assembledL3.report.slots],
+        slots: [...prefixSlots, ...reportedL3Slots],
         activeTechniqueIds: allTechniques.map((t) => t.id),
         activeDeconstructionIds: allDeconstructions.map((d) => d.id),
       },
@@ -607,13 +779,27 @@ export function previewContext(ctx: WorkspaceContext, row: DocumentRow, input: I
   const stage = input.stage !== undefined ? normalizeStageBindings([input.stage])[0] : undefined;
   return ctx.read(() => {
     const built = buildFanqieFrozenContext(ctx, row, input, { readOnly: true });
+    const controls = loadProjectControls(ctx, row.projectId);
+    const contextTuning = normalizeContextTuning(controls.contextTuning);
     const recommendations = queryTechniqueRecommendations(ctx, row, pacing, instruction, stage).slice(0, 8);
+    const includeText = input.includeText === true;
     return {
       knownAt: built.knownAt,
       knownFactsCount: built.knownFacts.length,
       report: built.contextBundle.report,
       relatedChapters: built.relatedChapters,
       recommendations,
+      contextTuning,
+      defaultContextTuning: DEFAULT_CONTEXT_TUNING,
+      customizedCount: countCustomizedContextFields(contextTuning),
+      ...(includeText
+        ? {
+            stablePrefix: built.contextBundle.stablePrefix,
+            bookPrefix: built.contextBundle.bookPrefix,
+            volumePrefix: built.contextBundle.volumePrefix,
+            dynamicTail: built.contextBundle.dynamicTail,
+          }
+        : {}),
     };
   });
 }

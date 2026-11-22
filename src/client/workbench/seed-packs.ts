@@ -1,4 +1,4 @@
-import type { Product } from "../../contracts/workspace-dto.ts";
+import type { LibraryAssetKind, Product, WritingStageBinding } from "../../contracts/workspace-dto.ts";
 
 export interface SeedTechniquePreset {
   readonly id: string;
@@ -10,6 +10,11 @@ export interface SeedTechniquePreset {
   readonly executionSteps: string;
   readonly constraints: string;
   readonly antiPatterns: string;
+  readonly positiveExample: string;
+  readonly negativeExample: string;
+  readonly conflictGroup: string;
+  readonly assetKind: LibraryAssetKind;
+  readonly stageBindings: readonly WritingStageBinding[];
 }
 
 export interface SeedPack {
@@ -17,8 +22,8 @@ export interface SeedPack {
   readonly product: Product;
   readonly name: string;
   readonly summary: string;
-  readonly defaultPacingTier?: "快爽" | "稳推" | "慢燃";
-  readonly genreTags?: readonly string[];
+  readonly defaultPacingTier: "快爽" | "稳推" | "慢燃";
+  readonly genreTags: readonly string[];
   readonly defaultVolumeTitle: string;
   readonly defaultAuthorIntent: string;
   readonly firstChapterTitle: string;
@@ -49,6 +54,11 @@ export const SEED_PACKS: readonly SeedPack[] = [
         executionSteps: "1. 先给反派特写动作（敲桌、哂笑）制造短促屈辱感；2. 主角沉默 1 句并抛出一处只有核心知情者懂的关键物件/数据细节；3. 用周围旁观者神色变化完成第一波反转定格。",
         constraints: "主角台词不超过 25 字，禁止长篇大论说教",
         antiPatterns: "禁止出现“嘴角勾起一抹冷笑”“五味杂陈”",
+        positiveExample: "陈凯把签字笔往桌上一磕。林远没接，只把手机倒扣在红灯闪烁的机柜旁：“三号容灾节点七分钟后切主库，密码在我工牌背面。”",
+        negativeExample: "林远嘴角勾起一抹冷笑，心中五味杂陈，大声说道：“你们很快就会为今天的傲慢付出惨痛代价！”",
+        conflictGroup: "conflict-beat",
+        assetKind: "skill",
+        stageBindings: ["write", "refine"],
       },
       {
         id: "uc-hook-end",
@@ -60,6 +70,11 @@ export const SEED_PACKS: readonly SeedPack[] = [
         executionSteps: "在危机刚化解、众人松口气的瞬间，切入一条短信、来电或异常读数，留下明确的时间倒计时或未知来客名字。",
         constraints: "最后一句话控制在 18 字以内",
         antiPatterns: "不要在章末写哲学感悟或全知视角的命运感叹",
+        positiveExample: "电梯门刚合上，林远兜里的旧手机震了一下。屏幕上只有一行陌生号码发来的字：“别回老宅，你爸的账本被抄了。”",
+        negativeExample: "走出写字楼，林远望着雨夜霓虹，深知命运的齿轮已经开始转动，未来的路还很长。",
+        conflictGroup: "ending-hook",
+        assetKind: "skill",
+        stageBindings: ["plan", "write", "refine"],
       },
     ],
   },
@@ -85,6 +100,11 @@ export const SEED_PACKS: readonly SeedPack[] = [
         executionSteps: "不用形容词硬夸“恐怖如斯”，改写寒霜冻裂茶盏、剑风削断衣角一缕发丝、石阶灰尘被气浪压成放射状。",
         constraints: "先写环境物理反馈，再写对手反应",
         antiPatterns: "避免“恐怖如斯”“倒吸一口凉气”“瞳孔骤然一缩”",
+        positiveExample: "断剑出鞘三寸，青石板缝里的枯草齐根折断。执事端在手里的温茶咔嚓一声，瓷底裂成两瓣，热水淋湿了袖口。",
+        negativeExample: "一股恐怖如斯的威压席卷全场，执事瞳孔骤然一缩，倒吸一口凉气，心头猛地一震。",
+        conflictGroup: "sensory-combat",
+        assetKind: "skill",
+        stageBindings: ["write", "refine", "deslop"],
       },
       {
         id: "xh-info-drip",
@@ -96,6 +116,11 @@ export const SEED_PACKS: readonly SeedPack[] = [
         executionSteps: "每次只通过角色当下吃亏或交易的 1 个具体代价引出规则，严禁超过 3 句连续旁白解释。",
         constraints: "单段设定说明不超过 80 字",
         antiPatterns: "禁止开篇百科全书式背景交代",
+        positiveExample: "“下品灵石不收，断脉弟子进外门得押半块命牌。”管事把青铜秤一推，“交不起，今夜就滚出山门。”",
+        negativeExample: "这个世界的修行体系分为炼气、筑基、金丹、元婴四大境界，自古以来青云宗规矩森严，外门弟子需要缴纳灵石……",
+        conflictGroup: "exposition-control",
+        assetKind: "skill",
+        stageBindings: ["plan", "write", "review"],
       },
     ],
   },
@@ -121,6 +146,11 @@ export const SEED_PACKS: readonly SeedPack[] = [
         executionSteps: "同时交代该物件的物理反常细节、发现时在场人物与环境噪音，把线索自然藏在日常排查动作中。",
         constraints: "严禁旁白直接点明“这将在日后成为关键证据”",
         antiPatterns: "禁止角色凭空“灵光一闪”破案",
+        positiveExample: "走廊冷风灌进来，值夜老人咳嗽着锁门。沈默顺手扶正借阅卡，指腹沾到一点未干的松节油味——卡片日期印着三天后。",
+        negativeExample: "沈默忽然灵光一闪，觉得这张借阅卡细思极恐，冥冥之中似乎在诉说着三天后的凶案真相。",
+        conflictGroup: "clue-planting",
+        assetKind: "skill",
+        stageBindings: ["plan", "write", "review"],
       },
     ],
   },
@@ -146,6 +176,11 @@ export const SEED_PACKS: readonly SeedPack[] = [
         executionSteps: "第 1 句摆出一个反常识的常见现象，第 2 句点明多数人的直觉误判，第 3 句给出本文核心切口。",
         constraints: "导语总字数控制在 120 字以内",
         antiPatterns: "禁止出现“随着时代的发展”“综上所述”“值得注意的是”",
+        positiveExample: "报价便宜三成的方案，半年后却成了团队返工最狠的黑洞。多数人算清了采购单上的差价，唯独漏算了沟通返工的人时账。",
+        negativeExample: "随着时代的发展，值得注意的是，现代人越来越关注性价比，总而言之这是一个值得深思的问题。",
+        conflictGroup: "opening-hook",
+        assetKind: "skill",
+        stageBindings: ["plan", "write", "refine"],
       },
     ],
   },
@@ -171,6 +206,11 @@ export const SEED_PACKS: readonly SeedPack[] = [
         executionSteps: "1. 台词字面完全合乎尊卑礼法；2. 用端茶、拨炭、避席等细微停顿泄露真实立场；3. 借第三件看似无关的旧物或时令点破对方软肋。",
         constraints: "单轮对白不超过 3 句，禁止长段直白摊牌",
         antiPatterns: "禁止角色把心机算计大声说出来自夸",
+        positiveExample: "谢知微替来使添了半盏新茶，水线极稳：“侯府今年改用湖州春茶了？倒比去岁那批江南官茶清爽些。”来使端杯的手微顿。",
+        negativeExample: "谢知微淡淡地开口，不动声色地说：“我知道你们侯府贪墨了江南官茶，今天这婚退不退由不得你。”",
+        conflictGroup: "dialogue-subtext",
+        assetKind: "skill",
+        stageBindings: ["write", "refine"],
       },
       {
         id: "ac-ledger-foreshadow",
@@ -182,6 +222,11 @@ export const SEED_PACKS: readonly SeedPack[] = [
         executionSteps: "把异常数目或印记混入三项正常礼俗条目之中，让主角只做简短核对动作而不解释用途。",
         constraints: "单次埋设不超过 90 字，必须交代经手人",
         antiPatterns: "禁止旁白剧透“三年后这张单子会救她一命”",
+        positiveExample: "礼单共四页：苏绣十二匹、南海珠两匣、旧历七年漕运盐引折子一封——经手押印处却是二房管事的私章。谢知微用朱笔轻轻点了一点，合上账簿。",
+        negativeExample: "谢知微发现这份礼单里暗藏玄机，她敏锐地意识到三年后这张单子将成为扳倒二房的致命杀器。",
+        conflictGroup: "clue-planting",
+        assetKind: "skill",
+        stageBindings: ["plan", "write"],
       },
     ],
   },
@@ -207,6 +252,11 @@ export const SEED_PACKS: readonly SeedPack[] = [
         executionSteps: "每 200 字内给出 1 个精确下降的物理读数（温度/电量/余粮），配合呼气结霜、金属粘手或电流嗡鸣等体感细节。",
         constraints: "读数变化必须前后自洽，避免抽象渲染“绝望笼罩大地”",
         antiPatterns: "禁止堆砌“末日降临”“人类渺小”类空洞感叹",
+        positiveExample: "仪表盘跳到零下三十八度，门把手的防滑纹粘住了顾沉半截手套皮。备用锂电只剩 19%，逆变器发出一阵拉锯般的低鸣。",
+        negativeExample: "严寒吞噬了整座城市，空气仿佛凝固了，一种难以名状的绝望笼罩在每个幸存者心头。",
+        conflictGroup: "sensory-combat",
+        assetKind: "skill",
+        stageBindings: ["write", "refine", "deslop"],
       },
       {
         id: "sa-countdown-pacing",
@@ -218,6 +268,11 @@ export const SEED_PACKS: readonly SeedPack[] = [
         executionSteps: "1. 明确标出剩余小时数与首要瓶颈；2. 第一步推进顺利，第二步遭遇突发堵点被迫换方案；3. 压哨完成时同步抛出下一轮更大变数。",
         constraints: "每个推进节点必须产生可核查的实得资源或新风险",
         antiPatterns: "禁止冗长流水账式列采购清单",
+        positiveExample: "离区域断电还有四小时。第一车柴油刚入库，冷库外闸却被雪坡堵死。顾沉改走维修暗井拖出稳压器，手台却同时传来主电网提前跳闸的蜂鸣。",
+        negativeExample: "顾沉买了很多泡面、矿泉水、压缩饼干、棉被和发电机，忙活了一整天终于全部搬回了家里。",
+        conflictGroup: "pacing-engine",
+        assetKind: "skill",
+        stageBindings: ["plan", "write"],
       },
     ],
   },
@@ -243,6 +298,11 @@ export const SEED_PACKS: readonly SeedPack[] = [
         executionSteps: "不从出生年份或简历写起，先用 1 个带有磨损痕迹的随身器物和 1 个当下动作切入，再用一句反常数字勾出人物过往。",
         constraints: "首段控制在 100 字以内，至少包含 2 个可视觉化的具体细节",
         antiPatterns: "禁止出现“他叫某某，今年五十岁，是一名普通的……”",
+        positiveExample: "老周把放大镜卡在眉骨上，镊子尖夹起半枚生锈的游丝。柜台抽屉里躺着四十三张泛黄取表单，最早一张写着 1994 年。",
+        negativeExample: "周建国今年六十二岁，是县城里一名普通的修表师傅，三十七年来他一直默默坚守在岗位上。",
+        conflictGroup: "opening-hook",
+        assetKind: "skill",
+        stageBindings: ["plan", "write"],
       },
       {
         id: "tc-restraint-narrative",
@@ -254,6 +314,11 @@ export const SEED_PACKS: readonly SeedPack[] = [
         executionSteps: "用账本数字、旧物件去留和当事人的简短原话承载转折，把判断空间留给读者，结尾呼应开篇意象收束。",
         constraints: "连续议论不超过 2 句，避免替人物总结人生意义",
         antiPatterns: "禁止使用“令人动容”“诠释了什么是匠心”“岁月从不败美人”",
+        positiveExample: "那年冬天修表摊一月只进账四百块，老周把铺面从临街退到巷尾，唯独没扔那只装满旧表带的铁盒。“总有人哪天路过会想起它。”",
+        negativeExample: "面对时代的冲击，老周百感交集，但他用坚守诠释了什么是真正的工匠精神，令人动容。",
+        conflictGroup: "narrative-voice",
+        assetKind: "skill",
+        stageBindings: ["write", "refine", "deslop"],
       },
     ],
   },
@@ -262,6 +327,8 @@ export const SEED_PACKS: readonly SeedPack[] = [
 export const DEMO_BOOK_PRESET = {
   product: "fanqie" as Product,
   projectName: "示例书 · 灰塔长夜",
+  pacingTier: "慢燃" as const,
+  genreTags: ["悬疑", "推理", "档案馆"] as readonly string[],
   authorIntent: "【终局方向】揭开灰塔三层时钟停摆之谜。【核心卖点】人物知情差与伏笔逐章兑现。【禁区】禁止全知视角提前剧透。",
   currentFocus: "第 1–2 章聚焦男主林砚初入灰塔旧档案馆，围绕铜钥匙归属展开首次信息差试探。",
   volumeTitle: "第一卷 · 雾中档案馆",
@@ -278,5 +345,9 @@ export const DEMO_BOOK_PRESET = {
       summary: "林砚排查三号柜，发现松节油味与锁孔新划痕，确认近期有人撬动过档案柜。",
     },
   ],
-  technique: SEED_PACKS[2].techniques[0],
+  techniques: [SEED_PACKS[2].techniques[0], SEED_PACKS[0].techniques[1]] as readonly SeedTechniquePreset[],
+  starterForeshadow: {
+    title: "日期停在三天后的借阅卡",
+    note: "前任编目员离奇失踪前留在玻璃板下，墨迹半晕，背后对应三号柜近期被撬动的真正时间点。",
+  },
 } as const;

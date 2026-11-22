@@ -5,6 +5,8 @@ interface DsHReact {
 interface DsHSlotContext {
   readonly apiBase?: string;
   readonly config?: { readonly apiBase?: string };
+  readonly composer?: { readonly insert?: (text: string) => void };
+  readonly chat?: { readonly setInput?: (text: string) => void };
   slots: {
     inject(slot: string, factory: () => unknown): void;
     register(descriptor: Record<string, unknown>, component: (props: { size?: number; apiBase?: string }) => unknown): unknown;
@@ -196,6 +198,18 @@ export function registerWorkbenchSlots(ctx: DsHSlotContext, React: DsHReact): vo
       SettingsWorkbench,
     ),
   );
+
+  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("message", (event: MessageEvent) => {
+      const payload = event.data as { type?: unknown; prompt?: unknown } | null;
+      if (!payload || payload.type !== "zhizhang:handoff" || typeof payload.prompt !== "string") return;
+      if (typeof ctx.composer?.insert === "function") {
+        ctx.composer.insert(payload.prompt);
+      } else if (typeof ctx.chat?.setInput === "function") {
+        ctx.chat.setInput(payload.prompt);
+      }
+    });
+  }
 }
 
 if (typeof window !== "undefined" && (window as DsHHostWindow).__ModuleLoader__) {

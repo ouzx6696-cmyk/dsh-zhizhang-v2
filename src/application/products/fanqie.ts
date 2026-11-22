@@ -23,6 +23,7 @@ import {
   type Input,
   type WorkspaceContext,
 } from "../context.ts";
+import { getProjectCollaboration } from "../collaboration.ts";
 import type { ActionDefinition, ProductLineModule } from "../product-line.ts";
 import {
   buildFanqieFrozenContext,
@@ -37,7 +38,12 @@ import {
   rebuildBookCacheSnapshotAction,
   touchBookCacheHit,
 } from "./fanqie/cache-snapshot.ts";
-import { getProjectControls, loadProjectControls, saveProjectControls } from "./fanqie/controls.ts";
+import {
+  getProjectControls,
+  loadProjectControls,
+  resetProjectContextTuning,
+  saveProjectControls,
+} from "./fanqie/controls.ts";
 import {
   createObservation,
   diagnoseChapter,
@@ -61,12 +67,17 @@ import {
   decideProposal,
   deleteDeconstruction,
   deleteTechnique,
+  getDeconstructionById,
+  getTechniqueById,
   listDeconstructions,
   listLibraryMounts,
   listProposals,
   listTechniques,
   mountLibraryItem,
+  queryTechniqueRecommendations,
+  queryTechniques,
   recommendTechniquesForChapter,
+  recordTechniqueOutcome,
   resolveMountedLibraryForChapter,
   saveDeconstruction,
   saveTechnique,
@@ -97,6 +108,25 @@ import {
   updateAct,
   updateVolume,
 } from "./fanqie/tree.ts";
+import {
+  cancelAutopilotBatch,
+  createAutopilotBatch,
+  getAutopilotBatch,
+  listAutopilotBatches,
+  pauseAutopilotBatch,
+  rollbackAutopilotChapter,
+  runAutopilotBatch,
+} from "./fanqie/autopilot.ts";
+import {
+  commitMaterialIngest,
+  discardMaterialIngest,
+  getMaterialIngest,
+  listMaterialIngests,
+  preprocessMaterialIngest,
+  proposeMaterialBundle,
+  runMaterialExtraction,
+  updateMaterialChunks,
+} from "./fanqie/material-ingest.ts";
 import { anchor } from "../../domain/shared/index.ts";
 
 /**
@@ -165,6 +195,72 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
       ctx.savePlanning(row, value);
       return { ...value, warnings: chapterLengthWarnings(target) };
     });
+  }
+
+  function proposeOrSaveOutline(ctx: WorkspaceContext, row: DocumentRow, input: Input) {
+    if (row.product !== "fanqie") invalid("documentId", "chapter-required");
+    if (ctx.isLockedDocument(row)) refuse("chapter.outline.propose", "revision-locked");
+    const existingPlan = ctx.planning(row.id) ?? {};
+    const existingSections =
+      existingPlan.sections && typeof existingPlan.sections === "object" && !Array.isArray(existingPlan.sections)
+        ? (existingPlan.sections as Record<string, string>)
+        : {};
+    const incomingSectionsRaw =
+      input.sections && typeof input.sections === "object" && !Array.isArray(input.sections)
+        ? (input.sections as Record<string, unknown>)
+        : {};
+    const mergedSections: Record<string, string> = { ...existingSections };
+    for (const secName of OUTLINE_SECTIONS) {
+      const val = incomingSectionsRaw[secName] ?? input[secName];
+      if (typeof val === "string" && val.trim()) mergedSections[secName] = val.trim();
+    }
+    const viewpoint = optionalText(input, "viewpoint") ?? (typeof existingPlan.viewpoint === "string" ? existingPlan.viewpoint : "");
+    const targetRaw = typeof input.target === "number" && Number.isFinite(input.target) && input.target > 0
+      ? Math.round(input.target)
+      : (typeof existingPlan.target === "number" ? existingPlan.target : 3000);
+    const lockedFacts = typeof input.lockedFacts === "string"
+      ? input.lockedFacts.trim()
+      : (typeof existingPlan.lockedFacts === "string" ? existingPlan.lockedFacts : "");
+    const knowledge = typeof input.knowledge === "string"
+      ? input.knowledge.trim()
+      : (typeof existingPlan.knowledge === "string" ? existingPlan.knowledge : "");
+    const payload: Record<string, unknown> = {
+      viewpoint,
+      target: targetRaw,
+      sections: mergedSections,
+      lockedFacts,
+      knowledge,
+    };
+
+    const collab = getProjectCollaboration(ctx, row.projectId);
+    const forceProposal = input.forceProposal === true;
+    if (collab.collaborationMode === "co_create" && !forceProposal) {
+      return ctx.atomic(() => {
+        ctx.savePlanning(row, payload);
+        return {
+          mode: "direct_write" as const,
+          documentId: row.id,
+          planning: payload,
+          warnings: chapterLengthWarnings(targetRaw),
+        };
+      });
+    }
+    const proposal = createManualProposal(ctx, {
+      kind: "outline",
+      origin: "agent-tool",
+      projectId: row.projectId,
+      documentId: row.id,
+      sourceRef: `章纲提案《${row.title}》`,
+      payload,
+    });
+    return {
+      mode: "proposal" as const,
+      proposalId: proposal.id,
+      documentId: row.id,
+      status: proposal.status,
+      planning: payload,
+      warnings: chapterLengthWarnings(targetRaw),
+    };
   }
 
   function reviewChapter(ctx: WorkspaceContext, row: DocumentRow, input: Input) {
@@ -258,6 +354,7 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
     "reorder.impact": { scope: "project", handler: (ctx, input) => handleContinuity("reorder.impact", ctx, input) },
     "reorder.commit": { scope: "project", handler: (ctx, input) => handleContinuity("reorder.commit", ctx, input) },
     "chapter.outline": { scope: "document", handler: (ctx, input, row) => saveOutline(ctx, row!, input) },
+    "chapter.outline.propose": { scope: "document", handler: (ctx, input, row) => proposeOrSaveOutline(ctx, row!, input) },
     "chapter.review": { scope: "document", handler: (ctx, input, row) => reviewChapter(ctx, row!, input) },
     "draft.finalize": { scope: "document", handler: (ctx, input, row) => finalizeChapter(ctx, row!, input) },
     "evidence.record": { scope: "document", handler: (ctx, input, row) => recordEvidence(ctx, row!, input) },
@@ -279,9 +376,11 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
     "foreshadow.list": { scope: "project", handler: (ctx, input) => listForeshadows(ctx, input) },
     "deconstruct.save": { scope: "global", handler: (ctx, input) => saveDeconstruction(ctx, input) },
     "deconstruct.list": { scope: "global", handler: (ctx, input) => listDeconstructions(ctx, input) },
+    "deconstruct.get": { scope: "global", handler: (ctx, input) => getDeconstructionById(ctx, input) },
     "deconstruct.delete": { scope: "global", handler: (ctx, input) => deleteDeconstruction(ctx, input) },
     "technique.save": { scope: "global", handler: (ctx, input) => saveTechnique(ctx, input) },
     "technique.list": { scope: "global", handler: (ctx, input) => listTechniques(ctx, input) },
+    "technique.get": { scope: "global", handler: (ctx, input) => getTechniqueById(ctx, input) },
     "technique.delete": { scope: "global", handler: (ctx, input) => deleteTechnique(ctx, input) },
     "library.mount": { scope: "project", handler: (ctx, input) => mountLibraryItem(ctx, input) },
     "library.unmount": { scope: "project", handler: (ctx, input) => unmountLibraryItem(ctx, input) },
@@ -303,8 +402,33 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
     "observation.update": { scope: "project", handler: (ctx, input) => updateObservation(ctx, input) },
     "controls.get": { scope: "project", handler: (ctx, input) => getProjectControls(ctx, input) },
     "controls.save": { scope: "project", handler: (ctx, input) => saveProjectControls(ctx, input) },
+    "controls.reset_context": { scope: "project", handler: (ctx, input) => resetProjectContextTuning(ctx, input) },
     "cache.snapshot": { scope: "project", handler: (ctx, input) => getBookCacheSnapshotAction(ctx, input) },
     "cache.rebuild": { scope: "project", handler: (ctx, input) => rebuildBookCacheSnapshotAction(ctx, input) },
+    "material.preprocess": { scope: "project", handler: (ctx, input) => preprocessMaterialIngest(ctx, input) },
+    "material.list": { scope: "project", handler: (ctx, input) => listMaterialIngests(ctx, input) },
+    "material.get": { scope: "global", handler: (ctx, input) => getMaterialIngest(ctx, input) },
+    "material.update_chunks": { scope: "global", handler: (ctx, input) => updateMaterialChunks(ctx, input) },
+    "material.propose_bundle": { scope: "project", handler: (ctx, input) => proposeMaterialBundle(ctx, input) },
+    "material.commit": { scope: "global", handler: (ctx, input) => commitMaterialIngest(ctx, input) },
+    "material.discard": { scope: "global", handler: (ctx, input) => discardMaterialIngest(ctx, input) },
+    "autopilot.start": { scope: "project", handler: (ctx, input) => createAutopilotBatch(ctx, input) },
+    "autopilot.list": { scope: "project", handler: (ctx, input) => listAutopilotBatches(ctx, input) },
+    "autopilot.get": { scope: "global", handler: (ctx, input) => getAutopilotBatch(ctx, input) },
+    "autopilot.pause": { scope: "global", handler: (ctx, input) => pauseAutopilotBatch(ctx, input) },
+    "autopilot.cancel": { scope: "global", handler: (ctx, input) => cancelAutopilotBatch(ctx, input) },
+    "autopilot.rollback_chapter": {
+      scope: "global",
+      handler: (ctx, input) =>
+        rollbackAutopilotChapter(ctx, input, (row, body) =>
+          ctx.appendDraftRevision(row, body, (saved) => {
+            const next: ChapterState = saved.state === "planned" || saved.state === "drafting" ? "drafting" : "drafted";
+            stmt(ctx.db, "UPDATE author_documents SET state = ? WHERE id = ?;").run(next, saved.id);
+            syncChapterMemoryAndEntities(ctx, saved.projectId, saved.id, saved.body ?? "");
+            ctx.event(saved.projectId, "chapter", "document.state", { documentId: saved.id, state: next });
+          }),
+        ),
+    },
   };
 
   return {
@@ -407,7 +531,7 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
         const knownFacts = viewpoint ? settingsAt(approvedFacts(ctx, projectId), order, anchor(doc.id, 1), viewpoint) : [];
         const diagnostics = diagnoseChapter(ctx, doc);
         const mountedReview = resolveMountedLibraryForChapter(ctx, doc, "", "", "review");
-        const reviewMethodology = formatTechniquesBlock(mountedReview.techniques);
+        const reviewMethodology = formatTechniquesBlock(mountedReview.techniques, "review");
         const existingForeshadows = stmt(ctx.db, `
           SELECT id, title, fact_id AS factId, status, note
           FROM author_foreshadows
@@ -522,7 +646,7 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
       const stage = mode === "polish" ? "deslop" : "refine";
       const mounted = resolveMountedLibraryForChapter(ctx, row, instruction, "", stage);
       const sortedSkills = [...mounted.techniques].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-      const skillText = formatTechniquesBlock(sortedSkills);
+      const skillText = formatTechniquesBlock(sortedSkills, stage);
 
       const plan = ctx.planning(row.id);
       const viewpoint = typeof plan?.viewpoint === "string" ? plan.viewpoint : undefined;
@@ -561,15 +685,94 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
     onJobCacheHit(ctx, projectId) {
       touchBookCacheHit(ctx, projectId);
     },
+    runMaterialNormalize(ctx, params) {
+      return runMaterialExtraction(ctx, params);
+    },
+    runAutopilotPipeline(ctx, params) {
+      return runAutopilotBatch(ctx, params);
+    },
     buildFrozenContext(ctx, row, input) {
       return buildFanqieFrozenContext(ctx, row, input, { readOnly: false });
     },
     runGeneration,
     actions,
     contributeSnapshot(ctx, projectId, active) {
-      if (!active) return {};
+      const pendingAiRow = stmt(
+        ctx.db,
+        "SELECT COUNT(*) AS count FROM author_ai_proposals WHERE (project_id = ? OR project_id IS NULL) AND status = 'pending';",
+      ).get(projectId) as { count?: number } | undefined;
+      const pendingSettingRow = stmt(
+        ctx.db,
+        "SELECT COUNT(*) AS count FROM author_settings WHERE project_id = ? AND decision = 'pending';",
+      ).get(projectId) as { count?: number } | undefined;
+      const pendingProposalCount = (pendingAiRow?.count ?? 0) + (pendingSettingRow?.count ?? 0);
+      if (!active) return { pendingProposalCount };
       const page = settingsPage(ctx, projectId);
-      return { settings: page.entries, settingsCursor: page.cursor };
+      return { settings: page.entries, settingsCursor: page.cursor, pendingProposalCount };
+    },
+    contributeSystemPrompt(ctx, projectId, active) {
+      const controls = loadProjectControls(ctx, projectId);
+      const lines: string[] = [];
+      if (controls.pacingTier) lines.push(`- 节奏档位：${controls.pacingTier}`);
+      if (controls.currentFocus) lines.push(`- 近期焦点：${controls.currentFocus.slice(0, 120)}`);
+      if (controls.authorIntent) lines.push(`- 创作指南针：${controls.authorIntent.slice(0, 120)}`);
+
+      if (active) {
+        const plan = ctx.planning(active.id);
+        if (typeof plan?.viewpoint === "string" && plan.viewpoint.trim()) {
+          lines.push(`- 本章视角：${plan.viewpoint.trim()}${typeof plan.target === "number" ? ` · 目标 ${plan.target} 字` : ""}`);
+        }
+      }
+
+      const mountedSkills = active
+        ? queryTechniqueRecommendations(ctx, active).slice(0, 8).map((rec) => ({
+            id: rec.card.id,
+            title: rec.card.title,
+            category: rec.card.category,
+            triggerWhen: rec.card.triggerWhen,
+            conflictGroup: rec.card.conflictGroup,
+            mountedMode: rec.mountedMode,
+          }))
+        : queryTechniques(ctx, { projectId }).slice(0, 8).map((card) => ({
+            id: card.id,
+            title: card.title,
+            category: card.category,
+            triggerWhen: card.triggerWhen,
+            conflictGroup: card.conflictGroup,
+            mountedMode: null,
+          }));
+
+      const pendingAiRow = stmt(
+        ctx.db,
+        "SELECT COUNT(*) AS count FROM author_ai_proposals WHERE (project_id = ? OR project_id IS NULL) AND status = 'pending';",
+      ).get(projectId) as { count?: number } | undefined;
+      const pendingSettingRow = stmt(
+        ctx.db,
+        "SELECT COUNT(*) AS count FROM author_settings WHERE project_id = ? AND decision = 'pending';",
+      ).get(projectId) as { count?: number } | undefined;
+
+      return {
+        lines,
+        mountedSkills,
+        pendingProposalCount: (pendingAiRow?.count ?? 0) + (pendingSettingRow?.count ?? 0),
+      };
+    },
+    diagnoseForAgent(ctx, row, body) {
+      const diag = diagnoseChapter(ctx, { ...row, body });
+      return {
+        charCount: diag.aiSlop.charCount,
+        compositeScore: diag.qualityV2?.compositeScore ?? null,
+        aiSlopHits: diag.aiSlop.totalHits,
+        aiSlopSeverity: diag.aiSlop.severity,
+        endingHookScore: diag.qualityV2?.endingHookScore ?? null,
+        povLeakCount: diag.qualityV2?.povLeakWarnings.length ?? 0,
+        goldenThreeWarnings: diag.goldenThree.warnings,
+      };
+    },
+    onAgentDraftRecorded(ctx, _row, techniqueIds, diagnosticsSummary) {
+      if (techniqueIds.length === 0) return;
+      const score = typeof diagnosticsSummary?.compositeScore === "number" ? diagnosticsSummary.compositeScore : 75;
+      recordTechniqueOutcome(ctx, techniqueIds, score - 75);
     },
     readModels,
     agentTools: createFanqieAgentTools,

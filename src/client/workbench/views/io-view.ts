@@ -5,10 +5,13 @@ import type {
 import type { WorkbenchShellHost } from "../plugins/types.ts";
 import { el } from "../store.ts";
 import { createButton, createCard } from "../ui/primitives.ts";
+import { createMaterialIngestView } from "./material-ingest-view.ts";
 
 export function createIoView(container: HTMLElement, host: WorkbenchShellHost) {
   let lastExport: ProjectExportBundleDto | null = null;
   let lastImportSummary: ProjectImportSummaryDto | null = null;
+  const ingestRoot = document.createElement("div");
+  const materialIngestView = createMaterialIngestView(ingestRoot, host);
 
   function triggerDownload(filename: string, contents: string, mime = "application/json;charset=utf-8"): void {
     const url = URL.createObjectURL(new Blob([contents], { type: mime }));
@@ -31,7 +34,8 @@ export function createIoView(container: HTMLElement, host: WorkbenchShellHost) {
       el("h1", "长篇本地项目导入与导出"),
     );
     header.append(left);
-    container.append(header);
+    container.append(header, ingestRoot);
+    materialIngestView.refresh();
 
     // Export card
     const exportBody: HTMLElement[] = [];

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { ContractError } from "../contracts/index.ts";
 import type { UnifiedJobKind } from "../contracts/workspace-dto.ts";
 import { assertStageOutput, WRITING_STAGE_IDS } from "../workflow/writing-stages.ts";
@@ -24,6 +25,8 @@ export interface ActiveJobCounts {
   readonly draftGeneration: number;
   readonly proposalExtraction: number;
   readonly selectionRewrite: number;
+  readonly autopilotPipeline?: number;
+  readonly materialNormalize?: number;
 }
 
 export interface HostJobEngineOptions {
@@ -66,16 +69,22 @@ export function createHostJobEngine(options: HostJobEngineOptions) {
     let draftGeneration = 0;
     let proposalExtraction = 0;
     let selectionRewrite = 0;
+    let autopilotPipeline = 0;
+    let materialNormalize = 0;
     for (const entry of activeJobs.values()) {
       if (entry.kind === "draft_generation") draftGeneration += 1;
       else if (entry.kind === "proposal_extraction") proposalExtraction += 1;
       else if (entry.kind === "selection_rewrite") selectionRewrite += 1;
+      else if (entry.kind === "autopilot_pipeline") autopilotPipeline += 1;
+      else if (entry.kind === "material_normalize") materialNormalize += 1;
     }
     return {
       total: activeJobs.size,
       draftGeneration,
       proposalExtraction,
       selectionRewrite,
+      autopilotPipeline,
+      materialNormalize,
     };
   }
 
@@ -290,8 +299,166 @@ export function createHostJobEngine(options: HostJobEngineOptions) {
     };
   }
 
+  function startMaterialNormalize(input: Record<string, unknown>) {
+    const sessionId = typeof input.sessionId === "string" ? input.sessionId.trim() : "";
+    if (!sessionId) {
+      throw new ContractError("input.invalid", { field: "sessionId", reason: "required" });
+    }
+    const scopeKey = `material:${sessionId}`;
+    if (activeScopes.has(scopeKey)) {
+      throw new ContractError("gate.denied", { action: "material.extract", reason: "material-extract-in-progress" });
+    }
+    const session = workspace.mutation("material.get", { sessionId }) as { projectId: string };
+    const provider = typeof input.provider === "string" && input.provider.trim() ? input.provider.trim() : "deepseek";
+    const model = typeof input.model === "string" && input.model.trim() ? input.model.trim() : "deepseek-chat";
+    const instruction = typeof input.instruction === "string" ? input.instruction : undefined;
+    const jobId = randomUUID();
+    const controller = new AbortController();
+    activeScopes.add(scopeKey);
+
+    let callSeq = 0;
+    const caller = createSingleShotCaller(
+      llm,
+      { provider, model, reserved: 28_000 },
+      controller.signal,
+      {
+        begin: () => `mat-${++callSeq}`,
+        receive: () => {},
+      },
+    );
+
+    const task = workspace
+      .runMaterialNormalizeJob({
+        projectId: session.projectId,
+        sessionId,
+        instruction,
+        caller,
+        signal: controller.signal,
+      })
+      .catch((error: unknown) => {
+        logger.error("zhizhang: material normalize failed", {
+          sessionId,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        activeJobs.delete(jobId);
+        activeScopes.delete(scopeKey);
+      });
+
+    activeJobs.set(jobId, {
+      id: jobId,
+      kind: "material_normalize",
+      entityId: sessionId,
+      scopeKey,
+      controller,
+      task,
+    });
+
+    return { id: sessionId, sessionId, jobId, kind: "material_normalize" as const, running: true };
+  }
+
+  function startAutopilotPipeline(input: Record<string, unknown>) {
+    const existingBatchId = typeof input.batchId === "string" && input.batchId.trim() ? input.batchId.trim() : "";
+    const batch = (existingBatchId
+      ? workspace.mutation("autopilot.get", { batchId: existingBatchId })
+      : workspace.mutation("autopilot.start", input)) as {
+        id: string;
+        projectId: string;
+        tokenBudget: number;
+        provider: string;
+        model: string;
+      };
+    const scopeKey = `autopilot:${batch.id}`;
+    if (activeScopes.has(scopeKey)) {
+      throw new ContractError("gate.denied", { action: "autopilot.start", reason: "autopilot-in-progress" });
+    }
+    const provider =
+      typeof input.provider === "string" && input.provider.trim()
+        ? input.provider.trim()
+        : batch.provider || "deepseek";
+    const model =
+      typeof input.model === "string" && input.model.trim()
+        ? input.model.trim()
+        : batch.model || "deepseek-chat";
+    const instruction = typeof input.instruction === "string" ? input.instruction : undefined;
+    const overrideRedLine = input.overrideRedLine === true;
+    const jobId = randomUUID();
+    const controller = new AbortController();
+    activeScopes.add(scopeKey);
+
+    let callSeq = 0;
+    const caller = createSingleShotCaller(
+      llm,
+      { provider, model, reserved: Math.max(8_000, batch.tokenBudget) },
+      controller.signal,
+      {
+        begin: () => `ap-${++callSeq}`,
+        receive: () => {},
+      },
+    );
+
+    const task = workspace
+      .runAutopilotJob({
+        projectId: batch.projectId,
+        batchId: batch.id,
+        instruction,
+        overrideRedLine,
+        caller,
+        signal: controller.signal,
+      })
+      .catch((error: unknown) => {
+        logger.error("zhizhang: autopilot pipeline failed", {
+          batchId: batch.id,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        activeJobs.delete(jobId);
+        activeScopes.delete(scopeKey);
+      });
+
+    activeJobs.set(jobId, {
+      id: jobId,
+      kind: "autopilot_pipeline",
+      entityId: batch.id,
+      scopeKey,
+      controller,
+      task,
+    });
+
+    return { id: batch.id, batchId: batch.id, jobId, kind: "autopilot_pipeline" as const, batch, running: true };
+  }
+
   function cancelJob(input: Record<string, unknown>) {
     const kind = typeof input.kind === "string" ? input.kind : "";
+    if (kind === "autopilot_pipeline" || typeof input.batchId === "string") {
+      const batchId = typeof input.batchId === "string"
+        ? input.batchId.trim()
+        : typeof input.jobId === "string"
+          ? input.jobId.trim()
+          : "";
+      if (!batchId) {
+        throw new ContractError("input.invalid", { field: "batchId", reason: "required" });
+      }
+      findActiveByEntity("autopilot_pipeline", batchId)?.controller.abort();
+      const result = workspace.mutation("autopilot.cancel", { batchId });
+      return { id: batchId, batch: result, cancelled: true };
+    }
+
+    if (kind === "material_normalize" || typeof input.sessionId === "string") {
+      const sessionId = typeof input.sessionId === "string"
+        ? input.sessionId.trim()
+        : typeof input.jobId === "string"
+          ? input.jobId.trim()
+          : "";
+      if (!sessionId) {
+        throw new ContractError("input.invalid", { field: "sessionId", reason: "required" });
+      }
+      findActiveByEntity("material_normalize", sessionId)?.controller.abort();
+      return { id: sessionId, cancelled: true };
+    }
+
     if (kind === "draft_generation" || typeof input.runId === "string") {
       const runId = typeof input.runId === "string"
         ? input.runId.trim()
@@ -330,6 +497,8 @@ export function createHostJobEngine(options: HostJobEngineOptions) {
           workspace.mutation("run.cancel", { runId: entry.entityId });
         } else if (entry.kind === "proposal_extraction") {
           workspace.cancelProposalGeneration(entry.entityId);
+        } else if (entry.kind === "autopilot_pipeline") {
+          workspace.mutation("autopilot.cancel", { batchId: entry.entityId });
         }
         return { id: entry.id, cancelled: true };
       }
@@ -383,6 +552,8 @@ export function createHostJobEngine(options: HostJobEngineOptions) {
     startDraftGeneration,
     startProposalExtraction,
     runSelectionRewrite,
+    startMaterialNormalize,
+    startAutopilotPipeline,
     cancelJob,
     abortRun,
     hasActiveRun,

@@ -2,13 +2,16 @@ import { createHash } from "node:crypto";
 import type { WritingPhase } from "./writing-stages.ts";
 import {
   ARC_PLAN_SYSTEM,
+  BEAT_PLAN_SYSTEM,
   CHAPTER_REVIEW_SYSTEM,
   DECONSTRUCT_EXTRACT_SYSTEM,
   FACT_SYNC_SYSTEM,
+  MATERIAL_NORMALIZE_SYSTEM,
   QA_SYSTEM,
   SELECTION_REWRITE_SYSTEM,
   SETTING_EXTRACT_SYSTEM,
   SUMMARY_DRAFT_SYSTEM,
+  SURGICAL_PATCH_SYSTEM,
   TECHNIQUE_EXTRACT_SYSTEM,
   WRITER_SYSTEM,
 } from "./prompts/index.ts";
@@ -138,6 +141,9 @@ const PHASE_TASK_PROTOCOLS: Readonly<Record<WritingPhase, string>> = {
   chapterReview: CHAPTER_REVIEW_SYSTEM,
   arcPlan: ARC_PLAN_SYSTEM,
   selectionRewrite: SELECTION_REWRITE_SYSTEM,
+  beatPlan: BEAT_PLAN_SYSTEM,
+  surgicalPatch: SURGICAL_PATCH_SYSTEM,
+  materialNormalize: MATERIAL_NORMALIZE_SYSTEM,
 };
 
 /**

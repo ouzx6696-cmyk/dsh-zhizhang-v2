@@ -1,81 +1,73 @@
-# 系统架构与模块边界（Zhizhang 3.0）
+# 02 · 六层单向架构与模块边界（Zhizhang 3.0）
 
-织章 3.0 采用严格的**六层单向依赖架构**、**声明式产品线插槽（`ProductLineModule`）**以及**前端统一基础组件套件（`ui/primitives.ts`）**，通过自动化架构守卫测试（`test/12-architecture-guards.test.mjs`）在每次构建与测试中强制锁定模块边界。
+织章 3.0 采用严格的**六层单向依赖架构**、**声明式产品线插槽（`ProductLineModule`）**与**零运行时依赖策略**，并由 `test/12-architecture-guards.test.mjs` 与 `test/01-contracts-protected.test.mjs` 在每次构建与测试中自动化锁定。
 
 ---
 
-## 六层单向依赖图
+## 1. 六层单向依赖图
 
 ```text
-  client/          浏览器端纯 ES 模块工作台（零 Node / 后端依赖、零 innerHTML）
+  client/          原生 TypeScript 浏览器工作台（零 Node / 后端依赖、零 innerHTML）
      │  HTTP (zhizhang/3.0)
      ▼
-  host/            DsH 适配边界、HTTP 路由、HostJobEngine、Agent 工具桥接、原子交付写入
+  host/            DsH 适配边界、HTTP 路由、HostJobEngine、产品无关 tools.ts / system-prompt.ts、原子交付写入
      │
      ▼
-  application/     AuthorWorkspace 编排、JobService 统一作业服务、ProductLineModule
-     ├── products/fanqie/   番茄产品线（Schema + Actions + Context + 10 Agent 工具）
-     └── products/toutiao/  头条产品线（Schema + Actions + Auto-QA + 1 Agent 工具）
-     │
+  application/     AuthorWorkspace、collaboration.ts 协作快照引擎、JobService、ProductLineRegistry
+     ├── products/fanqie/   番茄产品线（DDL + Actions + L1–L3 上下文 + 自治/重写入 + 18 Agent 工具）
+     └── products/toutiao/  头条产品线（DDL + Actions + 场景/QA + 2 Agent 工具）
+     │               （+ 核心工作区 3 个跨产品线工具 = 23 个确定性排序 Agent 工具）
      ├───────────────┬───────────────┐
      ▼               ▼               ▼
   workflow/       domain/         storage/
-  运行态/预算/     pure 纯规则     SQLite 持久化、作业台账、FTS5、
-  读模型投影       ├── shared/     命令幂等日志、事件日志、备份导出
+  运行态/缓存/     纯函数业务规则   SQLite 持久化（zhizhang/3.0）、协作与快照台账、
+  提示词/读模型    ├── shared/     统一作业台账、External Content FTS5、热冷备份
                   ├── fanqie/
                   └── toutiao/
      │               │               │
      └───────────────┴───────────────┘
                      ▼
-                 contracts/        零运行时 DTO 类型、受保护业务常量、11 封闭 ContractError
+                 contracts/        单一受保护常量源、11 封闭 ContractError、审批门禁、零运行时 DTO
 ```
 
 ---
 
-## 各层职责与硬性边界
+## 2. 各层职责与依赖禁令
 
-| 层级 | 目录 | 唯一职责 | 禁止导入 |
+| 层级 | 目录 | 核心职责 | 禁止导入 |
 | --- | --- | --- | --- |
-| **契约层** | `src/contracts/` | `protected-rules.ts` 单一常量源、11 封闭 `ContractError`、`ApprovalGate`、纯类型 `dto/*`（零运行时 JS 产物） | 任何业务/存储/宿主层 |
-| **领域层** | `src/domain/` | 无 I/O、无 SQLite、确定性纯函数（状态机、连续性区间、锚点、冲突检测、AI 腔/黄金三章诊断、标题/QA 规则） | `storage/`、`application/`、`host/`、`client/`、`node:sqlite` |
-| **存储层** | `src/storage/` | `zhizhang/3.0` 洁净 DDL、事务封装、命令幂等日志、事件日志、统一作业台账 `job-ledger.ts`、External Content FTS5、热/冷备份与路径约束导出 | `domain/`、`application/`、`host/`、`client/` |
-| **工作流层** | `src/workflow/` | 生成运行态机、Token 预算校验、事件投影读模型（`AuthorReadUnit`） | `host/`、`client/` |
-| **应用层** | `src/application/` | `AuthorWorkspace` 命令调度、`JobService` 统一作业状态机、`ProductLineRegistry` 注册表及双产品线实现 | `host/`、`client/` |
-| **宿主层** | `src/host/` | Cordis / DsH 路由与生命周期、`HostJobEngine` 异步作业执行器（含有界卸载排空）、产品无关 `tools.ts` 桥接、原子交付写入与脱敏 `/diag` | 直接内嵌产品线领域规则 |
-| **前端层** | `src/client/` | 零构建框架原生 TypeScript（编译为浏览器 ES 模块），统一 UI 基础组件套件、三区顶栏、草稿保险箱、段落/字级 Diff、统一作业中心 | `storage/`、`application/`、`host/`、`node:*` |
-
-### 强制隔离红线（由 `test/12-architecture-guards.test.mjs` 与 `test/10-client-workbench.test.mjs` 守护）
-
-1. **双产品线零交叉**：`domain/fanqie/` 与 `domain/toutiao/` 严禁互相导入；`application/products/fanqie/` 与 `application/products/toutiao/` 各自独立持有专属 DDL、Action 与 Agent 工具。
-2. **宿主层产品无关**：`src/host/tools.ts` 与 `src/host/job-engine.ts` 不得硬编码任何具体产品线工具名或业务提示词；所有工具由 `ProductLineModule.agentTools()` 声明式注册。
-3. **契约层纯类型零排放**：`src/contracts/workspace-dto.ts` 及 `src/contracts/dto/*.ts` 编译后只输出空 `export {};`，不产生任何运行时代码。
-4. **受保护常量单一真相源**：`src/contracts/protected-rules.ts` 是所有受保护业务常量的唯一定义点；浏览器侧仅允许 `src/client/contracts/protected-rules.ts` 作为逐字镜像（由 `test/01-contracts-protected.test.mjs` 校验完全一致）。
-5. **前端零原生弹窗与零原始 HTML 注入**：所有 `src/client/**/*.ts` 模块均禁止调用 `window.alert/confirm/prompt` 及 `innerHTML`/`outerHTML`/`insertAdjacentHTML`/`document.write`，全部使用统一安全 DOM 原语与 `<dialog>` 模态控制器。
-6. **DsH 宿主契约显式标注**：`src/host/dsh-adapter.ts` 与 `src/host/dsh-tools-adapter.ts` 是 DsH 宿主与工具接口的唯一声明边界；在未经授权隔离环境实测验证前，均显式标注为基于公开文档推导（inferred from public docs）。
+| **契约层** | `src/contracts/` | `protected-rules.ts`、`ContractError`（11 封闭错误码）、`ApprovalGate`、纯类型 `dto/*`（编译产物仅空 `export {}`） | 任何业务、存储、宿主或前端模块 |
+| **领域层** | `src/domain/` | 确定性纯函数（状态机、锚点坐标、设定区间与角色知情边界、重排冲突、AI 腔/黄金三章/Quality v2、上下文调参、头条标题与 QA） | `storage/`、`application/`、`host/`、`client/`、`node:sqlite` |
+| **存储层** | `src/storage/` | `zhizhang/3.0`（`user_version = 30`）SQLite DDL、事务与命令幂等日志、事件日志、统一作业台账 `job-ledger.ts`、External Content FTS5 + 2 字 CJK 索引、热冷备份与路径约束导出 | `domain/`、`application/`、`host/`、`client/` |
+| **工作流层** | `src/workflow/` | 运行状态机、L0–L3 前缀缓存装配（`cache-layer.ts`）、内置提示词目录（`prompts/index.ts`）、Token 预算核算与事件投影读模型（`AuthorReadUnit`） | `host/`、`client/` |
+| **应用层** | `src/application/` | `AuthorWorkspace` 命令总线、`collaboration.ts`（焦点/协作模式/Agent 直写快照与回滚/渐进提示词）、`JobService`、`ProductLineRegistry` 及双产品线模块 | `host/`、`client/` |
+| **宿主层** | `src/host/` | DsH 宿主适配（`dsh-adapter.ts` / `dsh-tools-adapter.ts`）、HTTP 路由与静态清单托管、`HostJobEngine`（含 `AbortController` 与有界卸载排空）、产品无关 `tools.ts` 与 `system-prompt.ts`、原子交付写入、脱敏 `/diag` | 任何具体产品线工具名、领域规则或提示词文本 |
+| **前端层** | `src/client/` | 零构建框架原生 TypeScript ES 模块、统一 UI 原语（`ui/primitives.ts`）、Agent 伴生面板（`agent-companion.ts`）、草稿保险箱、段落/字级 Diff、六视图与双产品线插件 | `storage/`、`application/`、`host/`、`node:*` |
 
 ---
 
-## 产品线扩展模型：`ProductLineModule`
+## 3. 自动化架构与契约守卫
 
-新增一条写作产品线只需实现 `src/application/product-line.ts` 定义的 `ProductLineModule` 接口并注册到 `ProductLineRegistry`：
+以下边界均由自动化测试实时强制执行（任何破坏会直接导致 `npm test` 失败）：
 
-- `id` / `initialState` / `lockedStates` / `supportsAutoQa`：声明产品线基础契约。
-- `initSchema(db)`：初始化该产品线专属的 SQLite 表与索引。
-- `actions`：按 `global` / `project` / `document` 作用域声明命令处理器。
-- `readModels`：向事件投影引擎注册专属读模型。
-- `buildFrozenContext` / `runGeneration`：构建四层前缀缓存友好上下文（L0 共享内核 + L1 版本钉住全书圣经 + L2 仅追加卷幕/十章里程碑 + L3 动态尾与任务协议）与模型执行器。
-- `agentTools(facade)`：声明暴露给 DsH Agent 的只读/提案工具列表（严禁直接修改正文；注册时按名称确定性排序并规范化 JSON 键顺序以稳定宿主 KV 缓存）。
-- `contributeSnapshot` / `onStartupRecover` / `onJobCacheHit`：向统一工作台快照注入扩展字段、启动恢复钩子与书级缓存保活时间戳。
+1. **双产品线零交叉**：`domain/fanqie/` 与 `domain/toutiao/` 互相不可导入；各自应用层目录独立持有专属表结构、命令处理器与 Agent 工具。
+2. **宿主层完全产品无关**：`src/host/tools.ts` 与 `src/host/system-prompt.ts` 禁止出现 `fanqie`、`toutiao` 或任何产品线工具名；所有工具与渐进披露片段均由 `ProductLineModule` 声明式注册。
+3. **`WorkspaceAction` 100% 契约零漂移**：`src/contracts/dto/core.ts` 中的 `WorkspaceAction` 联合类型与后端 `src/application/`、`src/host/` 及 `api.ts` 路由端点严格一一对应——**零幻影 Action、零未类型化处理器**。
+4. **契约层纯类型零排放**：`src/contracts/workspace-dto.ts` 及 `src/contracts/dto/*.ts` 不允许出现任何运行时导出。
+5. **受保护常量单一真相源**：`src/contracts/protected-rules.ts` 为唯一定义点，浏览器侧 `src/client/contracts/protected-rules.ts` 保持逐字一致镜像。
+6. **零第三方运行时依赖 & 测试目录洁净**：`package.json` 不得包含运行时 `dependencies`；`test/` 仅允许存放 `*.test.mjs` 套件文件，共用夹具必须位于 `support/`。
+7. **DsH 宿主边界隔离**：上游宿主接口与工具注册形状仅允许声明于 `src/host/dsh-adapter.ts` 与 `src/host/dsh-tools-adapter.ts`（在经授权隔离环境实测验证前显式标注为基于公开文档推导）。
 
 ---
 
-## 前端统一基础组件体系（`src/client/workbench/ui/primitives.ts`）
+## 4. 产品线扩展协议：`ProductLineModule`
 
-所有交互视图（书房首页、新建向导、作业中心、拆书/技法库、全局模态框与顶栏）共享一套零依赖 DOM 原语与 CSS Token（`workbench.css` §16）：
+新增写作产品线仅需实现 `src/application/product-line.ts` 定义的 `ProductLineModule` 接口并注册至 `ProductLineRegistry`：
 
-| 原语 | 导出函数 | 核心规范 |
-| --- | --- | --- |
-| **Button** | `createButton` | 四档语义（`primary` / `secondary` / `ghost` / `danger`）、三档尺寸（`sm` / `md` / `lg`），统一 `8px` 控件圆角与指针 + 键盘（`Enter`/`Space` → `data-pressing`）微压缩按压反馈 |
-| **Input** | `createInput` | 覆盖单行输入、多行文本域与下拉选择，统一 `8px` 圆角、内嵌微阴影、聚焦光环与无障碍校验态（`aria-invalid` / `setError`） |
-| **Card** | `createCard` | 四档容器层次（`default` / `elevated` / `interactive` / `subtle`），统一 `12px` 卡片圆角、抬头操作区右对齐与悬停/按压阴影阶梯 |
-| **Navbar** | `createNavbar` / `enhanceNavbar` | 三区编辑顶栏（品牌印章与面包屑 · 居中分段导航 · 右侧外观与快捷动作），支持滚动抬升阴影（`data-scrolled="true"`）与键盘按压态 |
+- **基础元信息**：`id`、`initialState`、`lockedStates`、`supportsAutoQa`。
+- **持久化与命令**：`initSchema(db)`、`actions`（按 `global` / `project` / `document` 作用域路由）、`readModels`。
+- **DsH Agent 共创钩子**：
+  - `agentTools(facade)`：声明产品线专属 Agent 工具（宿主层自动按字母序与规范 JSON 键序注册）。
+  - `contributeSystemPrompt(ctx, projectId, active)`：向 `ctx.systemPrompt` 注入轻量产品线摘要、方法论提示与推荐 Skill 目录索引。
+  - `diagnoseForAgent(ctx, row, body)` / `onAgentDraftRecorded(...)`：在 Agent 提交草稿后即时返回零 Token 诊断摘要并回写技法效果遥测。
+- **兜底流水线与生命周期**：`buildFrozenContext`、`runGeneration`、`contributeSnapshot`、`onStartupRecover`、`onJobCacheHit`。

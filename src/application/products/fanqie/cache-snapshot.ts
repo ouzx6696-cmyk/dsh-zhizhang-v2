@@ -7,6 +7,7 @@ import { stmt } from "../../../storage/index.ts";
 import { normalizeCacheText, sha256Prefix } from "../../../workflow/cache-layer.ts";
 import { estimateTokenCount } from "../../../workflow/writing-budget.ts";
 import { count, text, type DocumentRow, type Input, type WorkspaceContext } from "../../context.ts";
+import { normalizeContextTuning } from "../../../domain/fanqie/index.ts";
 import { loadProjectControls } from "./controls.ts";
 import { queryDeconstructions, queryTechniques } from "./library-crud.ts";
 import { assertFanqieProject } from "./shared.ts";
@@ -62,7 +63,7 @@ function readSnapshotRow(ctx: WorkspaceContext, projectId: string): BookPrefixCa
   `).get(projectId) as BookPrefixCacheRow | undefined;
 }
 
-function toSnapshotDto(row: BookPrefixCacheRow): BookCacheSnapshotDto {
+function toSnapshotDto(row: BookPrefixCacheRow, dirtyThreshold = L1_DIRTY_REBUILD_THRESHOLD): BookCacheSnapshotDto {
   return {
     projectId: row.projectId,
     version: row.snapshotVersion,
@@ -70,7 +71,7 @@ function toSnapshotDto(row: BookPrefixCacheRow): BookCacheSnapshotDto {
     tokenCount: row.tokenCount,
     budgetTokens: row.budgetTokens,
     dirtyMutations: row.dirtyMutations,
-    dirtyThreshold: L1_DIRTY_REBUILD_THRESHOLD,
+    dirtyThreshold,
     compiledLoreSeq: row.compiledLoreSeq,
     lastCompiledAt: row.updatedAt,
     lastCacheHitAt: row.lastCacheHitAt,
@@ -315,7 +316,15 @@ export function getOrRefreshBookPrefixSnapshot(
 ): BookPrefixSnapshotResult {
   const now = options.now ?? Date.now();
   const existing = readSnapshotRow(ctx, projectId);
-  const budgetTokens = options.budgetTokens ?? existing?.budgetTokens ?? DEFAULT_L1_BUDGET_TOKENS;
+  const controls = loadProjectControls(ctx, projectId);
+  const tuning = normalizeContextTuning(controls.contextTuning);
+  const dirtyThreshold = tuning.l1DirtyThreshold;
+  const targetBudget = options.budgetTokens ?? tuning.l1BudgetTokens ?? DEFAULT_L1_BUDGET_TOKENS;
+  const budgetTokens = options.budgetTokens !== undefined
+    ? options.budgetTokens
+    : (tuning.l1BudgetTokens !== DEFAULT_L1_BUDGET_TOKENS
+        ? tuning.l1BudgetTokens
+        : (existing?.budgetTokens ?? targetBudget));
   const { techniques, deconstructions } = loadProjectScopedMounts(ctx, projectId);
   const projectMountedTechniqueIds = techniques.map((t) => t.id);
   const projectMountedDeconstructionIds = deconstructions.map((d) => d.id);
@@ -328,14 +337,14 @@ export function getOrRefreshBookPrefixSnapshot(
   const needsRebuild =
     options.force === true
     || existing === undefined
-    || existing.dirtyMutations >= L1_DIRTY_REBUILD_THRESHOLD
+    || existing.dirtyMutations >= dirtyThreshold
     || isColdWithDirty
-    || (options.budgetTokens !== undefined && existing.budgetTokens !== options.budgetTokens);
+    || (existing.budgetTokens !== budgetTokens);
 
   if (!needsRebuild && existing) {
     const delta = buildPendingDelta(ctx, projectId, existing.compiledLoreSeq, existing.compiledText);
     return {
-      snapshot: toSnapshotDto(existing),
+      snapshot: toSnapshotDto(existing, dirtyThreshold),
       compiledText: existing.compiledText,
       pendingDeltaText: delta.text,
       pendingDeltaCount: delta.count,
@@ -347,7 +356,7 @@ export function getOrRefreshBookPrefixSnapshot(
   if (options.readOnly && existing && !options.force) {
     const delta = buildPendingDelta(ctx, projectId, existing.compiledLoreSeq, existing.compiledText);
     return {
-      snapshot: toSnapshotDto(existing),
+      snapshot: toSnapshotDto(existing, dirtyThreshold),
       compiledText: existing.compiledText,
       pendingDeltaText: delta.text,
       pendingDeltaCount: delta.count,
@@ -400,7 +409,7 @@ export function getOrRefreshBookPrefixSnapshot(
   }
 
   return {
-    snapshot: toSnapshotDto(row),
+    snapshot: toSnapshotDto(row, dirtyThreshold),
     compiledText: row.compiledText,
     pendingDeltaText: "",
     pendingDeltaCount: 0,
@@ -447,10 +456,12 @@ export function buildVolumeMilestoneL2(
   projectId: string,
   row?: DocumentRow,
 ): VolumeMilestoneL2Result {
+  const controls = loadProjectControls(ctx, projectId);
+  const chunkSize = normalizeContextTuning(controls.contextTuning).l2MilestoneChunkSize;
   const order = ctx.chapterOrder(projectId);
   const currentIdx = row ? order.indexOf(row.id) : order.length;
   const effectiveIdx = currentIdx >= 0 ? currentIdx : order.length;
-  const archivedLimit = Math.floor(effectiveIdx / 10) * 10;
+  const archivedLimit = Math.floor(effectiveIdx / chunkSize) * chunkSize;
 
   const volumes = stmt(ctx.db, `
     SELECT id, title, goal, summary
@@ -490,8 +501,8 @@ export function buildVolumeMilestoneL2(
     `).all(projectId) as readonly { id: string; title: string; summary: string }[];
     const byId = new Map(chapterRows.map((c) => [c.id, c]));
 
-    for (let start = 0; start < archivedLimit; start += 10) {
-      const end = Math.min(start + 10, archivedLimit);
+    for (let start = 0; start < archivedLimit; start += chunkSize) {
+      const end = Math.min(start + chunkSize, archivedLimit);
       const lines: string[] = [];
       for (let i = start; i < end; i++) {
         const ch = byId.get(order[i]);

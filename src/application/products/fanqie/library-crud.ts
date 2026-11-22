@@ -52,6 +52,11 @@ interface TechniqueRow {
   readonly constraints: string;
   readonly antiPatterns: string;
   readonly exampleExcerpt: string;
+  readonly positiveExample: string;
+  readonly negativeExample: string;
+  readonly conflictGroup: string;
+  readonly appliedCount: number;
+  readonly avgQualityDelta: number;
   readonly priority: number;
   readonly status: LibraryStatus;
   readonly sourceKind: string;
@@ -70,7 +75,10 @@ const DECONSTRUCT_COLS = `id, scope, project_id AS projectId, override_of_id AS 
 const TECHNIQUE_COLS = `id, scope, project_id AS projectId, override_of_id AS overrideOfId, title,
   category, pacing, scene_tags_json AS sceneTagsJson, trigger_when AS triggerWhen,
   execution_steps AS executionSteps, constraints, anti_patterns AS antiPatterns,
-  example_excerpt AS exampleExcerpt, priority, status, source_kind AS sourceKind,
+  example_excerpt AS exampleExcerpt, positive_example AS positiveExample,
+  negative_example AS negativeExample, conflict_group AS conflictGroup,
+  applied_count AS appliedCount, avg_quality_delta AS avgQualityDelta,
+  priority, status, source_kind AS sourceKind,
   asset_kind AS assetKind, stage_bindings_json AS stageBindingsJson, references_json AS referencesJson,
   created_at AS createdAt, updated_at AS updatedAt`;
 
@@ -110,6 +118,11 @@ function mapDeconstructRow(row: DeconstructRow): DeconstructionDto {
 function mapTechniqueRow(row: TechniqueRow): TechniqueCardDto {
   return {
     ...row,
+    positiveExample: row.positiveExample || undefined,
+    negativeExample: row.negativeExample || undefined,
+    conflictGroup: row.conflictGroup || undefined,
+    appliedCount: Number(row.appliedCount ?? 0),
+    avgQualityDelta: Math.round(Number(row.avgQualityDelta ?? 0) * 100) / 100,
     sceneTags: parseJsonStringArray(row.sceneTagsJson),
     assetKind: row.assetKind === "skill" ? "skill" : "technique",
     stageBindings: parseJsonStringArray(row.stageBindingsJson) as WritingStageBinding[],
@@ -200,6 +213,9 @@ export function persistTechniqueCard(
   const constraints = typeof input.constraints === "string" ? input.constraints.trim() : "";
   const antiPatterns = typeof input.antiPatterns === "string" ? input.antiPatterns.trim() : "";
   const exampleExcerpt = typeof input.exampleExcerpt === "string" ? input.exampleExcerpt.trim() : "";
+  const positiveExample = typeof input.positiveExample === "string" ? input.positiveExample.trim() : "";
+  const negativeExample = typeof input.negativeExample === "string" ? input.negativeExample.trim() : "";
+  const conflictGroup = typeof input.conflictGroup === "string" ? input.conflictGroup.trim().slice(0, 48) : "";
   const priority = input.priority !== undefined ? Math.min(100, count(input, "priority")) : 50;
   const assetKind: LibraryAssetKind = input.assetKind === "skill" ? "skill" : "technique";
   const stageBindings = normalizeStageBindings(input.stageBindings);
@@ -220,33 +236,69 @@ export function persistTechniqueCard(
     INSERT INTO library_technique_cards (
       id, scope, project_id, override_of_id, title, category, pacing, scene_tags_json,
       trigger_when, execution_steps, constraints, anti_patterns, example_excerpt,
+      positive_example, negative_example, conflict_group,
       priority, status, source_kind, asset_kind, stage_bindings_json, references_json, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?, ?)
     ON CONFLICT (id) DO UPDATE SET
       title = excluded.title, category = excluded.category, pacing = excluded.pacing,
       scene_tags_json = excluded.scene_tags_json, trigger_when = excluded.trigger_when,
       execution_steps = excluded.execution_steps, constraints = excluded.constraints,
       anti_patterns = excluded.anti_patterns, example_excerpt = excluded.example_excerpt,
+      positive_example = excluded.positive_example, negative_example = excluded.negative_example,
+      conflict_group = excluded.conflict_group,
       priority = excluded.priority, status = excluded.status, asset_kind = excluded.asset_kind,
       stage_bindings_json = excluded.stage_bindings_json, references_json = excluded.references_json,
       updated_at = excluded.updated_at;
   `).run(
     id, scope, projectId, overrideOfId, title, category, pacing, JSON.stringify(sceneTags),
-    triggerWhen, executionSteps, constraints, antiPatterns, exampleExcerpt, priority,
-    sourceKind, assetKind, JSON.stringify(stageBindings), JSON.stringify(references), createdAt, now,
+    triggerWhen, executionSteps, constraints, antiPatterns, exampleExcerpt,
+    positiveExample, negativeExample, conflictGroup,
+    priority, sourceKind, assetKind, JSON.stringify(stageBindings), JSON.stringify(references), createdAt, now,
   );
 
   syncLibraryFts(ctx.db, {
     itemId: id, itemKind: "technique", scope, projectId, title,
-    body: [category, sceneTags.join(" "), triggerWhen, executionSteps, constraints, antiPatterns, exampleExcerpt, ...references.map((r) => r.content)].join("\n"),
+    body: [category, sceneTags.join(" "), triggerWhen, executionSteps, constraints, antiPatterns, exampleExcerpt, positiveExample, negativeExample, conflictGroup, ...references.map((r) => r.content)].join("\n"),
   });
   if (projectId) ctx.event(projectId, "setting", "library.technique.saved", { id, scope, assetKind });
 
+  const stats = stmt(ctx.db, "SELECT applied_count AS appliedCount, avg_quality_delta AS avgQualityDelta FROM library_technique_cards WHERE id = ?;")
+    .get(id) as { appliedCount?: number; avgQualityDelta?: number } | undefined;
+
   return {
     id, scope, projectId, overrideOfId, title, category, pacing, sceneTags, triggerWhen,
-    executionSteps, constraints, antiPatterns, exampleExcerpt, priority, status: "approved",
+    executionSteps, constraints, antiPatterns, exampleExcerpt,
+    positiveExample: positiveExample || undefined,
+    negativeExample: negativeExample || undefined,
+    conflictGroup: conflictGroup || undefined,
+    appliedCount: Number(stats?.appliedCount ?? 0),
+    avgQualityDelta: Math.round(Number(stats?.avgQualityDelta ?? 0) * 100) / 100,
+    priority, status: "approved",
     sourceKind, assetKind, stageBindings, references, createdAt, updatedAt: now,
   };
+}
+
+/** Updates rolling historical effectiveness telemetry for techniques used in a chapter cycle. */
+export function recordTechniqueOutcome(
+  ctx: WorkspaceContext,
+  cardIds: readonly string[],
+  qualityDelta: number,
+): void {
+  if (!Number.isFinite(qualityDelta) || cardIds.length === 0) return;
+  const uniqueIds = [...new Set(cardIds.filter(Boolean))];
+  if (uniqueIds.length === 0) return;
+  const selectRow = stmt(ctx.db, "SELECT applied_count AS appliedCount, avg_quality_delta AS avgQualityDelta FROM library_technique_cards WHERE id = ?;");
+  const updateRow = stmt(ctx.db, "UPDATE library_technique_cards SET applied_count = ?, avg_quality_delta = ?, updated_at = ? WHERE id = ?;");
+  const now = Date.now();
+  for (const id of uniqueIds) {
+    const row = selectRow.get(id) as { appliedCount?: number; avgQualityDelta?: number } | undefined;
+    if (!row) continue;
+    const prevCount = Number(row.appliedCount ?? 0);
+    const prevAvg = Number(row.avgQualityDelta ?? 0);
+    const nextCount = prevCount + 1;
+    const nextAvg = Math.round((((prevAvg * prevCount) + qualityDelta) / nextCount) * 100) / 100;
+    updateRow.run(nextCount, nextAvg, now, id);
+  }
 }
 
 export function saveDeconstruction(ctx: WorkspaceContext, input: Input): DeconstructionDto {
@@ -326,6 +378,30 @@ export function listTechniques(ctx: WorkspaceContext, input: Input): TechniqueCa
     scopeFilter: typeof input.scope === "string" ? input.scope : "all",
     includeOverridden: input.includeOverridden === true,
   }));
+}
+
+export function getDeconstructionById(ctx: WorkspaceContext, input: Input): DeconstructionDto {
+  const id = text(input, "id");
+  return ctx.read(() => {
+    const row = requiredRow<DeconstructRow>(
+      stmt(ctx.db, `SELECT ${DECONSTRUCT_COLS} FROM library_deconstructions WHERE id = ?;`).get(id),
+      "deconstruction",
+      id,
+    );
+    return mapDeconstructRow(row);
+  });
+}
+
+export function getTechniqueById(ctx: WorkspaceContext, input: Input): TechniqueCardDto {
+  const id = text(input, "id");
+  return ctx.read(() => {
+    const row = requiredRow<TechniqueRow>(
+      stmt(ctx.db, `SELECT ${TECHNIQUE_COLS} FROM library_technique_cards WHERE id = ?;`).get(id),
+      "technique",
+      id,
+    );
+    return mapTechniqueRow(row);
+  });
 }
 
 export function deleteTechnique(ctx: WorkspaceContext, input: Input) {

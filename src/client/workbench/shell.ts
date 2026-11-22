@@ -23,6 +23,7 @@ import type {
 } from "./plugins/types.ts";
 import { DEMO_BOOK_PRESET } from "./seed-packs.ts";
 import { createActionCoordinator, createRenderGate, el, formatCharCount } from "./store.ts";
+import { createAgentCompanion } from "./views/agent-companion.ts";
 import { createCommandPalette } from "./views/command-palette.ts";
 import { createDiffView } from "./views/diff-view.ts";
 import { createNewBookWizard } from "./views/new-book-wizard.ts";
@@ -100,6 +101,13 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
   const gate = createRenderGate();
   const coordinator = createActionCoordinator();
 
+  const viewMode = new URLSearchParams(window.location.search).get("view") || "main";
+  if (viewMode === "conversation") {
+    document.body.classList.add("view-conversation");
+  } else if (viewMode === "settings") {
+    document.body.classList.add("view-settings");
+  }
+
   let snapshot: WorkspaceSnapshot = {};
   let projectId = "";
   let documentId = "";
@@ -111,9 +119,24 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
   let budgetTimer: number | undefined;
   let composing = false;
   let toolDocument: string | undefined;
-  let activePipelineTab: PipelineTabId = "workflow";
+  let activePipelineTab: PipelineTabId = "runs";
   let activeWorkspaceView: WorkspaceViewId = "writing";
   let usingCustomTree = false;
+  let lastSyncedFocusKey = "";
+
+  function syncWorkspaceFocus(): void {
+    const key = `${projectId}:${documentId}:${viewMode}`;
+    if (key === lastSyncedFocusKey) return;
+    lastSyncedFocusKey = key;
+    if (!projectId && !documentId) return;
+    void request("focus.set", {
+      projectId: projectId || null,
+      documentId: documentId || null,
+      viewMode,
+    }).catch(() => {
+      // Non-fatal: focus sync will retry on next navigation if server is temporarily busy.
+    });
+  }
 
   function notice(message: string, isError = false): void {
     const container = byId("notice");
@@ -420,6 +443,16 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     modules.map((mod) => [mod.id, mod.mount(host)]),
   );
 
+  const agentCompanion = createAgentCompanion({
+    companionContainer: byId("agent-companion"),
+    writeBannerContainer: byId("agent-write-banner"),
+    handoffStripContainer: byId("agent-handoff-strip"),
+    host,
+    onClearLocalDraft: (docId) => {
+      vault.write(docId, null);
+    },
+  });
+
   const selectionMicrobar = createSelectionMicrobar(editor, host, {
     getProviderModel: () => {
       const form = byId<HTMLFormElement>("generate-run");
@@ -457,6 +490,8 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
       projectId: newProjectId,
       authorIntent: DEMO_BOOK_PRESET.authorIntent,
       currentFocus: DEMO_BOOK_PRESET.currentFocus,
+      pacingTier: DEMO_BOOK_PRESET.pacingTier,
+      genreTags: DEMO_BOOK_PRESET.genreTags,
     });
     const vol = await request<{ id: string }>("volume.create", {
       projectId: newProjectId,
@@ -479,27 +514,42 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
       await request("draft.save", { documentId: doc.id, baseRevisionId: null, body: ch.body });
       await request("chapter.summary.save", { documentId: doc.id, summary: ch.summary });
     }
-    const tech = DEMO_BOOK_PRESET.technique;
-    const savedTech = await request<{ id: string }>("technique.save", {
-      scope: "project",
-      projectId: newProjectId,
-      title: tech.title,
-      category: tech.category,
-      pacing: tech.pacing,
-      sceneTags: tech.sceneTags,
-      triggerWhen: tech.triggerWhen,
-      executionSteps: tech.executionSteps,
-      constraints: tech.constraints,
-      antiPatterns: tech.antiPatterns,
-    });
-    await request("library.mount", {
-      projectId: newProjectId,
-      targetType: "project",
-      targetId: newProjectId,
-      itemKind: "technique",
-      itemId: savedTech.id,
-      mode: "include",
-    });
+    if (firstChapterId && DEMO_BOOK_PRESET.starterForeshadow) {
+      await request("foreshadow.create", {
+        projectId: newProjectId,
+        title: DEMO_BOOK_PRESET.starterForeshadow.title,
+        plantedChapterId: firstChapterId,
+        status: "planted",
+        note: DEMO_BOOK_PRESET.starterForeshadow.note,
+      });
+    }
+    for (const tech of DEMO_BOOK_PRESET.techniques) {
+      const savedTech = await request<{ id: string }>("technique.save", {
+        scope: "project",
+        projectId: newProjectId,
+        title: tech.title,
+        category: tech.category,
+        pacing: tech.pacing,
+        sceneTags: tech.sceneTags,
+        triggerWhen: tech.triggerWhen,
+        executionSteps: tech.executionSteps,
+        constraints: tech.constraints,
+        antiPatterns: tech.antiPatterns,
+        positiveExample: tech.positiveExample,
+        negativeExample: tech.negativeExample,
+        conflictGroup: tech.conflictGroup,
+        assetKind: tech.assetKind,
+        stageBindings: tech.stageBindings,
+      });
+      await request("library.mount", {
+        projectId: newProjectId,
+        targetType: "project",
+        targetId: newProjectId,
+        itemKind: "technique",
+        itemId: savedTech.id,
+        mode: "include",
+      });
+    }
     await openProjectAndDoc(newProjectId, firstChapterId);
     notice(`已导入示例书「${DEMO_BOOK_PRESET.projectName}」`);
   }
@@ -567,9 +617,11 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     byId<HTMLButtonElement>("save").hidden = !active;
 
     editorBase = active ? { id: active.id, revisionId: active.revisionId, body: active.body ?? "" } : undefined;
+    syncWorkspaceFocus();
     if (!active) {
       studyHome.update(snapshot);
       selectionMicrobar.hide();
+      agentCompanion.update(snapshot);
       byId("active-tree-crumb").hidden = true;
       for (const session of sessions.values()) session.renderDocumentSlots(false, snapshot);
       return;
@@ -581,6 +633,7 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
       projectName: project?.name ?? "",
       title: active.title || "微头条",
     });
+    agentCompanion.update(snapshot);
 
     byId("document-label").textContent = mod?.documentTypeLabel(snapshot) ?? active.product;
     byId("heading").textContent = active.title || "微头条";
@@ -1010,7 +1063,12 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     await change("run.reconcile", { runId, attemptId, tokens: Number(values.tokens) }, { message: "用量已完成对账" });
   });
 
-  switchPipelineTab("workflow");
+  if (viewMode === "conversation") {
+    toggleSidebar("navigation", true);
+    switchPipelineTab("runs");
+  } else {
+    switchPipelineTab("runs");
+  }
   switchWorkspaceView("writing");
   void perform(load);
 }

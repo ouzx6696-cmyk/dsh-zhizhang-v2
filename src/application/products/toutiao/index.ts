@@ -1,4 +1,4 @@
-import { QA_REFINEMENT_LIMIT } from "../../../domain/toutiao/index.ts";
+import { QA_PASS_SCORE, QA_REFINEMENT_LIMIT, TITLE_MAX } from "../../../domain/toutiao/index.ts";
 import { createDeliverySchema, stmt, type SqliteDatabase } from "../../../storage/index.ts";
 import { projectReadUnit, type AuthorReadUnitFactory } from "../../../workflow/author-reads.ts";
 import { count, invalid, refuse, text } from "../../context.ts";
@@ -171,6 +171,34 @@ export function createToutiaoModule(
         exportStatus,
         report,
         scenario: resolveScenario(active.mode, active.line),
+      };
+    },
+    contributeSystemPrompt(_ctx, _projectId, active) {
+      const lines: string[] = [
+        `- 头条受保护硬规则：标题上限 ${TITLE_MAX} 字（微头条无标题），质检及格线 ${QA_PASS_SCORE} 分，自动打磨最多 ${QA_REFINEMENT_LIMIT} 轮，已验收/已交稿严禁改写。`,
+      ];
+      if (active) {
+        const scenario = resolveScenario(active.mode, active.line);
+        lines.push(`- 当前体裁/条线：${active.mode ?? "未设"} / ${active.line ?? "未设"} · 已打磨 ${active.qaRounds}/${QA_REFINEMENT_LIMIT} 轮`);
+        if (scenario) {
+          lines.push(`- 推荐驱动/开篇/收束：驱动=${scenario.drivers.join("、")} | 开篇=${scenario.openings.join("、")} | 收束=${scenario.endings.join("、")}`);
+        }
+        if (active.mode !== "micro") {
+          lines.push("- 标题矩阵方法论：通过 `zhizhang_plan_toutiao_article` 提交 5 组「标题|母题」候选，至少覆盖 3 个不同母题且每条 ≤ 34 字。");
+        }
+      }
+      return { lines };
+    },
+    diagnoseForAgent(_ctx, row, body) {
+      const charCount = [...body.replace(/\s/gu, "")].length;
+      return {
+        charCount,
+        mode: row.mode,
+        line: row.line,
+        state: row.state,
+        titleLength: [...row.title].length,
+        titleMax: TITLE_MAX,
+        qaPassScore: QA_PASS_SCORE,
       };
     },
     readModels,

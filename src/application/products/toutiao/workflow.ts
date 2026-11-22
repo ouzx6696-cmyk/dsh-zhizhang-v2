@@ -99,8 +99,12 @@ export function latestReport(ctx: WorkspaceContext, projectId: string, revisionI
 
 export function planArticle(ctx: WorkspaceContext, row: DocumentRow, input: Input) {
   return ctx.atomic(() => {
-    if (!row.mode || !row.line) invalid("documentId", "article-required");
-    const scenario = articleScenario(row.mode, row.line);
+    const current = ctx.document(row.id);
+    if (isLockedArticleState(current.state)) {
+      refuse("article.plan", "revision-locked");
+    }
+    if (!current.mode || !current.line) invalid("documentId", "article-required");
+    const scenario = articleScenario(current.mode, current.line);
     const driver = text(input, "driver");
     const opening = text(input, "opening");
     const ending = text(input, "ending");
@@ -114,6 +118,9 @@ export function planArticle(ctx: WorkspaceContext, row: DocumentRow, input: Inpu
       invalid("ending", "ending-unavailable-in-line");
     }
     let titleMatrix;
+    if (!scenario.hasTitle && typeof input.titles === "string" && input.titles.trim()) {
+      refuse("article.plan", "micro-title-forbidden");
+    }
     if (scenario.hasTitle && input.titles) {
       const candidates = text(input, "titles")
         .split(/\r?\n/)
@@ -127,7 +134,7 @@ export function planArticle(ctx: WorkspaceContext, row: DocumentRow, input: Inpu
       if (!titleMatrix.passed) invalid("titles", "five-titles-three-motifs-required");
     }
     const value = { driver, opening, ending, titleMatrix };
-    ctx.savePlanning(row, value);
+    ctx.savePlanning(current, value);
     return value;
   });
 }

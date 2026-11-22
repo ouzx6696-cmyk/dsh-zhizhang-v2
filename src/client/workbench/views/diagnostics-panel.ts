@@ -130,14 +130,67 @@ export function createDiagnosticsPanel(
 
     if (report) {
       const scoreBody: HTMLElement[] = [];
+      if (report.qualityV2) {
+        const q2 = report.qualityV2;
+        const grid = el("div", { className: "quality-v2-grid tabular" });
+        const addMetric = (label: string, value: string, warn = false) => {
+          const item = el("div", { className: "quality-v2-metric" });
+          item.append(
+            el("span", { className: "quality-v2-label", text: label }),
+            el("strong", {
+              className: warn ? "quality-v2-value status-warning" : "quality-v2-value",
+              text: value,
+            }),
+          );
+          grid.append(item);
+        };
+        addMetric("综合离线分", `${q2.compositeScore} / 100`, q2.compositeScore < 72);
+        addMetric(
+          "章末钩子",
+          `${q2.endingHookScore} · ${q2.endingHookStatus === "pass" ? "达标" : "偏弱"}`,
+          q2.endingHookStatus !== "pass",
+        );
+        addMetric("段首复读", `${q2.paragraphLeadRepetitions.length} 组`, q2.paragraphLeadRepetitions.length > 0);
+        addMetric("跨章复读", `${q2.crossChapterEchoes.length} 词`, q2.crossChapterEchoes.length > 0);
+        addMetric("视角越权", `${q2.povLeakWarnings.length} 处`, q2.povLeakWarnings.length > 0);
+        scoreBody.push(grid);
+
+        if (q2.endingHookSummary) {
+          scoreBody.push(el("p", { className: "setting-meta", text: `章末钩子评注：${q2.endingHookSummary}` }));
+        }
+        if (q2.paragraphLeadRepetitions.length > 0) {
+          const leadText = q2.paragraphLeadRepetitions
+            .slice(0, 3)
+            .map((r) => `「${r.lead}」(第${r.paragraphs.join("/")}段)`)
+            .join(" · ");
+          scoreBody.push(el("p", { className: "status-warning", text: `段首句式复读：${leadText}` }));
+        }
+        if (q2.crossChapterEchoes.length > 0) {
+          const echoText = q2.crossChapterEchoes
+            .slice(0, 4)
+            .map((e) => `「${e.phrase}」本章${e.currentCount}次/近章${e.recentCount}次`)
+            .join(" · ");
+          scoreBody.push(el("p", { className: "status-warning", text: `跨章高频复读：${echoText}` }));
+        }
+        if (q2.povLeakWarnings.length > 0) {
+          for (const leak of q2.povLeakWarnings.slice(0, 3)) {
+            scoreBody.push(
+              el("p", {
+                className: "status-warning",
+                text: `视角越权疑点（第 ${leak.paragraphIndex} 段 · ${leak.entityName} / 命中「${leak.matchedTerm}」）：${leak.excerpt}`,
+              }),
+            );
+          }
+        }
+      }
       if (report.goldenThree.isGoldenThreeChapter) {
         scoreBody.push(
           el("p", {
-            className: "setting-title",
+            className: "setting-title tabular",
             text: `黄金三章离线总分：${report.goldenThree.overallScore} / 100`,
           }),
           el("p", {
-            className: "setting-meta",
+            className: "setting-meta tabular",
             text: report.goldenThree.dimensions
               .map((d) => `${d.label}:${d.score}(${d.status === "pass" ? "达标" : "需关注"})`)
               .join(" · "),
@@ -146,7 +199,7 @@ export function createDiagnosticsPanel(
       }
       scoreBody.push(
         el("p", {
-          className: report.aiSlop.severity === "clean" ? "setting-meta" : "status-warning",
+          className: report.aiSlop.severity === "clean" ? "setting-meta tabular" : "status-warning tabular",
           text: `AI 味密度：${report.aiSlop.densityPer1000Chars} 次/千字（共命中 ${report.aiSlop.totalHits} 处）${
             report.aiSlop.topPhrases.length > 0
               ? ` · 高频：${report.aiSlop.topPhrases.slice(0, 4).map((p) => `${p.phrase}×${p.count}`).join("、")}`

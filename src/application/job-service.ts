@@ -53,7 +53,7 @@ interface ProposalSpec {
   readonly system: string;
 }
 
-const PROPOSAL_SPECS: Readonly<Record<AiProposalKind, ProposalSpec>> = {
+const PROPOSAL_SPECS: Readonly<Partial<Record<AiProposalKind, ProposalSpec>>> = {
   deconstruct: { phase: "deconstructExtract", system: DECONSTRUCT_EXTRACT_SYSTEM },
   technique: { phase: "techniqueExtract", system: TECHNIQUE_EXTRACT_SYSTEM },
   setting: { phase: "settingExtract", system: SETTING_EXTRACT_SYSTEM },
@@ -64,7 +64,7 @@ const PROPOSAL_SPECS: Readonly<Record<AiProposalKind, ProposalSpec>> = {
 };
 
 function parseProposalKind(raw: unknown): AiProposalKind {
-  if (typeof raw === "string" && Object.hasOwn(PROPOSAL_SPECS, raw)) {
+  if (typeof raw === "string" && Object.hasOwn(PROPOSAL_SPECS, raw) && PROPOSAL_SPECS[raw as AiProposalKind]) {
     return raw as AiProposalKind;
   }
   invalid("kind", "unknown-proposal-kind");
@@ -614,6 +614,7 @@ export function createJobService(
       }
 
       const spec = PROPOSAL_SPECS[kind];
+      if (!spec) invalid("kind", "proposal-kind-not-ai-generatable");
       const instruction = optionalText(input, "instruction") ?? "";
       let extraContext: Readonly<Record<string, unknown>> = {};
       let layered: LayeredPromptPayload | undefined;

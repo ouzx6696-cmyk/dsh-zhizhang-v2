@@ -9,11 +9,11 @@
 
 | Object Type | Count |
 | --- | ---: |
-| Tables (non-shadow) | 39 |
+| Tables (non-shadow) | 45 |
 | FTS5 Virtual Tables | 3 |
 | FTS5 Shadow Tables | 12 |
 | Views | 3 |
-| Explicit Indexes | 39 |
+| Explicit Indexes | 44 |
 | Triggers | 14 |
 
 ## Tables
@@ -35,6 +35,25 @@
 | `created_at` | `INTEGER` | YES | 0 |  |
 
 Foreign keys: `volume_id` -> `author_volumes(id)`, `project_id` -> `author_projects(id)`
+
+### `author_agent_writes` (STRICT)
+
+| Column | Type | Not Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | `TEXT` | YES |  | 1 |
+| `project_id` | `TEXT` | YES |  |  |
+| `document_id` | `TEXT` | YES |  |  |
+| `mode` | `TEXT` | YES |  |  |
+| `run_id` | `TEXT` | NO |  |  |
+| `candidate_id` | `TEXT` | NO |  |  |
+| `previous_revision_id` | `TEXT` | NO |  |  |
+| `new_revision_id` | `TEXT` | NO |  |  |
+| `summary` | `TEXT` | YES | '' |  |
+| `technique_ids_json` | `TEXT` | YES | '[]' |  |
+| `rolled_back` | `INTEGER` | YES | 0 |  |
+| `created_at` | `INTEGER` | YES | 0 |  |
+
+Foreign keys: `document_id` -> `author_documents(id)`, `project_id` -> `author_projects(id)`
 
 ### `author_ai_proposals`
 
@@ -84,6 +103,54 @@ Foreign keys: `document_id` -> `author_documents(id)`
 | `created_at` | `INTEGER` | YES |  |  |
 
 Foreign keys: `document_id` -> `author_documents(id)`, `project_id` -> `author_projects(id)`
+
+### `author_autopilot_batches`
+
+| Column | Type | Not Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | `TEXT` | NO |  | 1 |
+| `project_id` | `TEXT` | YES |  |  |
+| `scope` | `TEXT` | YES | 'single_chapter' |  |
+| `autonomy_mode` | `TEXT` | YES | 'redline_pause' |  |
+| `adoption_policy` | `TEXT` | YES | 'working_draft_snapshot' |  |
+| `status` | `TEXT` | YES | 'running' |  |
+| `chapter_ids_json` | `TEXT` | YES | '[]' |  |
+| `current_chapter_index` | `INTEGER` | YES | 0 |  |
+| `current_step` | `TEXT` | NO |  |  |
+| `token_budget` | `INTEGER` | YES | 60000 |  |
+| `tokens_spent` | `INTEGER` | YES | 0 |  |
+| `refine_rounds_used` | `INTEGER` | YES | 0 |  |
+| `provider` | `TEXT` | YES | '' |  |
+| `model` | `TEXT` | YES | '' |  |
+| `pause_reason_json` | `TEXT` | NO |  |  |
+| `pre_batch_revisions_json` | `TEXT` | YES | '{}' |  |
+| `created_at` | `INTEGER` | YES | 0 |  |
+| `updated_at` | `INTEGER` | YES | 0 |  |
+
+Foreign keys: `project_id` -> `author_projects(id)`
+
+### `author_autopilot_steps`
+
+| Column | Type | Not Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | `TEXT` | NO |  | 1 |
+| `batch_id` | `TEXT` | YES |  |  |
+| `document_id` | `TEXT` | YES |  |  |
+| `chapter_title` | `TEXT` | YES | '' |  |
+| `step_kind` | `TEXT` | YES |  |  |
+| `round` | `INTEGER` | YES | 1 |  |
+| `status` | `TEXT` | YES | 'completed' |  |
+| `input_revision_id` | `TEXT` | NO |  |  |
+| `output_revision_id` | `TEXT` | NO |  |  |
+| `score_before` | `REAL` | NO |  |  |
+| `score_after` | `REAL` | NO |  |  |
+| `tokens_used` | `INTEGER` | YES | 0 |  |
+| `cache_hit_rate` | `REAL` | NO |  |  |
+| `summary` | `TEXT` | YES | '' |  |
+| `error` | `TEXT` | NO |  |  |
+| `created_at` | `INTEGER` | YES | 0 |  |
+
+Foreign keys: `batch_id` -> `author_autopilot_batches(id)`
 
 ### `author_book_prefix_cache`
 
@@ -313,6 +380,26 @@ Foreign keys: `project_id` -> `author_projects(id)`
 
 Foreign keys: `project_id` -> `author_projects(id)`
 
+### `author_material_ingests`
+
+| Column | Type | Not Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | `TEXT` | NO |  | 1 |
+| `project_id` | `TEXT` | YES |  |  |
+| `source_origin` | `TEXT` | YES | 'workbench_upload' |  |
+| `status` | `TEXT` | YES | 'chunked' |  |
+| `total_files` | `INTEGER` | YES | 0 |  |
+| `total_chars` | `INTEGER` | YES | 0 |  |
+| `cleaning_warnings_json` | `TEXT` | YES | '[]' |  |
+| `chunks_json` | `TEXT` | YES | '[]' |  |
+| `proposed_bundle_json` | `TEXT` | NO |  |  |
+| `committed_report_json` | `TEXT` | NO |  |  |
+| `error` | `TEXT` | NO |  |  |
+| `created_at` | `INTEGER` | YES | 0 |  |
+| `updated_at` | `INTEGER` | YES | 0 |  |
+
+Foreign keys: `project_id` -> `author_projects(id)`
+
 ### `author_planning`
 
 | Column | Type | Not Null | Default | PK |
@@ -321,6 +408,17 @@ Foreign keys: `project_id` -> `author_projects(id)`
 | `value` | `TEXT` | YES |  |  |
 
 Foreign keys: `document_id` -> `author_documents(id)`
+
+### `author_project_collaboration` (STRICT)
+
+| Column | Type | Not Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `project_id` | `TEXT` | YES |  | 1 |
+| `collaboration_mode` | `TEXT` | YES | 'cautious' |  |
+| `agent_prompt_injection` | `INTEGER` | YES | 1 |  |
+| `updated_at` | `INTEGER` | YES | 0 |  |
+
+Foreign keys: `project_id` -> `author_projects(id)`
 
 ### `author_project_controls`
 
@@ -335,6 +433,7 @@ Foreign keys: `document_id` -> `author_documents(id)`
 | `daily_target` | `INTEGER` | YES | 0 |  |
 | `stale_foreshadow_gap` | `INTEGER` | YES | 20 |  |
 | `token_calibration_json` | `TEXT` | YES | '{}' |  |
+| `context_config_json` | `TEXT` | YES | '{}' |  |
 | `updated_at` | `INTEGER` | YES | 0 |  |
 
 Foreign keys: `project_id` -> `author_projects(id)`
@@ -430,6 +529,16 @@ Foreign keys: `project_id` -> `author_projects(id)`
 | `created_at` | `INTEGER` | YES | 0 |  |
 
 Foreign keys: `project_id` -> `author_projects(id)`
+
+### `author_workspace_focus` (STRICT)
+
+| Column | Type | Not Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | `TEXT` | YES |  | 1 |
+| `project_id` | `TEXT` | NO |  |  |
+| `document_id` | `TEXT` | NO |  |  |
+| `view_mode` | `TEXT` | YES | 'main' |  |
+| `updated_at` | `INTEGER` | YES | 0 |  |
 
 ### `candidates`
 
@@ -549,6 +658,11 @@ Foreign keys: `base_revision_id` -> `revisions(revision_id)`, `document_id` -> `
 | `constraints` | `TEXT` | YES | '' |  |
 | `anti_patterns` | `TEXT` | YES | '' |  |
 | `example_excerpt` | `TEXT` | YES | '' |  |
+| `positive_example` | `TEXT` | YES | '' |  |
+| `negative_example` | `TEXT` | YES | '' |  |
+| `conflict_group` | `TEXT` | YES | '' |  |
+| `applied_count` | `INTEGER` | YES | 0 |  |
+| `avg_quality_delta` | `REAL` | YES | 0 |  |
 | `priority` | `INTEGER` | YES | 50 |  |
 | `status` | `TEXT` | YES | 'approved' |  |
 | `source_kind` | `TEXT` | YES | 'manual' |  |
@@ -603,8 +717,12 @@ Foreign keys: `document_id` -> `documents(document_id)`
 | Index | Table | Unique | Partial |
 | --- | --- | --- | --- |
 | `author_acts_by_volume` | `author_acts` | NO | NO |
+| `author_agent_writes_by_doc` | `author_agent_writes` | NO | NO |
+| `author_agent_writes_by_project` | `author_agent_writes` | NO | NO |
 | `author_ai_proposals_by_doc` | `author_ai_proposals` | NO | NO |
 | `author_ai_proposals_status` | `author_ai_proposals` | NO | NO |
+| `author_autopilot_batches_by_project` | `author_autopilot_batches` | NO | NO |
+| `author_autopilot_steps_by_batch` | `author_autopilot_steps` | NO | NO |
 | `author_chapter_entities_by_doc` | `author_chapter_entities` | NO | NO |
 | `author_chapter_entities_by_fact` | `author_chapter_entities` | NO | NO |
 | `author_chapter_entities_by_name` | `author_chapter_entities` | NO | NO |
@@ -622,6 +740,7 @@ Foreign keys: `document_id` -> `documents(document_id)`
 | `author_jobs_open` | `author_jobs` | NO | YES |
 | `author_library_mounts_lookup` | `author_library_mounts` | NO | NO |
 | `author_lore_current_by_cat` | `author_lore_current` | NO | NO |
+| `author_material_ingests_by_project` | `author_material_ingests` | NO | NO |
 | `author_read_checkpoints_lru` | `author_read_checkpoints` | NO | NO |
 | `author_reports_by_revision` | `author_article_reports` | NO | NO |
 | `author_runs_by_doc_state` | `author_runs` | NO | NO |

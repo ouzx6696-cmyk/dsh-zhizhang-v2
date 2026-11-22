@@ -1,8 +1,8 @@
-// Browser-served mirror of src/contracts/protected-rules.ts (FE-16).
+// Browser-served mirror of src/contracts/protected-rules.ts.
 //
 // The workbench modules are served under /api/zhizhang/, so a browser import
 // cannot reach src/contracts/. This file restates the canonical values
-// byte-for-byte; test/db-v23.test.mjs asserts it equals the canonical module.
+// byte-for-byte; test/01-contracts-protected.test.mjs asserts it equals the canonical module.
 // Never edit values here: change src/contracts/protected-rules.ts (with author
 // authorization) and copy the export block over unchanged.
 

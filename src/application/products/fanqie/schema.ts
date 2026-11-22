@@ -120,6 +120,11 @@ export function initFanqieSchema(db: SqliteDatabase): void {
       constraints TEXT NOT NULL DEFAULT '',
       anti_patterns TEXT NOT NULL DEFAULT '',
       example_excerpt TEXT NOT NULL DEFAULT '',
+      positive_example TEXT NOT NULL DEFAULT '',
+      negative_example TEXT NOT NULL DEFAULT '',
+      conflict_group TEXT NOT NULL DEFAULT '',
+      applied_count INTEGER NOT NULL DEFAULT 0,
+      avg_quality_delta REAL NOT NULL DEFAULT 0,
       priority INTEGER NOT NULL DEFAULT 50,
       status TEXT NOT NULL DEFAULT 'approved',
       source_kind TEXT NOT NULL DEFAULT 'manual',
@@ -220,6 +225,7 @@ export function initFanqieSchema(db: SqliteDatabase): void {
       daily_target INTEGER NOT NULL DEFAULT 0,
       stale_foreshadow_gap INTEGER NOT NULL DEFAULT 20,
       token_calibration_json TEXT NOT NULL DEFAULT '{}',
+      context_config_json TEXT NOT NULL DEFAULT '{}',
       updated_at INTEGER NOT NULL DEFAULT 0
     );
 
@@ -234,6 +240,62 @@ export function initFanqieSchema(db: SqliteDatabase): void {
       dirty_mutations INTEGER NOT NULL DEFAULT 0,
       last_cache_hit_at INTEGER NOT NULL DEFAULT 0,
       updated_at INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS author_material_ingests (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES author_projects(id),
+      source_origin TEXT NOT NULL DEFAULT 'workbench_upload',
+      status TEXT NOT NULL DEFAULT 'chunked',
+      total_files INTEGER NOT NULL DEFAULT 0,
+      total_chars INTEGER NOT NULL DEFAULT 0,
+      cleaning_warnings_json TEXT NOT NULL DEFAULT '[]',
+      chunks_json TEXT NOT NULL DEFAULT '[]',
+      proposed_bundle_json TEXT,
+      committed_report_json TEXT,
+      error TEXT,
+      created_at INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS author_autopilot_batches (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES author_projects(id),
+      scope TEXT NOT NULL DEFAULT 'single_chapter',
+      autonomy_mode TEXT NOT NULL DEFAULT 'redline_pause',
+      adoption_policy TEXT NOT NULL DEFAULT 'working_draft_snapshot',
+      status TEXT NOT NULL DEFAULT 'running',
+      chapter_ids_json TEXT NOT NULL DEFAULT '[]',
+      current_chapter_index INTEGER NOT NULL DEFAULT 0,
+      current_step TEXT,
+      token_budget INTEGER NOT NULL DEFAULT 60000,
+      tokens_spent INTEGER NOT NULL DEFAULT 0,
+      refine_rounds_used INTEGER NOT NULL DEFAULT 0,
+      provider TEXT NOT NULL DEFAULT '',
+      model TEXT NOT NULL DEFAULT '',
+      pause_reason_json TEXT,
+      pre_batch_revisions_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS author_autopilot_steps (
+      id TEXT PRIMARY KEY,
+      batch_id TEXT NOT NULL REFERENCES author_autopilot_batches(id),
+      document_id TEXT NOT NULL,
+      chapter_title TEXT NOT NULL DEFAULT '',
+      step_kind TEXT NOT NULL,
+      round INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL DEFAULT 'completed',
+      input_revision_id TEXT,
+      output_revision_id TEXT,
+      score_before REAL,
+      score_after REAL,
+      tokens_used INTEGER NOT NULL DEFAULT 0,
+      cache_hit_rate REAL,
+      summary TEXT NOT NULL DEFAULT '',
+      error TEXT,
+      created_at INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE INDEX IF NOT EXISTS author_volumes_by_project ON author_volumes(project_id, sort_order);
@@ -259,5 +321,32 @@ export function initFanqieSchema(db: SqliteDatabase): void {
     CREATE INDEX IF NOT EXISTS author_chapter_entities_by_doc ON author_chapter_entities(project_id, document_id);
     CREATE INDEX IF NOT EXISTS author_chapter_entities_by_name ON author_chapter_entities(project_id, entity_name);
     CREATE INDEX IF NOT EXISTS author_chapter_observations_doc ON author_chapter_observations(project_id, document_id, status);
+    CREATE INDEX IF NOT EXISTS author_material_ingests_by_project ON author_material_ingests(project_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS author_autopilot_batches_by_project ON author_autopilot_batches(project_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS author_autopilot_steps_by_batch ON author_autopilot_steps(batch_id, created_at ASC);
   `);
+
+  // Idempotent column upgrades for existing SQLite databases created prior to Quality v2
+  const techCols = new Set(
+    (db.prepare("PRAGMA table_info(library_technique_cards);").all() as readonly { name: string }[]).map((c) => c.name),
+  );
+  const upgrades: readonly [string, string][] = [
+    ["positive_example", "TEXT NOT NULL DEFAULT ''"],
+    ["negative_example", "TEXT NOT NULL DEFAULT ''"],
+    ["conflict_group", "TEXT NOT NULL DEFAULT ''"],
+    ["applied_count", "INTEGER NOT NULL DEFAULT 0"],
+    ["avg_quality_delta", "REAL NOT NULL DEFAULT 0"],
+  ];
+  for (const [col, def] of upgrades) {
+    if (!techCols.has(col)) {
+      db.exec(`ALTER TABLE library_technique_cards ADD COLUMN ${col} ${def};`);
+    }
+  }
+
+  const controlCols = new Set(
+    (db.prepare("PRAGMA table_info(author_project_controls);").all() as readonly { name: string }[]).map((c) => c.name),
+  );
+  if (!controlCols.has("context_config_json")) {
+    db.exec("ALTER TABLE author_project_controls ADD COLUMN context_config_json TEXT NOT NULL DEFAULT '{}';");
+  }
 }

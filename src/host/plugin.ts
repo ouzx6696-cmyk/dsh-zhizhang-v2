@@ -20,10 +20,12 @@ import {
   runInServiceScope,
   type Disposer,
   type DsHPluginContext,
+  type HostSystemPromptRegistrar,
   type HostToolRegistrar,
 } from "./dsh-adapter.ts";
 import { createHostJobEngine } from "./job-engine.ts";
 import { buildSanitizedDiagnostics, registerZhizhangSettings, type DsHConfigFormRegistrar } from "./settings.ts";
+import { registerZhizhangSystemPrompt } from "./system-prompt.ts";
 import { registerZhizhangTools, type ZhizhangAgentToolDefinition } from "./tools.ts";
 import { openAuthorWorkspace } from "./workspace.ts";
 
@@ -233,7 +235,10 @@ export function applyWorkbench(
 
       const agentToolsEnabled = config.enableAgentTools ?? true;
       let agentToolsRegistered = false;
+      let agentToolCount = 0;
       let agentToolsError: string | null = null;
+      let systemPromptRegistered = false;
+      let systemPromptError: string | null = null;
       if (agentToolsEnabled) {
         disposers.push(
           ...runInServiceScope(
@@ -244,12 +249,31 @@ export function applyWorkbench(
               const registrar = getHostService<HostToolRegistrar<ZhizhangAgentToolDefinition>>(scoped, "tools");
               if (!registrar) return [];
               const registered = registerZhizhangTools(registrar, workspace, true);
-              agentToolsRegistered = true;
+              agentToolsRegistered = registered.length > 0;
+              agentToolCount = registered.length;
               return registered;
             },
             (error) => {
               agentToolsError = describeError(error);
               ctx.logger.error("zhizhang: agent tool registration failed", { reason: agentToolsError });
+            },
+          ),
+        );
+        disposers.push(
+          ...runInServiceScope(
+            ctx,
+            ["systemPrompt"],
+            "zhizhang: system prompt",
+            (scoped) => {
+              const registrar = getHostService<HostSystemPromptRegistrar>(scoped, "systemPrompt");
+              if (!registrar) return [];
+              const registered = registerZhizhangSystemPrompt(registrar, workspace, true);
+              systemPromptRegistered = registered.length > 0;
+              return registered;
+            },
+            (error) => {
+              systemPromptError = describeError(error);
+              ctx.logger.error("zhizhang: system prompt registration failed", { reason: systemPromptError });
             },
           ),
         );
@@ -277,7 +301,10 @@ export function applyWorkbench(
             usageConsistencyIssues: workspace.verifyUsageConsistency().length,
             agentToolsEnabled,
             agentToolsRegistered,
+            agentToolCount,
             agentToolsError,
+            systemPromptRegistered,
+            systemPromptError,
           });
           return json({ ok: true, result: report });
         } catch (error) {
@@ -341,6 +368,12 @@ export function applyWorkbench(
           if (kind === "selection_rewrite") {
             const result = await engine.runSelectionRewrite(input, request.signal);
             return json({ ok: true, result });
+          }
+          if (kind === "autopilot_pipeline") {
+            return json({ ok: true, result: engine.startAutopilotPipeline(input) }, 202);
+          }
+          if (kind === "material_normalize") {
+            return json({ ok: true, result: engine.startMaterialNormalize(input) }, 202);
           }
           throw new ContractError("input.invalid", { field: "kind", reason: "unknown-job-kind" });
         } catch (error) {

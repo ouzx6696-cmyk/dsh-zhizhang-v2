@@ -1,8 +1,7 @@
-// The storage module's public surface.
+// The storage module's public surface (zhizhang/3.0).
 //
-// Only the contracts frozen in the v2.0 plan (contracts.md B.1, B.10) and
-// V2.3 storage primitives are exported here. Callers open connections through
-// `openDatabase` and never name a concrete driver directly.
+// Callers open connections through `openDatabase` and never name a concrete
+// SQLite driver directly.
 
 export {
   ERROR_CODES,

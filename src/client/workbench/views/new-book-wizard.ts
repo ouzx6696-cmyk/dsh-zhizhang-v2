@@ -58,7 +58,12 @@ export function createNewBookWizard(host: WorkbenchShellHost, callbacks: WizardC
 
     let firstDocId = "";
     if (product === "fanqie") {
-      await host.request("controls.save", { projectId, authorIntent });
+      await host.request("controls.save", {
+        projectId,
+        authorIntent,
+        pacingTier: pack.defaultPacingTier,
+        genreTags: pack.genreTags,
+      });
       const vol = await host.request<{ id: string }>("volume.create", {
         projectId,
         title: volumeTitle.trim() || "第一卷",
@@ -95,6 +100,11 @@ export function createNewBookWizard(host: WorkbenchShellHost, callbacks: WizardC
           executionSteps: preset.executionSteps,
           constraints: preset.constraints,
           antiPatterns: preset.antiPatterns,
+          positiveExample: preset.positiveExample,
+          negativeExample: preset.negativeExample,
+          conflictGroup: preset.conflictGroup,
+          assetKind: preset.assetKind,
+          stageBindings: preset.stageBindings,
         });
         await host.request("library.mount", {
           projectId,

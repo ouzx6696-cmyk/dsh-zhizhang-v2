@@ -6,7 +6,13 @@ import type {
   ObservationStatus,
   SlopConfigDto,
 } from "../../../contracts/workspace-dto.ts";
-import { diagnoseChapterOffline, OBSERVATION_DIMENSIONS } from "../../../domain/fanqie/index.ts";
+import {
+  diagnoseChapterOffline,
+  OBSERVATION_DIMENSIONS,
+  settingsAt,
+  type HiddenFactHint,
+} from "../../../domain/fanqie/index.ts";
+import { anchor } from "../../../domain/shared/index.ts";
 import { stmt } from "../../../storage/index.ts";
 import {
   invalid,
@@ -17,7 +23,8 @@ import {
   type Input,
   type WorkspaceContext,
 } from "../../context.ts";
-import { assertFanqieProject } from "./shared.ts";
+import { loadProjectControls } from "./controls.ts";
+import { approvedFacts, assertFanqieProject } from "./shared.ts";
 
 const VALID_DIMENSIONS = new Set<string>(OBSERVATION_DIMENSIONS);
 const VALID_SEVERITIES = new Set(["info", "warning", "error"]);
@@ -85,12 +92,55 @@ export function diagnoseChapter(ctx: WorkspaceContext, row: DocumentRow): Chapte
     const chapterIndex = Math.max(0, order.indexOf(row.id));
     const plan = ctx.planning(row.id);
     const targetLength = typeof plan?.target === "number" ? plan.target : undefined;
+    const viewpoint = typeof plan?.viewpoint === "string" ? plan.viewpoint.trim() : undefined;
     const config = loadSlopConfig(ctx, row.projectId);
+    const controls = loadProjectControls(ctx, row.projectId);
+
+    const recentIds = chapterIndex > 0 ? order.slice(Math.max(0, chapterIndex - 3), chapterIndex) : [];
+    const recentChapterBodies: string[] = [];
+    if (recentIds.length > 0) {
+      const readBody = stmt(ctx.db, `
+        SELECT r.body FROM documents d
+        LEFT JOIN revisions r ON r.revision_id = d.current_revision_id
+        WHERE d.document_id = ?;
+      `);
+      for (const prevId of recentIds) {
+        const prev = readBody.get(prevId) as { body?: string | null } | undefined;
+        if (prev?.body) recentChapterBodies.push(prev.body);
+      }
+    }
+
+    const hiddenFacts: HiddenFactHint[] = [];
+    if (viewpoint) {
+      const facts = approvedFacts(ctx, row.projectId);
+      const knownIds = new Set(settingsAt(facts, order, anchor(row.id, 1), viewpoint).map((f) => f.id));
+      const loreMeta = new Map(
+        (
+          stmt(ctx.db, "SELECT fact_id AS factId, entity_name AS entityName FROM author_lore_current WHERE project_id = ?;")
+            .all(row.projectId) as readonly { factId: string; entityName: string }[]
+        ).map((m) => [m.factId, m.entityName]),
+      );
+      for (const fact of facts) {
+        if (fact.kind === "agreement" || knownIds.has(fact.id)) continue;
+        hiddenFacts.push({
+          factId: fact.id,
+          entityName: loreMeta.get(fact.id) ?? "",
+          note: fact.note,
+          aliases: fact.aliases,
+        });
+      }
+    }
+
     return diagnoseChapterOffline(row.id, row.body ?? "", {
       chapterIndex,
       targetLength,
+      pacingTier: controls.pacingTier,
+      genreTags: controls.genreTags,
       customBanned: config.customBanned,
       whitelist: config.whitelist,
+      recentChapterBodies,
+      hiddenFacts,
+      viewpoint,
     });
   });
 }

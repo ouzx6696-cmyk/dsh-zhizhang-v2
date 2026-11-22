@@ -62,43 +62,6 @@ interface IndexedNavState {
   rev: number;
 }
 
-interface LegacyNavState {
-  title: string;
-  volumes: Volume[];
-  chapters: Chapter[];
-}
-
-function normalizeNavState(raw: IndexedNavState | LegacyNavState): IndexedNavState {
-  if ("chaptersById" in raw && raw.chaptersById && Array.isArray(raw.chapterOrder)) {
-    return raw;
-  }
-  const legacy = raw as LegacyNavState;
-  const volumesById: Record<string, Volume> = {};
-  const volumeOrder: string[] = [];
-  for (const vol of legacy.volumes ?? []) {
-    if (!Object.hasOwn(volumesById, vol.volumeId)) {
-      volumesById[vol.volumeId] = { volumeId: vol.volumeId, title: vol.title };
-      volumeOrder.push(vol.volumeId);
-    }
-  }
-  const chaptersById: Record<string, Chapter> = {};
-  const chapterOrder: string[] = [];
-  for (const ch of legacy.chapters ?? []) {
-    if (!Object.hasOwn(chaptersById, ch.chapterId)) {
-      chaptersById[ch.chapterId] = { ...ch };
-      chapterOrder.push(ch.chapterId);
-    }
-  }
-  return {
-    title: legacy.title ?? "",
-    volumesById,
-    volumeOrder,
-    chaptersById,
-    chapterOrder,
-    rev: 0,
-  };
-}
-
 function navigation(definition: ReadDefinition, projectId: string) {
   return projectReadUnit<IndexedNavState>(
     definition,
@@ -110,9 +73,8 @@ function navigation(definition: ReadDefinition, projectId: string) {
       chapterOrder: [],
       rev: 0,
     }),
-    (rawState, event) => {
-      if (event.concern !== undefined && event.concern !== "chapter") return rawState;
-      const state = normalizeNavState(rawState);
+    (state, event) => {
+      if (event.concern !== undefined && event.concern !== "chapter") return state;
       if (event.kind === "project.created") {
         const nextTitle = event.name as string;
         if (state.title === nextTitle) return state;
@@ -187,8 +149,7 @@ function navigation(definition: ReadDefinition, projectId: string) {
       }
       return state;
     },
-    (rawState) => {
-      const state = normalizeNavState(rawState);
+    (state) => {
       const { title, volumesById, volumeOrder, chaptersById, chapterOrder } = state;
 
       if (volumeOrder.length === 0) {

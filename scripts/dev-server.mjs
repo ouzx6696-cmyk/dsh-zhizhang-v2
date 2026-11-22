@@ -148,7 +148,7 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "GET" && pathname === "/diag") {
       const report = buildSanitizedDiagnostics(db, {
-        activeJobs: { total: 0, draftGeneration: 0, proposalExtraction: 0, selectionRewrite: 0 },
+        activeJobs: { total: 0, draftGeneration: 0, proposalExtraction: 0, selectionRewrite: 0, autopilotPipeline: 0, materialNormalize: 0 },
         usageConsistencyIssues: workspace.verifyUsageConsistency().length,
         agentToolsEnabled: true,
         agentToolsRegistered: false,
@@ -175,6 +175,11 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && pathname === "/jobs/cancel") {
       const body = await readJsonBody(req);
+      if (typeof body.batchId === "string" && body.batchId.trim()) {
+        const result = workspace.mutation("autopilot.cancel", { batchId: body.batchId.trim() });
+        sendJson(res, { ok: true, result: { id: body.batchId.trim(), batch: result, cancelled: true } });
+        return;
+      }
       if (typeof body.runId === "string" && body.runId.trim()) {
         const result = workspace.mutation("run.cancel", { runId: body.runId.trim() });
         sendJson(res, { ok: true, result: { ...result, cancelled: true } });

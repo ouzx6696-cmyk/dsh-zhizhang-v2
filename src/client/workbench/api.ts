@@ -26,6 +26,18 @@ const REASON_MESSAGES: Readonly<Record<string, string>> = {
   "title-limit": `标题最多 ${TITLE_MAX} 个 Unicode 字符。`,
   "micro-has-no-title": "微头条不设标题。",
   "quote-must-match-exactly-once": "摘句必须在已保存正文中唯一匹配一次。",
+  "autopilot-in-progress": "该自动化批次已在运行中，请先暂停或等待当前步骤完成。",
+  "material-extract-in-progress": "该材料会话正在 AI 标准化提炼中，请稍候。",
+  "cannot-autopilot-final-chapter": "已定稿章节处于锁定状态，不可纳入全自动改写队列。",
+  "session-already-committed": "该非标准材料会话已完成原子入库，不可重复提交。",
+  "session-not-ready": "请先完成切片确认或生成标准化提案包后再执行入库。",
+  "batch-not-running": "当前批次未处于运行状态。",
+  "no-snapshot-to-rollback": "本章没有可回滚的批次前快照。",
+  "rollback-requires-direct-write": "仅共创模式直写草稿支持版本回滚，审慎模式候选稿请直接在 Diff 区舍弃。",
+  "already-rolled-back": "该条 Agent 写入记录已完成回滚，无需重复操作。",
+  "project-mismatch": "目标章节与当前作品不匹配，请刷新后重试。",
+  "non-empty-array-required": "局部精修必须至少提供一条段落补丁。",
+  "resulting-body-empty": "应用补丁后的正文为空，已拒绝写入。",
 };
 
 export interface WorkbenchRequestContext {
@@ -46,11 +58,10 @@ const IO_ACTIONS: ReadonlySet<string> = new Set([
   "project.export_bundle",
   "project.import_bundle",
   "selection.rewrite",
-  "backup.create",
   "article.deliver",
   "skill.import",
-  "project.bootstrap",
-  "revisions.compact",
+  "material.preprocess",
+  "material.commit",
 ]);
 
 /** State reads 15s, ordinary writes 30s, long-running I/O & sync rewrite 120s. */
@@ -95,6 +106,15 @@ function resolveEndpoint(
   }
   if (action === "proposal.cancel") {
     return { path: "./jobs/cancel", method: "POST", body: { ...(input ?? {}), kind: "proposal_extraction" } };
+  }
+  if (action === "autopilot.start" || action === "autopilot.resume") {
+    return { path: "./jobs/start", method: "POST", body: { ...(input ?? {}), kind: "autopilot_pipeline" } };
+  }
+  if (action === "material.extract") {
+    return { path: "./jobs/start", method: "POST", body: { ...(input ?? {}), kind: "material_normalize" } };
+  }
+  if (action === "autopilot.cancel") {
+    return { path: "./jobs/cancel", method: "POST", body: { ...(input ?? {}), kind: "autopilot_pipeline" } };
   }
   return { path: "./command", method: "POST", body: { action, ...(input ?? {}) } };
 }

@@ -48,7 +48,8 @@ function parseProposalKind(raw: unknown): AiProposalKind {
     raw === "summary" ||
     raw === "fact_sync" ||
     raw === "chapter_review" ||
-    raw === "arc_plan"
+    raw === "arc_plan" ||
+    raw === "outline"
   ) {
     return raw;
   }
@@ -296,6 +297,36 @@ export function decideProposal(ctx: WorkspaceContext, input: Input) {
       if (!projectId) invalid("projectId", "project-required");
       assertFanqieProject(ctx, projectId);
       committed = commitArcPlanProposal(ctx, projectId, edited, input);
+    } else if (row.kind === "outline") {
+      const targetDocId = documentId;
+      if (!targetDocId) invalid("documentId", "chapter-required");
+      const doc = ctx.document(targetDocId);
+      if (projectId && doc.projectId !== projectId) invalid("documentId", "project-mismatch");
+      const existingPlan = ctx.planning(doc.id) ?? {};
+      const existingSections =
+        existingPlan.sections && typeof existingPlan.sections === "object" && !Array.isArray(existingPlan.sections)
+          ? (existingPlan.sections as Record<string, string>)
+          : {};
+      const incomingSections =
+        edited.sections && typeof edited.sections === "object" && !Array.isArray(edited.sections)
+          ? (edited.sections as Record<string, unknown>)
+          : {};
+      const mergedSections: Record<string, string> = { ...existingSections };
+      for (const [k, v] of Object.entries(incomingSections)) {
+        if (typeof v === "string" && v.trim()) mergedSections[k] = v.trim();
+      }
+      const nextPlan: Record<string, unknown> = {
+        ...existingPlan,
+        ...(typeof edited.viewpoint === "string" && edited.viewpoint.trim() ? { viewpoint: edited.viewpoint.trim() } : {}),
+        ...(typeof edited.target === "number" && Number.isFinite(edited.target) && edited.target > 0
+          ? { target: Math.round(edited.target) }
+          : {}),
+        ...(typeof edited.lockedFacts === "string" ? { lockedFacts: edited.lockedFacts.trim() } : {}),
+        ...(typeof edited.knowledge === "string" ? { knowledge: edited.knowledge.trim() } : {}),
+        sections: mergedSections,
+      };
+      ctx.savePlanning(doc, nextPlan);
+      committed = { documentId: doc.id, planning: nextPlan };
     }
 
     if (projectId && (row.kind === "deconstruct" || row.kind === "technique")) {

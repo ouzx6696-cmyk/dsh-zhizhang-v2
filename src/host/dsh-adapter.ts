@@ -44,6 +44,20 @@ export interface HostToolRegistrar<TTool = unknown> {
 }
 
 /**
+ * `ctx.systemPrompt.register` payload inferred from public DsH 0.2.x docs.
+ * Renders a lightweight progressive-disclosure context fragment dynamically.
+ */
+export interface HostSystemPromptSection {
+  readonly id: string;
+  readonly weight?: number;
+  readonly render: () => string | null | undefined;
+}
+
+export interface HostSystemPromptRegistrar {
+  register(section: HostSystemPromptSection): Disposer;
+}
+
+/**
  * Cordis-style plugin context. `get`/`inject` are optional on purpose: older
  * hosts only expose services as properties, and both paths must keep working.
  */
@@ -52,13 +66,14 @@ export interface DsHPluginContext {
   readonly llm: LlmTransport;
   readonly logger: HostLogger;
   readonly tools?: HostToolRegistrar;
+  readonly systemPrompt?: HostSystemPromptRegistrar;
   readonly configForms?: DsHConfigFormRegistrar;
   get?<T = unknown>(name: string): T | undefined;
   inject?(deps: readonly string[], callback: (sub: DsHPluginContext) => void): Disposer | void;
   effect(setup: () => Disposer, name: string): void;
 }
 
-export type HostServiceName = "connection" | "llm" | "tools" | "configForms";
+export type HostServiceName = "connection" | "llm" | "tools" | "systemPrompt" | "configForms";
 
 export interface HostServiceContract {
   readonly name: HostServiceName;
@@ -88,8 +103,14 @@ export const HOST_SERVICE_CONTRACTS: readonly HostServiceContract[] = [
   {
     name: "tools",
     required: false,
-    purpose: "注册 11 个声明式对话工具（番茄 7 只读 + 3 提案，头条 1 只读）",
+    purpose: "注册全套 DsH 共创与渐进披露对话工具（核心 3 + 番茄 18 + 头条 2）",
     source: "DsH 0.2.x plugin docs · ctx.tools.register（未录制）",
+  },
+  {
+    name: "systemPrompt",
+    required: false,
+    purpose: "注入轻量级渐进披露协同系统提示（当前作品/章节焦点、协作模式、已挂载技法目录）",
+    source: "DsH 0.2.x plugin docs · ctx.systemPrompt.register（未录制）",
   },
   {
     name: "configForms",

@@ -3,13 +3,16 @@ import type {
   ActiveContextCrumbDto,
   AiProposalDto,
   AiProposalKind,
+  AutopilotBatchDto,
   ChapterDiagnosticsReportDto,
-  ChapterReadDto,
-  CreationProcessReportDto,
-  DailyOutputStatsDto,
+  ChapterStatusWord,
+  ContextTuningConfigDto,
   ForeshadowDto,
   ForeshadowStatus,
   LocalBundleFileDto,
+  MaterialCommitSummaryDto,
+  MaterialIngestSessionDto,
+  NovelTreeDto,
   ProjectControlsDto,
   ProjectExportBundleDto,
   ProjectImportSummaryDto,
@@ -26,7 +29,6 @@ import type {
   ExportStatusDto,
   TitleMatrixDto,
 } from "./toutiao.ts";
-import type { ChapterStatusWord, NovelTreeDto } from "./fanqie.ts";
 
 export type Product = "fanqie" | "toutiao";
 export type ProductKind = Product;
@@ -42,7 +44,12 @@ export type RunStatusWord =
   | "failed"
   | "cancelled";
 
-export type UnifiedJobKind = "draft_generation" | "proposal_extraction" | "selection_rewrite";
+export type UnifiedJobKind =
+  | "draft_generation"
+  | "proposal_extraction"
+  | "selection_rewrite"
+  | "autopilot_pipeline"
+  | "material_normalize";
 
 export type UnifiedJobState =
   | "prepared"
@@ -229,7 +236,7 @@ export interface ContextSlotReportDto {
   readonly priority: ContextSlotPriority;
   readonly rawTokens: number;
   readonly includedTokens: number;
-  readonly status: "included" | "truncated" | "dropped" | "empty";
+  readonly status: "included" | "truncated" | "dropped" | "empty" | "disabled";
 }
 
 export interface ContextAssemblyReportDto {
@@ -246,10 +253,16 @@ export interface ContextAssemblyReportDto {
   readonly l3Tokens?: number;
   readonly l1Version?: number;
   readonly l1DirtyCount?: number;
+  readonly l1DirtyThreshold?: number;
   readonly l1Budget?: number;
+  readonly contextCustomizedCount?: number;
   readonly prefixSha256?: string;
   readonly l2Sha256?: string;
   readonly estimatedCacheableRatio?: number;
+  readonly dueForeshadowCount?: number;
+  readonly antiEchoPhraseCount?: number;
+  readonly autoMatchedTechniqueIds?: readonly string[];
+  readonly conflictSkippedTechniqueIds?: readonly string[];
   readonly slots: readonly ContextSlotReportDto[];
   readonly activeTechniqueIds: readonly string[];
   readonly activeDeconstructionIds: readonly string[];
@@ -307,48 +320,6 @@ export interface PlanningDto {
 }
 export type PlanningView = PlanningDto;
 
-export interface BackupInfoDto {
-  readonly id: string;
-  readonly valid: boolean;
-  readonly schema?: string;
-  readonly createdAt?: string;
-  readonly sizeBytes?: number;
-  readonly entryCount?: number;
-}
-
-export interface RevisionCompactResultDto {
-  readonly examined: number;
-  readonly deleted: number;
-  readonly kept: number;
-  readonly dryRun?: boolean;
-}
-
-export interface ProjectBootstrapInputDto {
-  readonly product: Product;
-  readonly name: string;
-  readonly authorIntent?: string;
-  readonly currentFocus?: string;
-  readonly pacingTier?: string;
-  readonly genreTags?: readonly string[];
-  readonly dailyTarget?: number;
-  readonly volumeTitle?: string;
-  readonly actTitle?: string;
-  readonly chapterTitle?: string;
-  readonly chapterBody?: string;
-  readonly techniques?: readonly Readonly<Record<string, unknown>>[];
-  readonly settings?: readonly Readonly<Record<string, unknown>>[];
-}
-
-export interface ProjectBootstrapResultDto {
-  readonly projectId: string;
-  readonly volumeId?: string | null;
-  readonly actId?: string | null;
-  readonly documentId?: string | null;
-  readonly revisionId?: string | null;
-  readonly techniquesCreated: number;
-  readonly settingsProposed: number;
-}
-
 export interface ChunkedImportInputDto {
   readonly importId: string;
   readonly part: number;
@@ -371,6 +342,78 @@ export interface LlmDefaultsDto {
   readonly model: string;
 }
 
+export type CollaborationMode = "cautious" | "co_create";
+
+export interface ProjectCollaborationDto {
+  readonly projectId: string;
+  readonly collaborationMode: CollaborationMode;
+  readonly agentPromptInjection: boolean;
+  readonly updatedAt: number;
+}
+
+export interface WorkspaceFocusDto {
+  readonly projectId: string | null;
+  readonly documentId: string | null;
+  readonly product: Product | null;
+  readonly projectName: string | null;
+  readonly documentTitle: string | null;
+  readonly documentState: string | null;
+  readonly collaborationMode: CollaborationMode;
+  readonly agentPromptInjection: boolean;
+  readonly viewMode: string;
+  readonly updatedAt: number;
+}
+
+export interface AgentDraftWriteDto {
+  readonly id: string;
+  readonly projectId: string;
+  readonly documentId: string;
+  readonly mode: "candidate" | "direct_write";
+  readonly runId: string | null;
+  readonly candidateId: string | null;
+  readonly previousRevisionId: string | null;
+  readonly previousBody?: string | null;
+  readonly newRevisionId: string | null;
+  readonly summary: string;
+  readonly techniqueIds: readonly string[];
+  readonly rolledBack: boolean;
+  readonly createdAt: number;
+}
+
+export interface AgentWriteSubmissionResultDto {
+  readonly writeId: string;
+  readonly mode: "candidate" | "direct_write";
+  readonly collaborationMode: CollaborationMode;
+  readonly projectId: string;
+  readonly documentId: string;
+  readonly runId: string | null;
+  readonly candidateId: string | null;
+  readonly previousRevisionId: string | null;
+  readonly newRevisionId: string | null;
+  readonly charCount: number;
+  readonly diagnosticsSummary: Readonly<Record<string, unknown>> | null;
+  readonly message: string;
+}
+
+export interface SkillIndexEntryDto {
+  readonly id: string;
+  readonly title: string;
+  readonly category: string;
+  readonly triggerWhen: string;
+  readonly conflictGroup?: string;
+  readonly mountedMode?: string | null;
+}
+
+export interface CollaborationSystemPromptDto {
+  readonly enabled: boolean;
+  readonly text: string;
+  readonly tokenEstimate: number;
+  readonly focus: WorkspaceFocusDto;
+  readonly mountedSkills: readonly SkillIndexEntryDto[];
+  readonly pendingProposalCount: number;
+  readonly pendingCandidateRunId: string | null;
+}
+
 export interface WorkspaceSnapshot {
   readonly unchanged?: false;
   readonly projects?: readonly ProjectSummary[];
@@ -388,6 +431,10 @@ export interface WorkspaceSnapshot {
   readonly planning?: PlanningDto | null;
   readonly scenario?: ArticleScenarioDto | null;
   readonly pendingJobs?: readonly PendingJobDto[];
+  readonly collaborationMode?: CollaborationMode;
+  readonly agentPromptInjection?: boolean;
+  readonly latestAgentWrite?: AgentDraftWriteDto | null;
+  readonly pendingProposalCount?: number;
   readonly treeSeq?: number;
   readonly globalSeq?: number;
   readonly llmDefaults?: LlmDefaultsDto;
@@ -514,18 +561,38 @@ export type WorkspaceAction =
   | "selection.rewrite"
   | "controls.get"
   | "controls.save"
-  | "chapter.read"
-  | "project.bootstrap"
+  | "controls.reset_context"
   | "foreshadow.create"
   | "foreshadow.patch"
-  | "backup.create"
-  | "backup.list"
-  | "setting.revoke_known"
-  | "chapter.creation_report"
-  | "project.daily_stats"
-  | "revisions.compact"
   | "cache.snapshot"
-  | "cache.rebuild";
+  | "cache.rebuild"
+  | "material.preprocess"
+  | "material.list"
+  | "material.get"
+  | "material.update_chunks"
+  | "material.extract"
+  | "material.propose_bundle"
+  | "material.commit"
+  | "material.discard"
+  | "autopilot.start"
+  | "autopilot.list"
+  | "autopilot.get"
+  | "autopilot.pause"
+  | "autopilot.resume"
+  | "autopilot.cancel"
+  | "autopilot.rollback_chapter"
+  | "focus.get"
+  | "focus.set"
+  | "project.collaboration.get"
+  | "project.collaboration.set"
+  | "agent.submit_draft"
+  | "agent.patch_paragraphs"
+  | "agent.rollback_write"
+  | "agent.writes.list"
+  | "agent.system_prompt.preview"
+  | "technique.get"
+  | "deconstruct.get"
+  | "chapter.outline.propose";
 
 export interface ActionEntry<I = Readonly<Record<string, unknown>>, O = unknown> {
   readonly input: I;
@@ -536,7 +603,6 @@ export type ActionMap = {
   readonly [K in WorkspaceAction]: ActionEntry;
 } & {
   readonly "project.create": ActionEntry<{ readonly product: Product; readonly name: string }, ProjectSummary>;
-  readonly "project.bootstrap": ActionEntry<ProjectBootstrapInputDto, ProjectBootstrapResultDto>;
   readonly "document.create": ActionEntry<
     {
       readonly projectId: string;
@@ -552,9 +618,6 @@ export type ActionMap = {
     { readonly documentId: string; readonly baseRevisionId: string | null; readonly body: string; readonly key?: string },
     { readonly revisionId: string }
   >;
-  readonly "chapter.read": ActionEntry<{ readonly projectId?: string; readonly documentId: string }, ChapterReadDto>;
-  readonly "chapter.creation_report": ActionEntry<{ readonly documentId: string }, CreationProcessReportDto>;
-  readonly "project.daily_stats": ActionEntry<{ readonly projectId: string; readonly days?: number }, DailyOutputStatsDto>;
   readonly "tree.get": ActionEntry<
     { readonly projectId: string; readonly ifSequence?: number; readonly ifTreeSeq?: number },
     NovelTreeDto | { readonly unchanged: true; readonly treeSeq?: number; readonly asOfSeq?: number }
@@ -570,9 +633,11 @@ export type ActionMap = {
       readonly agentToolsEnabled?: boolean;
       readonly dailyTarget?: number;
       readonly staleForeshadowGap?: number;
+      readonly contextTuning?: Partial<ContextTuningConfigDto>;
     },
     ProjectControlsDto
   >;
+  readonly "controls.reset_context": ActionEntry<{ readonly projectId: string }, ProjectControlsDto>;
   readonly "foreshadow.create": ActionEntry<
     {
       readonly projectId: string;
@@ -602,16 +667,6 @@ export type ActionMap = {
       readonly note?: string;
     },
     ForeshadowDto
-  >;
-  readonly "setting.revoke_known": ActionEntry<
-    { readonly projectId: string; readonly factId: string; readonly character: string; readonly reason?: string },
-    { readonly id: string; readonly factId: string; readonly revokedCharacter: string }
-  >;
-  readonly "backup.create": ActionEntry<{ readonly includeExports?: boolean; readonly label?: string }, BackupInfoDto>;
-  readonly "backup.list": ActionEntry<Readonly<Record<string, never>> | Readonly<Record<string, unknown>>, readonly BackupInfoDto[]>;
-  readonly "revisions.compact": ActionEntry<
-    { readonly projectId?: string; readonly documentId?: string; readonly retainRawDays?: number; readonly dryRun?: boolean },
-    RevisionCompactResultDto
   >;
   readonly "context.preview": ActionEntry<
     { readonly documentId: string; readonly instruction?: string; readonly tokenLimit?: number; readonly point?: number },
@@ -664,5 +719,67 @@ export type ActionMap = {
   readonly "cache.rebuild": ActionEntry<
     { readonly projectId: string; readonly budgetTokens?: number },
     BookCacheSnapshotDto
+  >;
+  readonly "material.preprocess": ActionEntry<
+    {
+      readonly projectId: string;
+      readonly files: readonly { readonly path: string; readonly content: string }[];
+      readonly sourceOrigin?: "workbench_upload" | "dsh_agent";
+    },
+    MaterialIngestSessionDto
+  >;
+  readonly "material.list": ActionEntry<{ readonly projectId: string }, readonly MaterialIngestSessionDto[]>;
+  readonly "material.get": ActionEntry<{ readonly sessionId: string }, MaterialIngestSessionDto>;
+  readonly "material.commit": ActionEntry<
+    { readonly sessionId: string; readonly editedBundle?: Readonly<Record<string, unknown>> },
+    MaterialCommitSummaryDto
+  >;
+  readonly "autopilot.list": ActionEntry<{ readonly projectId: string }, readonly AutopilotBatchDto[]>;
+  readonly "autopilot.get": ActionEntry<{ readonly batchId: string }, AutopilotBatchDto>;
+  readonly "focus.get": ActionEntry<Readonly<Record<string, unknown>>, WorkspaceFocusDto>;
+  readonly "focus.set": ActionEntry<
+    { readonly projectId?: string | null; readonly documentId?: string | null; readonly viewMode?: string },
+    WorkspaceFocusDto
+  >;
+  readonly "project.collaboration.get": ActionEntry<{ readonly projectId: string }, ProjectCollaborationDto>;
+  readonly "project.collaboration.set": ActionEntry<
+    {
+      readonly projectId: string;
+      readonly collaborationMode?: CollaborationMode;
+      readonly agentPromptInjection?: boolean;
+    },
+    ProjectCollaborationDto
+  >;
+  readonly "agent.submit_draft": ActionEntry<
+    {
+      readonly documentId: string;
+      readonly body: string;
+      readonly summary?: string;
+      readonly techniqueIds?: readonly string[];
+      readonly forceCandidate?: boolean;
+    },
+    AgentWriteSubmissionResultDto
+  >;
+  readonly "agent.patch_paragraphs": ActionEntry<
+    {
+      readonly documentId: string;
+      readonly patches: readonly { readonly paragraphIndex: number; readonly replacement: string }[];
+      readonly summary?: string;
+      readonly techniqueIds?: readonly string[];
+      readonly forceCandidate?: boolean;
+    },
+    AgentWriteSubmissionResultDto
+  >;
+  readonly "agent.rollback_write": ActionEntry<
+    { readonly writeId: string },
+    { readonly writeId: string; readonly documentId: string; readonly restoredRevisionId: string; readonly previousRevisionId: string }
+  >;
+  readonly "agent.writes.list": ActionEntry<
+    { readonly projectId?: string; readonly documentId?: string; readonly limit?: number },
+    readonly AgentDraftWriteDto[]
+  >;
+  readonly "agent.system_prompt.preview": ActionEntry<
+    { readonly projectId?: string; readonly documentId?: string },
+    CollaborationSystemPromptDto
   >;
 };
