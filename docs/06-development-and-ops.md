@@ -54,7 +54,7 @@
 
 - **目录与路径约束**：交付写入（`src/host/delivery-io.ts`）、整书导出（`src/storage/local-io.ts`）与备份恢复（`src/storage/backup.ts`）均校验合法文件名并锁定目标根目录，阻断路径穿越与误覆写。
 - **HTTP 与浏览器头防护**：全站启用 `Content-Security-Policy`（`default-src 'self'`）、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer` 与 `Cache-Control: no-store`；所有写入型 `POST` 接口强制校验 `application/json` 与 `<= 2 MiB` 体积上限。
-- **脱敏异常与诊断**：非预期错误仅返回 `diagnosticId`；`GET /api/zhizhang/diag` 返回版本（`3.1.0`）、Schema ID（`zhizhang/3.0`）、作业对账统计、`agentToolCount` 与 `systemPrompt` 注册状态，严禁输出密钥、本机路径或正文原文。
+- **脱敏异常与诊断**：非预期错误仅返回 `diagnosticId`；`GET /api/zhizhang/diag` 返回版本（`3.2.0`）、Schema ID（`zhizhang/3.0`）、作业对账统计、`agentToolCount` 与 `systemPrompt` 注册状态，严禁输出密钥、本机路径或正文原文。
 
 ### 3.2 热冷备份与安全恢复（`src/storage/backup.ts`）
 

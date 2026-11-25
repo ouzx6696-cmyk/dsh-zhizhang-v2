@@ -37,6 +37,7 @@ const REDLINE_LABELS: Readonly<Record<string, string>> = {
   high_severity_review: "高危定性审稿警报",
   budget_cap: "批次 Token 预算耗尽",
   consecutive_errors: "连续异常中断",
+  candidate_conflict: "章节版本冲突",
   chapter_gate_checkpoint: "逐章门控检查点",
 };
 
@@ -124,7 +125,7 @@ export function createAutopilotPanel(
     }
   }
 
-  function stepStateFor(batch: AutopilotBatchDto, stepId: AutopilotStepKind): "done" | "active" | "paused" | "pending" {
+  function stepStateFor(batch: AutopilotBatchDto, stepId: AutopilotStepKind): "done" | "active" | "paused" | "skipped" | "pending" {
     const currentDoc = batch.chapterIds[batch.currentChapterIndex] ?? batch.chapterIds[batch.chapterIds.length - 1];
     const docSteps = batch.steps.filter((s) => s.documentId === currentDoc);
     const matching = docSteps.filter((s) =>
@@ -135,6 +136,7 @@ export function createAutopilotPanel(
       return "active";
     }
     if (matching.some((s) => s.status === "completed")) return "done";
+    if (matching.some((s) => s.status === "skipped")) return "skipped";
     return "pending";
   }
 
@@ -235,7 +237,7 @@ export function createAutopilotPanel(
       value: adoptionPolicy,
       options: [
         { value: "working_draft_snapshot", label: "写入工作稿（留快照可回滚）" },
-        { value: "candidate_only", label: "仅暂存候选态（不改工作稿）" },
+        { value: "candidate_only", label: "生成待审候选稿" },
       ],
       onChange: (val) => {
         adoptionPolicy = val === "candidate_only" ? "candidate_only" : "working_draft_snapshot";
@@ -337,7 +339,7 @@ export function createAutopilotPanel(
       for (const step of STEP_ORDER) {
         const st = stepStateFor(batch, step.id);
         const li = el("li", { className: `autopilot-step step-${st}` });
-        const stateWord = st === "done" ? "完成" : st === "active" ? "进行中" : st === "paused" ? "暂停" : "待执行";
+        const stateWord = st === "done" ? "完成" : st === "active" ? "进行中" : st === "paused" ? "暂停" : st === "skipped" ? "跳过" : "待执行";
         li.append(
           el("span", { className: "autopilot-step-name", text: step.label }),
           el("span", { className: "autopilot-step-state", text: stateWord }),
@@ -345,6 +347,24 @@ export function createAutopilotPanel(
         track.append(li);
       }
       monitorBody.push(track);
+
+      const pending = batch.candidates.filter((candidate) => candidate.state === "awaiting-author");
+      if (pending.length) {
+        const entries = el("div", { className: "actions" });
+        for (const candidate of pending) {
+          const title = host.getState().snapshot.documents?.find((doc) => doc.id === candidate.documentId)?.title ?? "章节";
+          entries.append(createButton({
+            label: `审阅《${title}》候选稿`,
+            variant: "secondary",
+            size: "sm",
+            onClick: () => void host.perform(async () => {
+              await host.selectDocument(candidate.documentId);
+              host.switchPipelineTab("workflow");
+            }),
+          }));
+        }
+        monitorBody.push(entries);
+      }
 
       // Red-line / gate pause card
       if ((batch.status === "paused_redline" || batch.status === "paused_gate") && batch.pauseReason) {
@@ -393,7 +413,7 @@ export function createAutopilotPanel(
                 await refreshBatches(false);
               }),
           }),
-          createButton({
+          ...(batch.adoptionPolicy === "working_draft_snapshot" ? [createButton({
             label: "一键回滚本章",
             variant: "danger",
             size: "sm",
@@ -414,7 +434,7 @@ export function createAutopilotPanel(
                 await host.load();
                 await refreshBatches(false);
               }),
-          }),
+          })] : []),
           createButton({
             label: "终止批次",
             variant: "ghost",
@@ -462,7 +482,7 @@ export function createAutopilotPanel(
               }),
           }),
         );
-      } else if (batch.preBatchRevisions[activeDocId] !== undefined) {
+      } else if (batch.adoptionPolicy === "working_draft_snapshot" && batch.preBatchRevisions[activeDocId] !== undefined) {
         batchActions.append(
           createButton({
             label: "回滚当前章至批次前快照",

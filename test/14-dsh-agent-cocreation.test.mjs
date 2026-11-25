@@ -491,6 +491,19 @@ test("bound DsH tools use the correct project and preserve the author revision o
       assert.equal(plan.mode, "direct_write");
       assert.equal((await host.command("chapter.outline.rollback", { documentId, writeId: plan.writeId })).body.ok, true);
       assert.equal((await host.getState({ projectId: a, documentId })).body.result.planning, null);
+
+      const next = (await host.command("document.create", { projectId: a, title: "甲书第二章" })).body.result.id;
+      const previousVersionId = write.newRevisionId;
+      const context = await tools.invoke("zhizhang_read_context", { documentId: next, previousVersionId }, exec);
+      assert.equal(context.continuationSource.id, previousVersionId);
+      assert.match(context.dynamicTail, /Agent 版本/);
+      assert.doesNotMatch(context.dynamicTail, /作者后续稿/);
+      const continuation = await tools.invoke("zhizhang_submit_draft", {
+        documentId: next, baseRevisionId: null, body: "第二章接着写。", previousVersionId, forceCandidate: true,
+      }, { ...exec, callId: "continue-draft" });
+      const run = await host.command("run.detail", { documentId: next, runId: continuation.runId });
+      assert.equal(JSON.parse(run.body.result.frozenInput).continuationSource.id, previousVersionId);
+      assert.equal(run.body.result.continuationState, "changed");
     } finally {
       await host.close();
     }

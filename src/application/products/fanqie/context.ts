@@ -1,4 +1,5 @@
 import type {
+  ChapterVersionDto,
   ContextBundleDto,
   ContextSlotReportDto,
   DeconstructionDto,
@@ -33,6 +34,7 @@ import { buildFanqieWritingDirective } from "../../../workflow/prompts/index.ts"
 import { estimateTokenCount, WRITER_SYSTEM } from "../../../workflow/writing-budget.ts";
 import type { WritingPhase } from "../../../workflow/writing-stages.ts";
 import { count, invalid, type DocumentRow, type Input, type WorkspaceContext } from "../../context.ts";
+import { chapterVersionOptions, resolveContinuation } from "../../continuation.ts";
 import type { ProductGenerationRunner } from "../../product-line.ts";
 import {
   buildVolumeMilestoneL2,
@@ -267,12 +269,14 @@ export function buildFanqieFrozenContext(
   readonly relatedChapters: readonly RelatedChapterScoreDto[];
   readonly scenario: null;
   readonly contextBundle: ContextBundleDto;
+  readonly continuationSource: ChapterVersionDto | null;
 } {
   const plan = ctx.planning(row.id);
   const point = input.point === undefined ? 1 : count(input, "point");
   if (point === 0) invalid("point", "positive-integer-required");
   const at = anchor(row.id, point);
   const order = ctx.chapterOrder(row.projectId);
+  const continuation = resolveContinuation(ctx, row, input, order);
   const facts = approvedFacts(ctx, row.projectId);
   const viewpoint = typeof plan?.viewpoint === "string" ? plan.viewpoint : undefined;
   const knownFacts = viewpoint ? settingsAt(facts, order, at, viewpoint) : [];
@@ -396,21 +400,11 @@ export function buildFanqieFrozenContext(
   let prevChapterTail = "";
   const summaryLines: string[] = [];
   if (currentIdx > 0) {
-    if (tuning.includePrevTail && tuning.prevTailChars > 0) {
-      const prevId = order[currentIdx - 1];
-      const prevRow = stmt(ctx.db, `
-        SELECT a.title, r.body
-        FROM author_documents a
-        JOIN documents d ON d.document_id = a.id
-        LEFT JOIN revisions r ON r.revision_id = d.current_revision_id
-        WHERE a.id = ?;
-      `).get(prevId) as { title: string; body: string | null } | undefined;
-      if (prevRow?.body) {
-        const tail = prevRow.body.trimEnd();
-        prevChapterTail = tail.length > tuning.prevTailChars
-          ? `《${prevRow.title}》末尾衔接：\n…${tail.slice(-tuning.prevTailChars)}`
-          : `《${prevRow.title}》末尾衔接：\n${tail}`;
-      }
+    if (tuning.includePrevTail && tuning.prevTailChars > 0 && continuation?.body) {
+      const tail = continuation.body.trimEnd();
+      const excerpt = tail.length > tuning.prevTailChars ? `…${tail.slice(-tuning.prevTailChars)}` : tail;
+      const versionNote = continuation.source.current ? "" : "（本次接续以上章选定版本为准）";
+      prevChapterTail = `《${continuation.source.title}》末尾衔接${versionNote}：\n${excerpt}`;
     }
 
     if (tuning.includeRollingSummaries && tuning.rollingSummaryCount > 0) {
@@ -419,6 +413,7 @@ export function buildFanqieFrozenContext(
       const prevSlice = order.slice(recentStart, currentIdx);
       const getSummary = stmt(ctx.db, "SELECT title, summary FROM author_documents WHERE id = ?;");
       for (const id of prevSlice) {
+        if (id === continuation?.source.documentId && !continuation.source.current) continue;
         const ch = getSummary.get(id) as { title: string; summary: string } | undefined;
         if (ch && ch.summary.trim()) {
           summaryLines.push(`- 《${ch.title}》：${ch.summary.trim()}`);
@@ -462,7 +457,9 @@ export function buildFanqieFrozenContext(
       WHERE d.document_id = ?;
     `);
     for (const prevId of echoIds) {
-      const prev = readEchoBody.get(prevId) as { body?: string | null } | undefined;
+      const prev = prevId === continuation?.source.documentId
+        ? continuation
+        : readEchoBody.get(prevId) as { body?: string | null } | undefined;
       if (prev?.body) recentBodiesForEcho.push(prev.body);
     }
   }
@@ -732,6 +729,7 @@ export function buildFanqieFrozenContext(
     knownFacts,
     relatedChapters,
     scenario: null,
+    continuationSource: continuation?.source ?? null,
     contextBundle: {
       stablePrefix,
       bookPrefix: effectiveBookPrefix,
@@ -783,6 +781,8 @@ export function previewContext(ctx: WorkspaceContext, row: DocumentRow, input: I
     return {
       knownAt: built.knownAt,
       knownFactsCount: built.knownFacts.length,
+      continuationSource: built.continuationSource,
+      previousChapterVersions: chapterVersionOptions(ctx, row),
       report: built.contextBundle.report,
       relatedChapters: built.relatedChapters,
       recommendations,

@@ -44,6 +44,7 @@ export function createFanqieAgentTools(workspace: ProductAgentToolFacade): reado
         documentId: { type: "string" },
         instruction: { type: "string" },
         tokenLimit: { type: "number" },
+        previousVersionId: { type: "string", description: "Optional candidate or revision ID from the immediately preceding chapter. Omit to use the current working version." },
       },
       required: ["documentId"],
       outputDescription: "Assembled stablePrefix + dynamicTail context bundle and token budget report.",
@@ -53,6 +54,7 @@ export function createFanqieAgentTools(workspace: ProductAgentToolFacade): reado
           includeText: true,
           ...(typeof args.instruction === "string" ? { instruction: args.instruction } : {}),
           ...(typeof args.tokenLimit === "number" ? { tokenLimit: args.tokenLimit } : {}),
+          ...(typeof args.previousVersionId === "string" ? { previousVersionId: args.previousVersionId } : {}),
         }),
     },
     {

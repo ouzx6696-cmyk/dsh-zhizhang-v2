@@ -21,6 +21,7 @@ import { applyWorkbench } from "../src/host/plugin.ts";
 import {
   createMockDsHHost,
   createStrictToolRegistrar,
+  createTestWorkspace,
   withTempDir,
 } from "../support/harness.mjs";
 
@@ -532,6 +533,136 @@ test("Tiered Autopilot: 5-step pipeline, byte-identical L0+L1+L2 prefix reuse, g
       await host.close();
     }
   });
+});
+
+test("Autopilot persists refined candidates across the chapter gate and reopens the selected upstream text", async (t) => {
+  const workspace = createTestWorkspace(t, { mode: "file", wal: true });
+  let { app } = workspace;
+  const first = workspace.createFanqieChapter({ body: "作者现有正文。上章原本在柴房收尾。" });
+  const { projectId } = first;
+  const second = app.mutation("document.create", { projectId, title: "第二章" }).id;
+  const secondRevision = app.mutation("draft.save", {
+    documentId: second, baseRevisionId: null, body: "作者第二章原稿。",
+  }).revisionId;
+  const generated = "赵婵把书放回架上。\n\n她很快就回屋了。";
+  const ending = "一封赤蜡封口的密信从书架上掉下来。门外响起一声：“别拆！”";
+  const seenWrites = [];
+  const model = {
+    usedTokens: () => 0,
+    async complete({ phase, prompt }) {
+      switch (phase) {
+        case "beatPlan":
+          return JSON.stringify({
+            openingHook: "密信落地",
+            beats: [{ index: 1, scene: "书架", conflict: "有人守着门", turn: "发现密信", targetChars: 600 }],
+            endingHook: "门外发出警告",
+          });
+        case "write":
+          seenWrites.push(prompt);
+          return generated;
+        case "chapterReview":
+          return JSON.stringify({
+            observations: [{ dimension: "continuity", severity: "error", quote: "她很快就回屋了", suggestion: "明确她为何停下" }],
+          });
+        case "surgicalPatch":
+          return JSON.stringify({ patches: [{ paragraphIndex: 2, replacement: ending, reason: "让动作导向悬念" }] });
+        default:
+          assert.fail(`candidate-only should not call ${phase}`);
+      }
+    },
+  };
+  const { id: batchId } = app.mutation("autopilot.start", {
+    projectId, scope: "multi_chapter", chapterIds: [first.documentId, second],
+    autonomyMode: "chapter_gate", adoptionPolicy: "candidate_only",
+  });
+  const runBatch = (overrideRedLine = true) => app.runAutopilotJob({
+    projectId, batchId, overrideRedLine, caller: model, signal: new AbortController().signal,
+  });
+  const paused = await runBatch();
+  assert.equal(paused.status, "paused_gate");
+  assert.equal(paused.candidates.length, 1);
+  const firstCandidate = paused.candidates[0];
+  assert.equal(firstCandidate.state, "awaiting-author");
+  app = workspace.reopen();
+  const firstState = app.snapshot(projectId, first.documentId);
+  assert.equal(firstState.active.revisionId, first.revisionId);
+  assert.equal(firstState.runs[0].candidateId, firstCandidate.candidateId);
+  assert.match(firstState.runs[0].candidateBody, /赤蜡封口/);
+  assert.doesNotMatch(firstState.runs[0].candidateBody, /她很快就回屋/);
+
+  const context = (previousVersionId) => app.mutation("context.preview", {
+    documentId: second, previousVersionId, includeText: true,
+  });
+  assert.match(context().dynamicTail, /在柴房收尾/);
+  assert.match(context(firstCandidate.candidateId).dynamicTail, /赤蜡封口/);
+  assert.doesNotMatch(context(firstCandidate.candidateId).dynamicTail, /在柴房收尾/);
+  assert.throws(() => context(secondRevision), { code: "input.invalid" });
+  const another = workspace.createFanqieChapter({ projectName: "另一本书" });
+  assert.throws(() => context(another.revisionId), { code: "input.invalid" });
+  assert.ok(app.snapshot(projectId, second).previousChapterVersions.some((v) => v.id === firstCandidate.candidateId));
+
+  const done = await runBatch();
+  assert.equal(done.status, "completed");
+  assert.equal(done.candidates.length, 2);
+  assert.equal(seenWrites.length, 2);
+  assert.match(seenWrites[1], /赤蜡封口/);
+  assert.doesNotMatch(seenWrites[1], /在柴房收尾/);
+  assert.equal(done.steps.filter((step) => step.stepKind === "fact_sync" && step.status === "skipped").length, 2);
+  assert.equal(app.snapshot(projectId, second).pendingProposalCount, 0);
+  const secondCandidate = done.candidates.find((candidate) => candidate.documentId === second);
+  const run = app.mutation("run.detail", { documentId: second, runId: secondCandidate.runId });
+  assert.equal(JSON.parse(run.frozenInput).continuationSource.id, firstCandidate.candidateId);
+  assert.equal(run.continuationState, "pending");
+  assert.equal(app.snapshot(projectId, second).active.revisionId, secondRevision);
+  app.mutation("candidate.adopt", {
+    documentId: second, runId: secondCandidate.runId, baseRevisionId: secondRevision, key: "adopt-second",
+  });
+  assert.match(app.snapshot(projectId, second).active.body, /赤蜡封口/);
+  const firstAdopted = app.mutation("candidate.adopt", {
+    documentId: first.documentId, runId: firstCandidate.runId, baseRevisionId: first.revisionId, key: "adopt-first",
+  });
+  const details = () => app.mutation("run.detail", { documentId: second, runId: secondCandidate.runId });
+  assert.equal(details().continuationState, "aligned");
+  app.mutation("draft.save", { documentId: first.documentId, baseRevisionId: firstAdopted.revisionId, body: "作者删掉了上一章的密信。" });
+  assert.equal(details().continuationState, "changed");
+  assert.equal((await runBatch()).candidates.length, 2);
+  assert.throws(() => app.mutation("autopilot.rollback_chapter", {
+    batchId, documentId: first.documentId,
+  }), { code: "gate.denied" });
+
+  const secondWorking = app.snapshot(projectId, second).active.revisionId;
+  const { id: manualRun } = app.mutation("run.start", {
+    documentId: second, baseRevisionId: secondWorking, key: "continue-from-first-old-revision",
+    instruction: "沿上章旧稿续写", tokenLimit: 12000, previousVersionId: first.revisionId,
+  });
+  const manualDetail = app.mutation("run.detail", { documentId: second, runId: manualRun });
+  assert.equal(JSON.parse(manualDetail.frozenInput).continuationSource.id, first.revisionId);
+  assert.match(JSON.parse(manualDetail.frozenInput).contextBundle.dynamicTail, /在柴房收尾/);
+
+  const third = app.mutation("document.create", { projectId, title: "第三章" }).id;
+  const redlineBatch = app.mutation("autopilot.start", { projectId, documentId: third, adoptionPolicy: "candidate_only" });
+  const redlineCaller = {
+    ...model,
+    complete(input) {
+      if (input.phase === "surgicalPatch") return JSON.stringify({ patches: [] });
+      return model.complete(input);
+    },
+  };
+  const attempt = (overrideRedLine) => app.runAutopilotJob({
+    projectId, batchId: redlineBatch.id, overrideRedLine, caller: redlineCaller, signal: new AbortController().signal,
+  });
+  const stopped = await attempt(false);
+  assert.equal(stopped.status, "paused_redline");
+  assert.equal(stopped.candidates.length, 1);
+  const newChapter = app.snapshot(projectId, third);
+  assert.equal(newChapter.active.body, "");
+  assert.equal(newChapter.runs[0].candidateBody, generated);
+  const callsBeforeResume = seenWrites.length;
+  assert.equal((await attempt(false)).status, "paused_redline");
+  const resumed = await attempt(true);
+  assert.equal(resumed.status, "completed");
+  assert.equal(resumed.candidates[0].candidateId, stopped.candidates[0].candidateId);
+  assert.equal(seenWrites.length, callsBeforeResume);
 });
 
 test("User-tunable ContextTuningConfig: bounds clamping, slot toggles, reading windows & one-click reset to defaults", async () => {

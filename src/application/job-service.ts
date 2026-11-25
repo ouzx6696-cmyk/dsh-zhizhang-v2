@@ -44,6 +44,7 @@ import {
   type RunRow,
   type WorkspaceContext,
 } from "./context.ts";
+import { continuationState, readContinuationSource } from "./continuation.ts";
 import { sha256Text } from "./digest.ts";
 import { isDocumentBoundProposalKind } from "./proposal-kinds.ts";
 import type { ProductGenerationRunner, ProductLineRegistry } from "./product-line.ts";
@@ -316,11 +317,13 @@ export function createJobService(
       const targetBody = hasMerged ? (input.mergedBody as string) : candidate.body;
       const revision = saveDraftForRow(ctx.document(row.id), targetBody);
       ctx.stage(current, "applied");
+      const continuationSource = row.product === "fanqie" ? readContinuationSource(current.frozenInput) : null;
       ctx.event(row.projectId, "candidate", "candidate.adopted", {
         documentId: row.id,
         candidateId: current.candidateId,
         revisionId: revision.revisionId,
         adoptionMode,
+        ...(continuationSource ? { continuationSource } : {}),
       });
       return input.adoptionMode !== undefined || hasMerged ? { ...revision, adoptionMode } : revision;
     });
@@ -338,6 +341,7 @@ export function createJobService(
     return ctx.read(() => {
       const detail = ctx.run(text(input, "runId"));
       if (detail.documentId !== row.id) invalid("runId", "document-mismatch");
+      const source = row.product === "fanqie" ? readContinuationSource(detail.frozenInput) : null;
       const meta = stmt(db, "SELECT context_trace AS contextTrace, recovery_hints AS recoveryHints FROM author_runs WHERE id = ?;")
         .get(detail.id) as { contextTrace?: string | null; recoveryHints?: string | null } | undefined;
       const candidate = detail.candidateId
@@ -381,6 +385,7 @@ export function createJobService(
       }
       return {
         ...detail,
+        ...(source ? { continuationState: continuationState(ctx, row, source) } : {}),
         candidate,
         attempts: jobs.historyForRun(detail.id),
         calls,

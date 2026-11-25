@@ -424,6 +424,10 @@ export function compactAutoSaveRevisions(
     }
     if (tableExists(db, "author_runs")) {
       collect("SELECT base_revision_id AS rev FROM author_runs WHERE base_revision_id IS NOT NULL;");
+      collect(`
+        SELECT json_extract(frozen_input, '$.continuationSource.id') AS rev FROM author_runs
+        WHERE CASE WHEN json_valid(frozen_input) THEN json_extract(frozen_input, '$.continuationSource.kind') = 'revision' END;
+      `);
     }
     if (tableExists(db, "author_chapter_memory_sync")) {
       const cols = new Set(

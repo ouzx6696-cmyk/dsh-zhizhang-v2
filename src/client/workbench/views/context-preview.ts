@@ -1,4 +1,5 @@
 import type {
+  ChapterVersionDto,
   ContextAssemblyReportDto,
   ContextTuningConfigDto,
   TechniqueRecommendationDto,
@@ -131,6 +132,7 @@ const SLOT_TOGGLES: readonly ToggleFieldSpec[] = [
 ];
 
 export interface ContextPreviewResult {
+  readonly continuationSource?: ChapterVersionDto | null;
   readonly report: ContextAssemblyReportDto;
   readonly recommendations: readonly TechniqueRecommendationDto[];
   readonly contextTuning?: ContextTuningConfigDto;
@@ -166,6 +168,8 @@ export function createContextPreviewPanel(container: HTMLElement, host: Workbenc
 
     const switchedProject = projectId !== lastSyncedProjectId;
     const payload: Record<string, unknown> = { documentId, instruction, point };
+    const previousVersionId = (form?.elements.namedItem("previousVersionId") as HTMLSelectElement | null)?.value;
+    if (previousVersionId) payload.previousVersionId = previousVersionId;
     if (!options.useProjectDefaultTokenLimit && !switchedProject && Number.isFinite(tokenInputVal) && tokenInputVal >= 1000) {
       payload.tokenLimit = Math.floor(tokenInputVal);
     }
@@ -358,6 +362,11 @@ export function createContextPreviewPanel(container: HTMLElement, host: Workbenc
     actions.append(rebuildBtn, refreshBtn);
     header.append(actions);
     container.append(header);
+    const source = data.continuationSource;
+    if (source) {
+      const label = source.kind === "candidate" ? "候选稿" : "修订";
+      container.append(el("p", `接续《${source.title}》${label} · ${source.id.slice(0, 8)}`, "muted-copy"));
+    }
 
     const ratioPct = Math.min(100, Math.round((report.totalEstimatedTokens / Math.max(1, report.maxInputTokens)) * 100));
     const l1Tokens = report.l1Tokens ?? report.prefixTokens;

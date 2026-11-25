@@ -10,7 +10,7 @@ import type {
   SkillIndexEntryDto,
   WorkspaceFocusDto,
 } from "../contracts/workspace-dto.ts";
-import { createCandidate, stmt } from "../storage/index.ts";
+import { stmt } from "../storage/index.ts";
 import {
   countNonWhitespace,
   invalid,
@@ -22,6 +22,8 @@ import {
   type Input,
   type WorkspaceContext,
 } from "./context.ts";
+import { resolveContinuation } from "./continuation.ts";
+import { stageDraftCandidate } from "./draft-candidate.ts";
 import type { ProductLineRegistry } from "./product-line.ts";
 
 export interface ParagraphPatchInput {
@@ -400,7 +402,7 @@ export function submitAgentDraft(
   const forceCandidate = input.forceCandidate === true;
 
   return ctx.atomic(() => {
-    let row = ctx.document(documentId);
+    const row = ctx.document(documentId);
     if (ctx.isLockedDocument(row)) {
       refuse("agent.submit_draft", "revision-locked");
     }
@@ -420,6 +422,9 @@ export function submitAgentDraft(
     const now = Date.now();
     const writeId = randomUUID();
     const charCount = countNonWhitespace(body);
+    const continuationSource = row.product === "fanqie" && optionalText(input, "previousVersionId")
+      ? resolveContinuation(ctx, row, input)?.source
+      : undefined;
 
     if (effectiveMode === "candidate") {
       // Auto-discard stale Agent-submitted candidates so Agent can iterate smoothly in cautious mode,
@@ -451,28 +456,12 @@ export function submitAgentDraft(
         }
       }
 
-      // author_runs.base_revision_id is NOT NULL and candidate.adopt requires a base revision.
-      if (!row.revisionId) {
-        saveDraftForRow(row, "");
-        row = ctx.document(row.id);
-      }
-      const baseRevisionId = row.revisionId!;
-      const runId = randomUUID();
-      const candidateId = randomUUID();
-      const frozenInput = JSON.stringify({
+      const { runId, candidateId, baseRevisionId } = stageDraftCandidate(ctx, row, saveDraftForRow, body, {
         origin: "dsh_agent",
-        title: row.title,
-        revisionId: baseRevisionId,
         summary,
         techniqueIds,
+        continuationSource,
       });
-
-      stmt(ctx.db, `
-        INSERT INTO author_runs (
-          id, document_id, state, base_revision_id, frozen_input, reserved, settled, candidate_id
-        ) VALUES (?, ?, 'awaiting-author', ?, ?, 0, 0, ?);
-      `).run(runId, row.id, baseRevisionId, frozenInput, candidateId);
-      createCandidate(ctx.db, { candidateId, documentId: row.id, baseRevisionId, body });
 
       stmt(ctx.db, `
         INSERT INTO author_agent_writes (
@@ -481,13 +470,7 @@ export function submitAgentDraft(
         ) VALUES (?, ?, ?, 'candidate', ?, ?, ?, NULL, ?, ?, 0, ?);
       `).run(writeId, row.projectId, row.id, runId, candidateId, baseRevisionId, summary, JSON.stringify(techniqueIds), now);
 
-      const diagnosticsSummary = mod.diagnoseForAgent?.(ctx, row, body) ?? null;
-      ctx.event(row.projectId, "candidate", "candidate.created", {
-        documentId: row.id,
-        runId,
-        candidateId,
-        origin: "dsh_agent",
-      });
+      const diagnosticsSummary = mod.diagnoseForAgent?.(ctx, ctx.document(row.id), body) ?? null;
       return {
         writeId,
         mode: "candidate",
@@ -522,6 +505,7 @@ export function submitAgentDraft(
       writeId,
       previousRevisionId,
       newRevisionId: saved.revisionId,
+      ...(continuationSource ? { continuationSource } : {}),
     });
 
     return {

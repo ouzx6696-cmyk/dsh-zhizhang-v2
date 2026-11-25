@@ -258,9 +258,9 @@ export function createAgentCompanion(options: AgentCompanionOptions) {
             `请协助续写小说《${projectTitle}》当前章节《${active.title}》（projectId=${projectId}, documentId=${active.id}）。`,
             `当前协作模式：${modeLabel}。`,
             "请按以下协同步骤执行：",
-            "1. 先调用 `zhizhang_read_context` 拉取本章四层上下文（L1设定圣经/L2卷幕里程碑/L3近章与视角边界）；",
+            "1. 调用 `zhizhang_read_context` 拉取本章上下文，沿用返回的上一章接续版本；",
             "2. 查看系统提示词中的技法目录，按需调用 `zhizhang_load_skill` 加载核心技法全文；",
-            "3. 紧扣上文与章纲完成续写后，调用 `zhizhang_submit_draft` 交付正文，并简述所用技法与自检结果。",
+            "3. 用 `zhizhang_submit_draft` 交付正文，把上下文的 continuationSource.id 原样填入 previousVersionId（有上章版本时）。",
           ].join("\n"),
         },
         {
@@ -299,12 +299,16 @@ export function createAgentCompanion(options: AgentCompanionOptions) {
             label: item.label,
             variant: item.primary ? "primary" : "secondary",
             size: "sm",
-            onClick: () =>
+            onClick: () => {
+              const previousVersionId = item.primary ? byId<HTMLSelectElement>("continuation-version").value : "";
               dispatchAgentHandoff({
                 title: item.title,
-                prompt: item.prompt,
-                context: { projectId, documentId: active.id, product: active.product },
-              }),
+                prompt: previousVersionId
+                  ? `${item.prompt}\n作者指定的上章版本：请在读取上下文时传入 previousVersionId=${previousVersionId}。`
+                  : item.prompt,
+                context: { projectId, documentId: active.id, product: active.product, ...(previousVersionId ? { previousVersionId } : {}) },
+              });
+            },
           }),
         );
       }
