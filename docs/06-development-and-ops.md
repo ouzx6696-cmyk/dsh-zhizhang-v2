@@ -1,11 +1,11 @@
-# 06 · 开发指南、14 套件测试体系与安全运维（Zhizhang 3.0）
+# 06 · 开发指南、14 套件测试体系与安全运维（Zhizhang 3.1）
 
 ---
 
 ## 1. 运行环境与研发门禁
 
-- **Node.js**：`>= 22.0.0`（使用内置 `node:sqlite` 与原生 `node:test`）
-- **TypeScript**：`5.8.3`（唯一开发依赖）
+- **Node.js**：`>= 24.9.0`（使用内置 `node:sqlite` 与原生 `node:test`）
+- **TypeScript**：`5.8.3`
 - **运行时依赖**：**0 个第三方运行时依赖**（由 `npm run preflight` 与 `test/12-architecture-guards.test.mjs` 双重锁定）
 
 | 命令 | 说明 |
@@ -18,8 +18,10 @@
 | `npm run start` | 直接启动已构建服务（`node scripts/dev-server.mjs`） |
 | `npm run docs:schema` | 从当前 `zhizhang/3.0` 真实 SQLite DDL 重新生成 `docs/schema.md` |
 | `npm run bench` | 运行工作台与 SQLite/FTS5 性能基准 |
+| `npm run bench:strict` | 运行长篇基准，性能门槛未通过时返回失败 |
+| `npm pack` | 重新构建并生成可安装的 DsH Bundle |
 | `npm run preflight` | 发布前环境自检（Node 版本、`node:sqlite`、零运行时依赖） |
-| `npm run deploy:touch` | 校验 DsH 部署包清单与触发结构（dry-run） |
+| `npm run deploy:touch` | 刷新构建产物时间戳 |
 
 ---
 
@@ -52,7 +54,7 @@
 
 - **目录与路径约束**：交付写入（`src/host/delivery-io.ts`）、整书导出（`src/storage/local-io.ts`）与备份恢复（`src/storage/backup.ts`）均校验合法文件名并锁定目标根目录，阻断路径穿越与误覆写。
 - **HTTP 与浏览器头防护**：全站启用 `Content-Security-Policy`（`default-src 'self'`）、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer` 与 `Cache-Control: no-store`；所有写入型 `POST` 接口强制校验 `application/json` 与 `<= 2 MiB` 体积上限。
-- **脱敏异常与诊断**：非预期错误仅返回 `diagnosticId`；`GET /api/zhizhang/diag` 返回版本（`3.0.0`）、Schema ID（`zhizhang/3.0`）、作业对账统计、`agentToolCount` 与 `systemPrompt` 注册状态，严禁输出密钥、本机路径或正文原文。
+- **脱敏异常与诊断**：非预期错误仅返回 `diagnosticId`；`GET /api/zhizhang/diag` 返回版本（`3.1.0`）、Schema ID（`zhizhang/3.0`）、作业对账统计、`agentToolCount` 与 `systemPrompt` 注册状态，严禁输出密钥、本机路径或正文原文。
 
 ### 3.2 热冷备份与安全恢复（`src/storage/backup.ts`）
 
@@ -60,3 +62,10 @@
 - **离线冷备份（`createBackup`）**：对关闭态数据库执行 WAL 检查点校验与流式 SHA-256 备份。
 - **安全恢复（`restoreBackup` / `restoreWorkspace`）**：逐文件校验 SHA-256 与路径边界，强制拒绝向非空目录静默覆盖（`restore-target-not-empty`）。
 - **保留修剪（`planRetention` / `pruneBackups`）**：按保留份数清理旧备份，并始终保留最后一份有效备份。
+
+
+## 4. 更新与备份
+
+更新时停止 Web profile，再用 `dsh plugin --profile web add <新包.tgz>` 安装新产物。重启后检查作品、候选、Agent 工具和设置。卸载使用 `dsh plugin --profile web remove @zhizhang/dsh-workbench`，工作区保留在配置的 `dataDirectory`。
+
+停止 profile 后，使用安装包中的 `scripts/workspace-data.mjs backup <工作区> <备份目录>`。恢复到新目录使用 `scripts/workspace-data.mjs restore <备份目录> <新工作区>`，随后将插件 `dataDirectory` 指向恢复后的目录。当前支持 `zhizhang/3.0`，启动会补齐当前版本所需的表。

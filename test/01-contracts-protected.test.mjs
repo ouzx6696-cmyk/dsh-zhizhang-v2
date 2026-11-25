@@ -121,7 +121,7 @@ test("schema window enforces clean zhizhang/3.x generation", () => {
   assert.equal(SCHEMA_ID, "zhizhang/3.0");
   assert.equal(SCHEMA_USER_VERSION, 30);
   assert.equal(isSupportedSchema("zhizhang/3.0"), true);
-  assert.equal(isSupportedSchema("zhizhang/3.1"), true);
+  assert.equal(isSupportedSchema("zhizhang/3.999"), false);
   assert.equal(isSupportedSchema("zhizhang/2.3"), false);
   assert.equal(isSupportedSchema("zhizhang/2.0"), false);
   assertSupportedSchema("zhizhang/3.0");

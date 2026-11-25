@@ -81,6 +81,9 @@ function resolveEndpoint(
   if (!action) {
     return { path: "./state", method: "GET" };
   }
+  if (action === "jobs.cancel") {
+    return { path: "./jobs/cancel", method: "POST", body: { ...(input ?? {}) } };
+  }
   if (action === "jobs.list") {
     return { path: "./jobs", method: "GET" };
   }

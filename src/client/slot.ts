@@ -1,15 +1,22 @@
 interface DsHReact {
+  useRef<T>(initial: T): { current: T };
+  useEffect(effect: () => (() => void) | void, deps: readonly unknown[]): void;
   createElement(tag: string, props: Record<string, unknown> | null, ...children: unknown[]): unknown;
 }
 
 interface DsHSlotContext {
-  readonly apiBase?: string;
-  readonly config?: { readonly apiBase?: string };
-  readonly composer?: { readonly insert?: (text: string) => void };
-  readonly chat?: { readonly setInput?: (text: string) => void };
   slots: {
     inject(slot: string, factory: () => unknown): void;
-    register(descriptor: Record<string, unknown>, component: (props: { size?: number; apiBase?: string }) => unknown): unknown;
+    register(descriptor: Record<string, unknown>, component: (props: FrameProps & { size?: number }) => unknown): unknown;
+  };
+}
+
+interface FrameProps {
+  readonly apiBase?: string;
+  readonly sessionId?: string;
+  readonly inputActions?: {
+    captureInsertion(): unknown;
+    insertText(text: string, span: unknown): boolean;
   };
 }
 
@@ -86,9 +93,10 @@ export function resolveWorkbenchUrl(options?: {
   let url: URL;
   if (hostBase) {
     const resolvedBase = new URL(hostBase, originFallback);
-    url = resolvedBase.pathname.endsWith("/api/zhizhang/workbench")
-      ? resolvedBase
-      : new URL("api/zhizhang/workbench", ensureTrailingSlash(resolvedBase));
+    const path = resolvedBase.pathname.replace(/\/$/u, "");
+    url = path.endsWith("/api/zhizhang/workbench")
+      ? new URL(path, resolvedBase)
+      : new URL(path.endsWith("/api") ? "zhizhang/workbench" : "api/zhizhang/workbench", ensureTrailingSlash(resolvedBase));
   } else {
     const hasExplicitBaseTag =
       typeof document !== "undefined" &&
@@ -120,10 +128,12 @@ export function resolveWorkbenchUrl(options?: {
 export function createWorkbenchFrameProps(options?: {
   readonly view?: WorkbenchSlotView;
   readonly apiBase?: string;
+  readonly sessionId?: string;
 }): Record<string, unknown> {
   const view: WorkbenchSlotView =
     options?.view === "conversation" || options?.view === "settings" ? options.view : "main";
   const source = resolveWorkbenchUrl({ view, apiBase: options?.apiBase });
+  if (view === "conversation" && options?.sessionId) source.searchParams.set("sessionId", options.sessionId);
   const title =
     view === "conversation"
       ? "织章工作台（会话预览）"
@@ -146,8 +156,6 @@ export function createWorkbenchFrameProps(options?: {
  * `conversation.view`, and lazy `settings.plugins.tab`).
  */
 export function registerWorkbenchSlots(ctx: DsHSlotContext, React: DsHReact): void {
-  const ctxApiBase = ctx.apiBase ?? ctx.config?.apiBase;
-
   function PanelIcon({ size }: { size?: number }) {
     return React.createElement(
       "span",
@@ -159,21 +167,38 @@ export function registerWorkbenchSlots(ctx: DsHSlotContext, React: DsHReact): vo
   function MainWorkbench(props?: { apiBase?: string }) {
     return React.createElement(
       "iframe",
-      createWorkbenchFrameProps({ view: "main", apiBase: props?.apiBase ?? ctxApiBase }),
+      createWorkbenchFrameProps({ view: "main", apiBase: props?.apiBase }),
     );
   }
 
-  function ConversationWorkbench(props?: { apiBase?: string }) {
-    return React.createElement(
-      "iframe",
-      createWorkbenchFrameProps({ view: "conversation", apiBase: props?.apiBase ?? ctxApiBase }),
-    );
+  function ConversationWorkbench(props: FrameProps) {
+    const frame = React.useRef<HTMLIFrameElement | null>(null);
+    const frameProps = createWorkbenchFrameProps({
+      view: "conversation",
+      apiBase: props.apiBase,
+      sessionId: props.sessionId,
+    });
+    const origin = new URL(String(frameProps.src)).origin;
+    React.useEffect(() => {
+      const receive = (event: MessageEvent) => {
+        if (event.origin !== origin || event.source !== frame.current?.contentWindow) return;
+        const data = event.data;
+        if (data?.type !== "zhizhang:handoff" || typeof data.prompt !== "string"
+          || typeof data.requestId !== "string" || !props.sessionId) return;
+        const actions = props.inputActions;
+        const accepted = actions?.insertText(data.prompt, actions.captureInsertion()) ?? false;
+        frame.current?.contentWindow?.postMessage({ type: "zhizhang:handoff-result", requestId: data.requestId, accepted }, origin);
+      };
+      window.addEventListener("message", receive);
+      return () => window.removeEventListener("message", receive);
+    }, [origin, props.sessionId, props.inputActions]);
+    return React.createElement("iframe", { ...frameProps, key: props.sessionId, ref: frame });
   }
 
   function SettingsWorkbench(props?: { apiBase?: string }) {
     return React.createElement(
       "iframe",
-      createWorkbenchFrameProps({ view: "settings", apiBase: props?.apiBase ?? ctxApiBase }),
+      createWorkbenchFrameProps({ view: "settings", apiBase: props?.apiBase }),
     );
   }
 
@@ -199,17 +224,7 @@ export function registerWorkbenchSlots(ctx: DsHSlotContext, React: DsHReact): vo
     ),
   );
 
-  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
-    window.addEventListener("message", (event: MessageEvent) => {
-      const payload = event.data as { type?: unknown; prompt?: unknown } | null;
-      if (!payload || payload.type !== "zhizhang:handoff" || typeof payload.prompt !== "string") return;
-      if (typeof ctx.composer?.insert === "function") {
-        ctx.composer.insert(payload.prompt);
-      } else if (typeof ctx.chat?.setInput === "function") {
-        ctx.chat.setInput(payload.prompt);
-      }
-    });
-  }
+
 }
 
 if (typeof window !== "undefined" && (window as DsHHostWindow).__ModuleLoader__) {

@@ -219,7 +219,8 @@ export function createScriptedLlm(steps = []) {
 export function createStrictToolRegistrar({ failOn = null, failWith = null } = {}) {
   const tools = [];
   const disposed = [];
-  const register = (tool) => {
+  const conditions = new Map();
+  const register = (tool, options) => {
     if (!tool || typeof tool !== "object") throw new TypeError("tool definition must be an object");
     if (failOn === tool.name) throw failWith ?? new TypeError(`tool "${tool.name}" rejected`);
     if (typeof tool.name !== "string" || !/^[a-z][a-z0-9_]{2,63}$/.test(tool.name)) {
@@ -247,16 +248,21 @@ export function createStrictToolRegistrar({ failOn = null, failWith = null } = {
       throw new TypeError(`tool "${tool.name}" invalid timeoutMs`);
     }
     tools.push(tool);
+    conditions.set(tool.name, options?.when);
     return () => {
       const idx = tools.indexOf(tool);
       if (idx >= 0) tools.splice(idx, 1);
       disposed.push(tool.name);
+      conditions.delete(tool.name);
     };
   };
   return {
     tools,
     disposed,
     register,
+    available(name, agent) {
+      return conditions.get(name)?.({ agent }) ?? true;
+    },
     async invoke(name, args, exec) {
       const tool = tools.find((item) => item.name === name);
       if (!tool) throw new Error(`tool not registered: ${name}`);
@@ -268,35 +274,30 @@ export function createStrictToolRegistrar({ failOn = null, failWith = null } = {
 export function createMockSystemPromptRegistrar({ fail = false } = {}) {
   const sections = [];
   const disposed = [];
-  const register = (section) => {
+  const section = (entry) => {
     if (fail) throw new Error("systemPrompt registrar rejected section");
-    if (!section || typeof section !== "object" || typeof section.id !== "string" || typeof section.render !== "function") {
+    if (!entry || typeof entry.name !== "string" || typeof entry.text !== "function") {
       throw new TypeError("invalid systemPrompt section");
     }
-    sections.push(section);
+    sections.push(entry);
     return () => {
-      const idx = sections.indexOf(section);
+      const idx = sections.indexOf(entry);
       if (idx >= 0) sections.splice(idx, 1);
-      disposed.push(section.id);
+      disposed.push(entry.name);
     };
   };
   return {
     sections,
     disposed,
-    register,
-    async renderAll(context) {
-      const sorted = [...sections].sort((a, b) => (a.weight ?? 0) - (b.weight ?? 0));
-      const parts = [];
-      for (const sec of sorted) {
-        const out = await sec.render(context);
-        if (typeof out === "string" && out.trim()) parts.push(out.trim());
-      }
-      return parts.join("\n\n");
+    section,
+    renderAll(context = {}) {
+      return [...sections].sort((a, b) => a.order - b.order)
+        .map((entry) => entry.text(context)).filter(Boolean).join("\n\n");
     },
   };
 }
 
-export function createMockDsHHost({ llm, readAsset, tools, configForms, systemPrompt, cordis = false } = {}) {
+export function createMockDsHHost({ llm, readAsset, tools, systemPrompt, cordis = false } = {}) {
   const routes = new Map();
   const disposedPaths = [];
   const logs = [];
@@ -335,11 +336,10 @@ export function createMockDsHHost({ llm, readAsset, tools, configForms, systemPr
   };
 
   if (!cordis && tools !== undefined) ctx.tools = tools;
-  if (!cordis && configForms !== undefined) ctx.configForms = configForms;
   if (!cordis && systemPrompt !== undefined) ctx.systemPrompt = systemPrompt;
 
   if (cordis) {
-    const services = { connection: ctx.connection, llm: ctx.llm, tools, configForms, systemPrompt };
+    const services = { connection: ctx.connection, llm: ctx.llm, tools, systemPrompt };
     ctx.get = (name) => services[name];
     ctx.inject = (deps, callback) => {
       if (!deps.every((dep) => services[dep] !== undefined)) return () => {};

@@ -28,10 +28,7 @@ export {
 } from "./dsh-tools-adapter.ts";
 export {
   buildSanitizedDiagnostics,
-  createZhizhangConfigSchema,
-  registerZhizhangSettings,
   type SanitizedDiagnosticsReport,
-  type ZhizhangConfigSchema,
 } from "./settings.ts";
 export {
   createHostJobEngine,

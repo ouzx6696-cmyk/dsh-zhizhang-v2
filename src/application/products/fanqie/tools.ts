@@ -57,6 +57,7 @@ export function createFanqieAgentTools(workspace: ProductAgentToolFacade): reado
     },
     {
       name: "zhizhang_read_known_facts",
+      outputType: "object-or-array",
       description: "Check which approved lore facts a specific character knows at a given chapter and paragraph anchor.",
       readOnly: true,
       properties: {
@@ -80,6 +81,7 @@ export function createFanqieAgentTools(workspace: ProductAgentToolFacade): reado
       readOnly: true,
       properties: { projectId: { type: "string" }, query: { type: "string" }, limit: { type: "number" } },
       required: ["projectId", "query"],
+      outputType: "array",
       outputDescription: "Ranked workspace search hits with source kind and snippet.",
       execute: (args) =>
         workspace.mutation("workspace.search", {
@@ -94,6 +96,7 @@ export function createFanqieAgentTools(workspace: ProductAgentToolFacade): reado
       readOnly: true,
       properties: { projectId: { type: "string" } },
       required: ["projectId"],
+      outputType: "array",
       outputDescription: "Deterministic lore conflict list (timeline and knowledge boundaries).",
       execute: (args) => workspace.mutation("lore.conflicts", { projectId: args.projectId }),
     },
@@ -286,6 +289,7 @@ export function createFanqieAgentTools(workspace: ProductAgentToolFacade): reado
       readOnly: false,
       properties: {
         documentId: { type: "string" },
+        basePlanningId: { type: "string", description: "planningId from the latest chapter snapshot." },
         viewpoint: { type: "string" },
         target: { type: "number" },
         sections: { type: "object" },
@@ -293,11 +297,12 @@ export function createFanqieAgentTools(workspace: ProductAgentToolFacade): reado
         knowledge: { type: "string" },
         forceProposal: { type: "boolean" },
       },
-      required: ["documentId"],
+      required: ["documentId", "basePlanningId"],
       outputDescription: "Either a staged outline proposal ID (cautious) or saved chapter planning object (co_create).",
       execute: (args) =>
         workspace.mutation("chapter.outline.propose", {
           documentId: args.documentId,
+          basePlanningId: args.basePlanningId,
           ...(typeof args.viewpoint === "string" ? { viewpoint: args.viewpoint } : {}),
           ...(typeof args.target === "number" ? { target: args.target } : {}),
           ...(args.sections && typeof args.sections === "object" ? { sections: args.sections } : {}),
@@ -412,6 +417,7 @@ export function createFanqieAgentTools(workspace: ProductAgentToolFacade): reado
         sessionId: { type: "string" },
       },
       required: ["projectId"],
+      outputType: "object-or-array",
       outputDescription: "Material ingest session detail with local chunks or list of sessions for the project.",
       execute: (args) =>
         typeof args.sessionId === "string" && args.sessionId.trim()

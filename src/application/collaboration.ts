@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ContractError } from "../contracts/errors.ts";
 import type {
   AgentDraftWriteDto,
   AgentWriteSubmissionResultDto,
@@ -121,12 +122,14 @@ export function setProjectCollaboration(ctx: WorkspaceContext, input: Input): Pr
 
 function resolveFocusInRead(
   ctx: WorkspaceContext,
-  override?: { readonly projectId?: string | null; readonly documentId?: string | null },
+  override?: { readonly projectId?: string | null; readonly documentId?: string | null; readonly sessionId?: string },
 ): { readonly focus: WorkspaceFocusDto; readonly activeDoc: DocumentRow | undefined } {
-  const stored = stmt(
-    ctx.db,
-    "SELECT project_id AS projectId, document_id AS documentId, view_mode AS viewMode, updated_at AS updatedAt FROM author_workspace_focus WHERE id = 'default';",
-  ).get() as {
+  const sessionId = override?.sessionId;
+  const table = sessionId ? "author_session_focus" : "author_workspace_focus";
+  const stored = stmt(ctx.db, `
+    SELECT project_id AS projectId, document_id AS documentId, view_mode AS viewMode, updated_at AS updatedAt
+    FROM ${table} WHERE id = ?;
+  `).get(sessionId ?? "default") as {
     projectId: string | null;
     documentId: string | null;
     viewMode: string;
@@ -134,7 +137,11 @@ function resolveFocusInRead(
   } | undefined;
 
   let projectId = override?.projectId !== undefined ? override.projectId : (stored?.projectId ?? null);
-  let documentId = override?.documentId !== undefined ? override.documentId : (stored?.documentId ?? null);
+  let documentId = override?.documentId !== undefined
+    ? override.documentId
+    : override?.projectId !== undefined && override.projectId !== stored?.projectId
+      ? null
+      : stored?.documentId ?? null;
   const viewMode = stored?.viewMode || "main";
   const updatedAt = stored?.updatedAt ?? 0;
 
@@ -155,14 +162,14 @@ function resolveFocusInRead(
       | { id: string; name: string; product: Product }
       | undefined;
   }
-  if (!projectRow) {
+  if (!projectRow && !sessionId && override?.projectId === undefined) {
     projectRow = stmt(ctx.db, "SELECT id, name, product FROM author_projects ORDER BY rowid DESC LIMIT 1;").get() as
       | { id: string; name: string; product: Product }
       | undefined;
     projectId = projectRow?.id ?? null;
   }
 
-  if (projectId && !activeDoc) {
+  if (projectId && !activeDoc && !sessionId) {
     const firstDoc = stmt(
       ctx.db,
       "SELECT id FROM author_documents WHERE project_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT 1;",
@@ -194,8 +201,8 @@ function resolveFocusInRead(
   };
 }
 
-export function getWorkspaceFocus(ctx: WorkspaceContext): WorkspaceFocusDto {
-  return ctx.read(() => resolveFocusInRead(ctx).focus);
+export function getWorkspaceFocus(ctx: WorkspaceContext, sessionId?: string): WorkspaceFocusDto {
+  return ctx.read(() => resolveFocusInRead(ctx, sessionId ? { sessionId } : undefined).focus);
 }
 
 export function setWorkspaceFocus(ctx: WorkspaceContext, input: Input): WorkspaceFocusDto {
@@ -203,6 +210,9 @@ export function setWorkspaceFocus(ctx: WorkspaceContext, input: Input): Workspac
     const rawDocId = input.documentId === null ? null : optionalText(input, "documentId");
     const rawProjectId = input.projectId === null ? null : optionalText(input, "projectId");
     const rawViewMode = optionalText(input, "viewMode");
+    const sessionId = optionalText(input, "sessionId");
+    const id = sessionId ?? "default";
+    const table = sessionId ? "author_session_focus" : "author_workspace_focus";
 
     let resolvedDocId: string | null = rawDocId ?? null;
     let resolvedProjectId: string | null = rawProjectId ?? null;
@@ -223,27 +233,31 @@ export function setWorkspaceFocus(ctx: WorkspaceContext, input: Input): Workspac
 
     const prev = stmt(
       ctx.db,
-      "SELECT project_id AS projectId, document_id AS documentId, view_mode AS viewMode FROM author_workspace_focus WHERE id = 'default';",
-    ).get() as { projectId: string | null; documentId: string | null; viewMode: string } | undefined;
+      `SELECT project_id AS projectId, document_id AS documentId, view_mode AS viewMode FROM ${table} WHERE id = ?;`,
+    ).get(id) as { projectId: string | null; documentId: string | null; viewMode: string } | undefined;
 
     const finalProjectId = input.projectId === undefined && !resolvedDocId ? (prev?.projectId ?? null) : resolvedProjectId;
     const finalDocumentId = input.documentId === undefined
       ? (finalProjectId === prev?.projectId ? (prev?.documentId ?? null) : null)
       : resolvedDocId;
     const finalViewMode = rawViewMode ?? prev?.viewMode ?? "main";
-    const now = Date.now();
+    if (sessionId && !finalProjectId) {
+      stmt(ctx.db, "DELETE FROM author_session_focus WHERE id = ?;").run(sessionId);
+      return resolveFocusInRead(ctx, { sessionId }).focus;
+    }
 
+    const now = Date.now();
     stmt(ctx.db, `
-      INSERT INTO author_workspace_focus (id, project_id, document_id, view_mode, updated_at)
-      VALUES ('default', ?, ?, ?, ?)
+      INSERT INTO ${table} (id, project_id, document_id, view_mode, updated_at)
+      VALUES (?, ?, ?, ?, ?)
       ON CONFLICT (id) DO UPDATE SET
         project_id = excluded.project_id,
         document_id = excluded.document_id,
         view_mode = excluded.view_mode,
         updated_at = excluded.updated_at;
-    `).run(finalProjectId, finalDocumentId, finalViewMode, now);
+    `).run(id, finalProjectId, finalDocumentId, finalViewMode, now);
 
-    return resolveFocusInRead(ctx).focus;
+    return resolveFocusInRead(ctx, sessionId ? { sessionId } : undefined).focus;
   });
 }
 
@@ -342,9 +356,8 @@ export function applyParagraphPatches(
   if (!Array.isArray(patches) || patches.length === 0) {
     invalid("patches", "non-empty-array-required");
   }
-  const paragraphs = originalBody.trim().length === 0
-    ? []
-    : originalBody.split(/\r?\n\s*\r?\n/);
+  const fragments = originalBody.trim().length === 0 ? [""] : originalBody.split(/(\r?\n\s*\r?\n)/u);
+  const paragraphs = fragments.filter((_, index) => index % 2 === 0);
 
   const seen = new Set<number>();
   const next = [...paragraphs];
@@ -369,7 +382,7 @@ export function applyParagraphPatches(
     }
     next[idx - 1] = patch.replacement.trim();
   }
-  const joined = next.filter((p) => p.length > 0).join("\n\n");
+  const joined = fragments.map((part, index) => index % 2 === 0 ? next[index / 2] : part).join("");
   if (!joined.trim()) invalid("patches", "resulting-body-empty");
   return joined;
 }
@@ -563,11 +576,12 @@ export function rollbackAgentWrite(
       documentId: string;
       mode: string;
       previousRevisionId: string | null;
+      newRevisionId: string | null;
       rolledBack: number;
     }>(
       stmt(ctx.db, `
         SELECT id, project_id AS projectId, document_id AS documentId, mode,
-          previous_revision_id AS previousRevisionId, rolled_back AS rolledBack
+          previous_revision_id AS previousRevisionId, new_revision_id AS newRevisionId, rolled_back AS rolledBack
         FROM author_agent_writes WHERE id = ?;
       `).get(writeId),
       "agent-write",
@@ -584,6 +598,12 @@ export function rollbackAgentWrite(
     const doc = ctx.document(record.documentId);
     if (ctx.isLockedDocument(doc)) {
       refuse("agent.rollback_write", "revision-locked");
+    }
+
+    if (doc.revisionId !== record.newRevisionId) {
+      throw new ContractError("version.conflict", {
+        documentId: doc.id, baseRevisionId: record.newRevisionId, currentRevisionId: doc.revisionId,
+      });
     }
 
     let previousBody = "";
@@ -615,21 +635,22 @@ export function rollbackAgentWrite(
 export function buildProgressiveSystemPrompt(
   ctx: WorkspaceContext,
   registry: ProductLineRegistry,
-  input?: { readonly projectId?: string; readonly documentId?: string },
+  input?: { readonly projectId?: string; readonly documentId?: string; readonly sessionId?: string },
 ): CollaborationSystemPromptDto {
   return ctx.read(() => {
     const { focus, activeDoc } = resolveFocusInRead(ctx, {
       ...(input?.projectId ? { projectId: input.projectId } : {}),
       ...(input?.documentId ? { documentId: input.documentId } : {}),
+      ...(input?.sessionId ? { sessionId: input.sessionId } : {}),
     });
 
     if (!focus.projectId || !focus.product) {
-      const idleText = [
+      const idleText = input?.sessionId ? "" : [
         "# 织章（Zhizhang）DsH 创作协同插件",
         "当前尚无打开的作品。需要了解工作区状态时请先调用 `zhizhang_read_focus`。",
       ].join("\n");
       return {
-        enabled: true,
+        enabled: !input?.sessionId,
         text: idleText,
         tokenEstimate: Math.ceil(idleText.length / 2.2),
         focus,

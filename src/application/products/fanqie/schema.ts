@@ -148,6 +148,17 @@ export function initFanqieSchema(db: SqliteDatabase): void {
       UNIQUE(project_id, target_type, target_id, item_kind, item_id)
     );
 
+    CREATE TABLE IF NOT EXISTS author_outline_writes (
+      id TEXT PRIMARY KEY,
+      document_id TEXT NOT NULL REFERENCES author_documents(id) ON DELETE CASCADE,
+      previous_plan TEXT,
+      new_plan_hash TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE INDEX IF NOT EXISTS author_outline_writes_document
+      ON author_outline_writes(document_id, created_at DESC);
+
     CREATE TABLE IF NOT EXISTS author_ai_proposals (
       id TEXT PRIMARY KEY,
       project_id TEXT,

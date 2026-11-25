@@ -429,6 +429,8 @@ export interface WorkspaceSnapshot {
   readonly settingsCursor?: number | null;
   readonly report?: ArticleReportDto | null;
   readonly planning?: PlanningDto | null;
+  readonly planningId?: string;
+  readonly outlineWriteId?: string | null;
   readonly scenario?: ArticleScenarioDto | null;
   readonly pendingJobs?: readonly PendingJobDto[];
   readonly collaborationMode?: CollaborationMode;
@@ -518,6 +520,7 @@ export type WorkspaceAction =
   | "run.detail"
   | "run.history"
   | "jobs.list"
+  | "jobs.cancel"
   | "candidate.adopt"
   | "tree.get"
   | "volume.create"
@@ -592,7 +595,8 @@ export type WorkspaceAction =
   | "agent.system_prompt.preview"
   | "technique.get"
   | "deconstruct.get"
-  | "chapter.outline.propose";
+  | "chapter.outline.propose"
+  | "chapter.outline.rollback";
 
 export interface ActionEntry<I = Readonly<Record<string, unknown>>, O = unknown> {
   readonly input: I;

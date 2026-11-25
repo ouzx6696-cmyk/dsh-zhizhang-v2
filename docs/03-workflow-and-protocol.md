@@ -1,6 +1,6 @@
-# 03 · DsH 共创协议、23 个 Agent 工具与统一作业内核（Zhizhang 3.0）
+# 03 · DsH 共创协议、23 个 Agent 工具与统一作业内核（Zhizhang 3.1）
 
-本文档定义织章 3.0 与 **DeepSeek Harness（DsH）** 对话宿主、前端伴生工作台以及兜底异步作业内核之间的全部协议与接口。
+本文档定义织章 3.1 与 **DeepSeek Harness（DsH）** 对话宿主、前端伴生工作台以及兜底异步作业内核之间的全部协议与接口。
 
 ---
 
@@ -8,9 +8,9 @@
 
 ### 1.1 `ctx.systemPrompt` 渐进披露注入（`src/host/system-prompt.ts`）
 
-插件通过 `runInServiceScope(ctx, ["systemPrompt"], ...)` 注册动态片段 `zhizhang.cocreation`（`weight: 40`；若宿主未提供 `systemPrompt` 服务则静默降级）。该片段始终控制在约 **200–380 tokens**，动态拼装：
+插件通过 DsH 的 `ctx.systemPrompt.section` 注册 `zhizhang.cocreation`，使用装配请求的 Agent 会话标识读取绑定。未绑定作品的会话不显示织章上下文与工具。已绑定的会话按需拼装以下内容。
 
-1. **当前焦点**：由前端工作台切换书/章时自动同步的 `projectId`、`documentId`、文档状态与字数（`author_workspace_focus`）。
+1. **当前焦点**：由作者在对话伴生面板绑定作品和文档，交办时同步目标。绑定保存在 `author_session_focus`。
 2. **本书作者主权模式**：明确告知 Agent 当前处于 `审慎模式（cautious）` 还是 `共创模式（co_create）` 及锁定红线。
 3. **产品线方法论提示**：
    - 番茄：节奏档位、近期焦点、创作指南针、本章视角与目标字数，以及最多 8 条已挂载/推荐 Skill 的**目录索引**（`[id] 标题 ★置顶 — 触发条件 [互斥组]`，不展开步骤正文）。
@@ -19,7 +19,7 @@
 
 ### 1.2 23 个确定性排序 Agent 工具（`src/host/tools.ts`）
 
-所有工具在注册前按 `name` 字典序排列，并通过 `canonicalizeJsonKeys` 递归排序 Schema 键名，确保宿主多轮对话前缀 KV 缓存 100% 稳定。
+所有工具在注册前按 `name` 字典序排列，并通过 `canonicalizeJsonKeys` 递归排序 Schema 键名，维持声明顺序稳定。正文工具提交时携带快照的 `active.revisionId`，新建未保存文档使用 `null`。章纲工具携带 `planningId`。
 
 #### 核心工作区工具（3 个，`src/application/author-workspace.ts`）
 
@@ -72,6 +72,7 @@
 | `GET` | `/workbench/*.js`、`/contracts/protected-rules.js` | 由 `CLIENT_JS_MODULES` 白名单精确托管的 ES 模块 |
 | `GET` | `/state` | 读取工作台快照（支持 `?projectId=&documentId=&ifSequence=` 增量序列跳过） |
 | `GET` | `/jobs` | 统一作业列表查询（支持 `?projectId=&documentId=&kind=&limit=`） |
+| `GET` | `/settings` | 插件的默认模型与工具开关 |
 | `GET` | `/diag` | 脱敏运行时诊断（版本、Schema、作业对账、工具与提示词注册状态） |
 | `POST` | `/command` | 同步命令分发（`{ action, ...input }`，严格对应 `WorkspaceAction` 契约） |
 | `POST` | `/jobs/preview` | 兜底作业启动前零 Token 预算与上下文装配预估 |
@@ -100,4 +101,4 @@
 - **L1 版本钉住全书圣经（`author_book_prefix_cache`）**：按独立配额（默认 `8192` tokens）固化指南针、全书约定、客观设定与全书挂载技法；零散设定修改（`< l1DirtyThreshold`）走 L3 增量补丁，不破坏 L1 前缀哈希。
 - **L2 仅追加卷幕与里程碑**：归档已定稿卷幕摘要与每 N 章（默认 `10` 章）闭合里程碑，前缀中段只增不改。
 - **L3 每次请求动态尾**：L1 增量补丁、POV 知情与严禁泄露边界、当前阶段技法、近期窗口摘要、远期 Top-K 召回、工作稿正文与任务协议。
-- **供应商路由（`buildLayeredStreamPayload`）**：按 `(provider, model)` 自动选择 `deepseek-implicit`、`anthropic-breakpoints`（`cache_control: { type: "ephemeral" }`）、`openai-implicit`（`prompt_cache_key`）或 `compact-local`。
+- **DsH 模型请求**使用字符串系统前缀和用户任务段，保留 L0–L2 顺序。缓存命中与写入量以宿主用量回执为准，显示未缓存、读取和写入的输入 token。

@@ -47,7 +47,6 @@ import { approvedFacts } from "./shared.ts";
 export interface FanqieSharedLayeredPrefix {
   readonly l1: BookPrefixSnapshotResult;
   readonly l2: VolumeMilestoneL2Result;
-  readonly cachePartitionKey: string;
 }
 
 export function buildFanqieSharedLayeredPrefix(
@@ -61,7 +60,6 @@ export function buildFanqieSharedLayeredPrefix(
   return {
     l1,
     l2,
-    cachePartitionKey: `zhizhang:${projectId}`,
   };
 }
 
@@ -94,7 +92,6 @@ export function buildFanqieLayeredPayload(
     volumePrefix: shared.l2.volumePrefix || undefined,
     volumePrefixSha256: shared.l2.volumePrefixSha256 || undefined,
     dynamicTail: normalizeCacheText(tailParts.join("\n\n")),
-    cachePartitionKey: shared.cachePartitionKey,
   };
 }
 
@@ -833,7 +830,6 @@ export function createFanqieGenerationRunner(): ProductGenerationRunner {
             volumePrefix: bundle.volumePrefix || undefined,
             volumePrefixSha256: bundle.volumePrefixSha256,
             dynamicTail: tail,
-            cachePartitionKey: parsed.projectId ? `zhizhang:${parsed.projectId}` : undefined,
           };
         }
       }

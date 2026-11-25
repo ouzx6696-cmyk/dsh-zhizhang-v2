@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 
-const MIN_NODE = [22, 0, 0];
+const MIN_NODE = [24, 9, 0];
 
 function parseVersion(raw) {
   return raw.replace(/^v/, "").split(".").slice(0, 3).map((part) => Number.parseInt(part, 10) || 0);
@@ -22,8 +22,8 @@ if (!meetsMinVersion(nodeVersion, MIN_NODE)) {
 
 try {
   const sqlite = await import("node:sqlite");
-  if (typeof sqlite.DatabaseSync !== "function") {
-    failures.push("node:sqlite DatabaseSync export missing");
+  if (typeof sqlite.DatabaseSync !== "function" || typeof sqlite.backup !== "function") {
+    failures.push("node:sqlite DatabaseSync or backup export missing");
   }
 } catch (error) {
   failures.push(`node:sqlite failed to load: ${error instanceof Error ? error.message : String(error)}`);

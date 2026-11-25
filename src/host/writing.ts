@@ -38,6 +38,10 @@ export interface LlmTransport {
   prepareCall(
     request: { readonly provider: string; readonly model: string; readonly maxTokens: number },
     signal: AbortSignal,
+    configure?: (
+      controls: Readonly<Record<string, unknown>>,
+      model: { readonly reasoning?: { readonly efforts: readonly { readonly id: string }[] } },
+    ) => Readonly<Record<string, unknown>>,
   ): Promise<LlmPreparedCall>;
 }
 
@@ -194,6 +198,11 @@ export function createSingleShotCaller(
         const call = await llm.prepareCall(
           { provider: run.provider, model: run.model, maxTokens },
           requestSignal,
+          disableThinking
+            ? (controls, model) => model.reasoning?.efforts.some(({ id }) => id === "off")
+              ? { ...controls, reasoningEffort: "off" }
+              : controls
+            : undefined,
         );
         requestSignal.throwIfAborted();
         const callId = receipts.begin(phase, inputReserve, maxTokens, {
@@ -204,12 +213,10 @@ export function createSingleShotCaller(
         try {
           const streamOptions: Record<string, unknown> = {
             ...call.config,
-            ...wire.extraOptions,
             system: wire.system,
             signal: requestSignal,
             messages: wire.messages,
           };
-          if (disableThinking === true) streamOptions.thinking = false;
           for await (const chunk of call.stream(streamOptions)) {
             if (chunk.type === "text-delta") {
               const declaredType = blockTypes.get(chunk.index);

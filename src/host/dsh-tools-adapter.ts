@@ -1,21 +1,7 @@
 import { canonicalizeJsonKeys } from "../workflow/cache-layer.ts";
-import type { Disposer, HostToolRegistrar } from "./dsh-adapter.ts";
+import type { Disposer, HostAgent, HostToolRegistrar } from "./dsh-adapter.ts";
 
-/**
- * Maps the workbench's internal agent-tool spec onto the upstream DsH
- * ToolRuntime shape (DSH-01). Upstream validates every definition before it is
- * registered and rejects tools that do not declare `output.schema` plus an
- * `output.render` function, so this module owns that translation and its
- * self-check (`assertHostToolDefinition`).
- *
- * IMPORTANT: these upstream shapes are inferred from public DsH 0.2.x docs
- * (`@deepseek-ai/dsh-tools`) and have NOT been verified against a recorded
- * isolated-profile session yet (open author decision #5). Both strict JSON
- * Schema (`json-schema`) and upstream `defineTool` flat parameter DSL
- * (`dsh-flat`) are supported here so switching after recording is a 1-line
- * adapter change.
- */
-
+/** Maps application tools to DsH 0.2.2-rc.5 runtime definitions. */
 export const DEFAULT_TOOL_TIMEOUT_MS = 30_000;
 const MAX_TOOL_NAME_LENGTH = 64;
 const MAX_TOOL_DESCRIPTION_LENGTH = 1024;
@@ -48,6 +34,8 @@ export interface FlatParameterFieldSpec {
 export type FlatParameterSchemaSpec = Readonly<Record<string, FlatParameterFieldSpec>>;
 
 export interface AgentToolExecution {
+  readonly agent?: HostAgent;
+  readonly callId?: string;
   readonly signal?: AbortSignal;
 }
 
@@ -86,6 +74,7 @@ export interface HostToolDefinition {
 
 export interface HostToolAdapterOptions {
   readonly parameterFormat?: HostToolParameterFormat;
+  readonly when?: (context: { agent: HostAgent }) => boolean;
 }
 
 /** Builds `parameters` with the `additionalProperties: false` that upstream requires. */
@@ -259,7 +248,7 @@ export function toHostToolDefinition(
     },
     async execute(args, exec) {
       exec?.signal?.throwIfAborted();
-      const value = await spec.execute(args, { signal: exec?.signal });
+      const value = await spec.execute(args, exec ?? {});
       exec?.signal?.throwIfAborted();
       return value;
     },
@@ -281,7 +270,7 @@ export function registerHostTools(
   const disposers: Disposer[] = [];
   try {
     for (const spec of sortedSpecs) {
-      disposers.push(registrar.register(toHostToolDefinition(spec, options)));
+      disposers.push(registrar.register(toHostToolDefinition(spec, options), options?.when ? { when: options.when } : undefined));
     }
   } catch (error) {
     for (const dispose of disposers.reverse()) void dispose();

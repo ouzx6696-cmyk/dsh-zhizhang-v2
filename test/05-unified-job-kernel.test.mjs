@@ -181,7 +181,7 @@ test("HostJobEngine executes all 3 job kinds over /jobs/* and drains cleanly on 
 
     const diag = await host.getDiag();
     assert.equal(diag.body.result.usageConsistencyIssues, 0);
-    assert.equal(diag.body.result.version, "3.0.0");
+    assert.equal(diag.body.result.version, "3.1.0");
 
     // Job 4: start another generation and unload plugin cleanly
     await host.command("run.discard", { runId });
@@ -224,28 +224,16 @@ test("4-tier prompt cache shares byte-identical L0+L1+L2 prefix across draft, pr
     volumePrefix: "### 【L2 卷幕里程碑】\n- [卷] 第一卷",
     volumePrefixSha256: "bbb222",
     dynamicTail: "### 本轮指令\n推进冲突",
-    cachePartitionKey: "zhizhang:proj-1",
   };
   const dsWire = buildLayeredStreamPayload({ system: "", prompt: "", layered: sampleLayered }, "deepseek", "deepseek-chat");
   assert.equal(dsWire.strategy, "deepseek-implicit");
   assert.equal(typeof dsWire.system, "string");
   assert.ok(dsWire.system.startsWith(SHARED_WORKBENCH_SYSTEM_KERNEL));
-  assert.equal("cachePrefix" in dsWire.extraOptions, false);
-
-  const claudeWire = buildLayeredStreamPayload({ system: "", prompt: "", layered: sampleLayered }, "anthropic", "claude-3-7-sonnet");
-  assert.equal(claudeWire.strategy, "anthropic-breakpoints");
-  assert.ok(Array.isArray(claudeWire.system));
-  assert.equal(claudeWire.system.length, 3);
-  assert.deepEqual(claudeWire.system[1].cache_control, { type: "ephemeral" });
-  assert.deepEqual(claudeWire.system[2].cache_control, { type: "ephemeral" });
-
-  const openaiWire = buildLayeredStreamPayload({ system: "", prompt: "", layered: sampleLayered }, "openai", "gpt-4o");
-  assert.equal(openaiWire.strategy, "openai-implicit");
-  assert.equal(openaiWire.extraOptions.prompt_cache_key, "zhizhang:proj-1");
-
-  const localWire = buildLayeredStreamPayload({ system: "", prompt: "", layered: sampleLayered }, "ollama", "qwen2.5:14b");
-  assert.equal(localWire.strategy, "compact-local");
-  assert.equal(localWire.system, SHARED_WORKBENCH_SYSTEM_KERNEL);
+  for (const [provider, model] of [["anthropic", "claude-3-7-sonnet"], ["openai", "gpt-4o"], ["ollama", "qwen2.5:14b"]]) {
+    const wire = buildLayeredStreamPayload({ system: "", prompt: "", layered: sampleLayered }, provider, model);
+    assert.equal(wire.strategy, "stable-prefix");
+    assert.equal(wire.system, dsWire.system);
+  }
 
   // 2. End-to-end cross-job prefix sharing on HostJobEngine
   const llm = createScriptedLlm([
