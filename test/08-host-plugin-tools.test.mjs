@@ -66,7 +66,7 @@ test("applyWorkbench serves Next-Gen HTTP routes, static assets, security header
 
       const diag = await host.getDiag();
       assert.equal(diag.status, 200);
-      assert.equal(diag.body.result.version, "3.1.0");
+      assert.equal(diag.body.result.version, "3.2.0");
       assert.equal(diag.body.result.schemaId, "zhizhang/3.0");
       assert.equal(diag.body.result.agentToolsRegistered, true);
       assert.equal(diag.body.result.agentToolCount, 23);

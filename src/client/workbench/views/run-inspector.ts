@@ -1,4 +1,5 @@
 import type {
+  ChapterVersionDto,
   ContextAssemblyReportDto,
   RunBillingSummaryDto,
   RunDetailDto,
@@ -13,6 +14,8 @@ interface ParsedFrozenInput {
   readonly knownAt?: { readonly chapterId: string; readonly point: number };
   readonly knownFacts?: readonly SettingFactDto[];
   readonly contextBundle?: { readonly report?: ContextAssemblyReportDto };
+  readonly continuationSource?: ChapterVersionDto | null;
+  readonly reviewObservations?: readonly { severity: string; quote: string; suggestion: string }[];
 }
 
 const PHASE_LABELS: Readonly<Record<string, string>> = {
@@ -126,8 +129,35 @@ export function renderRunInspector(target: HTMLElement, detail: RunDetailDto): v
     meta.append(el("dt", { text: label }), el("dd", { className: "tabular", text: value }));
   }
   header.append(meta);
+  const source = frozen.continuationSource;
+  if (source) {
+    const kind = source.kind === "candidate" ? "候选稿" : "修订";
+    meta.append(el("dt", { text: "上一章接续版本" }),
+      el("dd", { text: `《${source.title}》${kind} · ${source.id.slice(0, 8)}` }));
+  }
   target.append(header);
+  if (detail.continuationState === "changed" || detail.continuationState === "unavailable") {
+    target.append(el("p", {
+      className: "status-warning",
+      text: detail.continuationState === "changed"
+        ? "当前上章与接续来源有变动，请核对本章开头与前文。"
+        : "原接续版本已不可用，请核对本章开头与前文。",
+    }));
+  } else if (detail.continuationState === "pending") {
+    target.append(el("p", { className: "muted-copy", text: "本章沿用的上章候选稿仍待采纳。" }));
+  }
 
+  if (frozen.reviewObservations?.length) {
+    const section = el("div", { className: "inspector-section" });
+    section.append(el("h3", { className: "inspector-heading", text: "候选稿审阅意见" }));
+    const list = el("ul", { className: "inspector-list" });
+    for (const observation of frozen.reviewObservations) {
+      const quote = observation.quote ? `「${observation.quote}」 ` : "";
+      list.append(el("li", { text: `${quote}${observation.suggestion}`, className: observation.severity === "error" ? "status-warning" : "" }));
+    }
+    section.append(list);
+    target.append(section);
+  }
   if (detail.recoveryHints && detail.recoveryHints.length > 0) {
     const hintsSec = el("div", { className: "inspector-section" });
     hintsSec.append(el("h3", { className: "inspector-heading status-warning", text: "恢复建议" }));

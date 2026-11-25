@@ -35,6 +35,7 @@ import {
   formatTechniquesBlock,
   previewContext,
 } from "./fanqie/context.ts";
+import { chapterVersionOptions } from "../continuation.ts";
 import {
   getBookCacheSnapshotAction,
   rebuildBookCacheSnapshotAction,
@@ -751,6 +752,7 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
       `).get(active.id) as { id: string; hash: string } | undefined;
       return {
         settings: page.entries, settingsCursor: page.cursor, pendingProposalCount, planningId,
+        previousChapterVersions: chapterVersionOptions(ctx, active),
         outlineWriteId: outline?.hash === planningId ? outline.id : null,
       };
     },

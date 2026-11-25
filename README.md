@@ -18,11 +18,11 @@
 
 ## 安装到 DsH Web
 
-当前验收版本为 DsH `0.2.2-rc.5`，使用 Node.js 24.9+。从 GitHub Release 下载 `zhizhang-dsh-workbench-3.1.0.tgz`，在终端执行：
+当前验收版本为 DsH `0.2.2-rc.5`，使用 Node.js 24.9+。从 GitHub Release 下载 `zhizhang-dsh-workbench-3.2.0.tgz`，在终端执行：
 
 ```bash
 dsh --profile web --dump-config
-dsh plugin --profile web add ./zhizhang-dsh-workbench-3.1.0.tgz
+dsh plugin --profile web add ./zhizhang-dsh-workbench-3.2.0.tgz
 dsh --profile web --host 127.0.0.1 --port 3080
 ```
 

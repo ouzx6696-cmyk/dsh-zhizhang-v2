@@ -103,6 +103,16 @@ export interface ActiveDocument {
 }
 export type ActiveDocumentView = ActiveDocument;
 
+export interface ChapterVersionDto {
+  readonly id: string;
+  readonly kind: "revision" | "candidate";
+  readonly documentId: string;
+  readonly title: string;
+  readonly current?: boolean;
+  readonly createdAt?: number;
+}
+export type ChapterContinuationState = "aligned" | "pending" | "changed" | "unavailable";
+
 export type RecoveryHintKind = "output_truncated" | "thinking_exhausted" | "budget_exhausted";
 
 export interface RecoveryHintDto {
@@ -285,6 +295,7 @@ export interface RunDetailDto {
   readonly state: string;
   readonly baseRevisionId: string;
   readonly frozenInput: string;
+  readonly continuationState?: ChapterContinuationState;
   readonly reserved: number;
   readonly settled: number;
   readonly candidateId: string | null;
@@ -419,6 +430,7 @@ export interface WorkspaceSnapshot {
   readonly projects?: readonly ProjectSummary[];
   readonly documents?: readonly DocumentSummary[];
   readonly active?: ActiveDocument;
+  readonly previousChapterVersions?: readonly ChapterVersionDto[];
   readonly activeContext?: ActiveContextCrumbDto | null;
   readonly runs?: readonly RunSummary[];
   readonly jobs?: readonly UnifiedJobSummaryDto[];

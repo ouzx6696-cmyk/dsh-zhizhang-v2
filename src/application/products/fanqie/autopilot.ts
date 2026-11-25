@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ContractError } from "../../../contracts/errors.ts";
 import { QA_REFINEMENT_LIMIT } from "../../../contracts/protected-rules.ts";
 import type {
   AutopilotAdoptionPolicy,
@@ -23,7 +24,9 @@ import { anchor } from "../../../domain/shared/index.ts";
 import { stmt, type SqliteParameter } from "../../../storage/index.ts";
 import { SHARED_WORKBENCH_SYSTEM_KERNEL } from "../../../workflow/cache-layer.ts";
 import { assertStageOutput, WRITING_STAGE_IDS, type SingleShotLlmCaller } from "../../../workflow/writing-stages.ts";
-import { count, invalid, optionalText, requiredRow, text, type DocumentRow, type Input, type WorkspaceContext } from "../../context.ts";
+import { count, invalid, optionalText, refuse, requiredRow, text, type DocumentRow, type Input, type WorkspaceContext } from "../../context.ts";
+import { previousChapter, resolveContinuation } from "../../continuation.ts";
+import { stageDraftCandidate } from "../../draft-candidate.ts";
 import { buildFanqieFrozenContext, buildFanqieLayeredPayload, buildFanqieSharedLayeredPrefix } from "./context.ts";
 import { loadProjectControls } from "./controls.ts";
 import { insertObservationsBatch, loadSlopConfig } from "./diagnostics.ts";
@@ -100,6 +103,16 @@ function loadBatchSteps(ctx: WorkspaceContext, batchId: string): AutopilotStepDt
 }
 
 function mapBatchRow(ctx: WorkspaceContext, row: BatchRow): AutopilotBatchDto {
+  const chapterIds = safeJson<string[]>(row.chapterIdsJson, []);
+  const candidates = row.adoptionPolicy === "candidate_only" ? stmt(ctx.db, `
+    SELECT document_id AS documentId, id AS runId, candidate_id AS candidateId, base_revision_id AS baseRevisionId, state
+    FROM author_runs
+    WHERE document_id IN (SELECT value FROM json_each(?)) AND candidate_id IS NOT NULL
+      AND CASE WHEN json_valid(frozen_input) THEN
+        json_extract(frozen_input, '$.origin') = 'autopilot'
+        AND json_extract(frozen_input, '$.batchId') = ? END
+    ORDER BY rowid;
+  `).all(JSON.stringify(chapterIds), row.id) as AutopilotBatchDto["candidates"] : [];
   return {
     id: row.id,
     projectId: row.projectId,
@@ -107,7 +120,7 @@ function mapBatchRow(ctx: WorkspaceContext, row: BatchRow): AutopilotBatchDto {
     autonomyMode: row.autonomyMode === "chapter_gate" ? "chapter_gate" : "redline_pause",
     adoptionPolicy: row.adoptionPolicy === "candidate_only" ? "candidate_only" : "working_draft_snapshot",
     status: row.status,
-    chapterIds: safeJson<string[]>(row.chapterIdsJson, []),
+    chapterIds,
     currentChapterIndex: row.currentChapterIndex,
     currentStep: row.currentStep,
     tokenBudget: row.tokenBudget,
@@ -117,6 +130,7 @@ function mapBatchRow(ctx: WorkspaceContext, row: BatchRow): AutopilotBatchDto {
     model: row.model,
     pauseReason: safeJson<AutopilotPauseReasonDto | null>(row.pauseReasonJson, null),
     preBatchRevisions: safeJson<Record<string, string | null>>(row.preBatchRevisionsJson, {}),
+    candidates,
     steps: loadBatchSteps(ctx, row.id),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -326,6 +340,9 @@ export function rollbackAutopilotChapter(
   if (!Object.hasOwn(batch.preBatchRevisions, documentId)) {
     invalid("documentId", "chapter-not-in-batch");
   }
+  if (batch.adoptionPolicy === "candidate_only") {
+    refuse("autopilot.rollback_chapter", "candidate-only-batch");
+  }
   const preRevId = batch.preBatchRevisions[documentId] ?? null;
   let preBody = "";
   if (preRevId) {
@@ -358,6 +375,7 @@ function diagnoseChapterDraft(
   ctx: WorkspaceContext,
   doc: DocumentRow,
   body: string,
+  upstream?: { readonly source: { readonly documentId: string }; readonly body: string } | null,
 ) {
   const order = ctx.chapterOrder(doc.projectId);
   const chapterIndex = Math.max(0, order.indexOf(doc.id));
@@ -376,7 +394,9 @@ function diagnoseChapterDraft(
       WHERE d.document_id = ?;
     `);
     for (const prevId of recentIds) {
-      const prev = readBody.get(prevId) as { body?: string | null } | undefined;
+      const prev = upstream?.source.documentId === prevId
+        ? upstream
+        : readBody.get(prevId) as { body?: string | null } | undefined;
       if (prev?.body) recentChapterBodies.push(prev.body);
     }
   }
@@ -440,6 +460,11 @@ export async function runAutopilotBatch(
   if (initial.status === "completed" || initial.status === "cancelled") {
     return initial;
   }
+  const candidateOnly = initial.adoptionPolicy === "candidate_only";
+  if (candidateOnly && initial.status === "paused_redline" && !deps.overrideRedLine &&
+      initial.candidates.some((candidate) => candidate.documentId === initial.chapterIds[initial.currentChapterIndex])) {
+    return initial;
+  }
 
   updateBatchState(ctx, deps.batchId, { status: "running", pauseReason: null });
   let tokensSpent = initial.tokensSpent;
@@ -490,6 +515,20 @@ export async function runAutopilotBatch(
     return getAutopilotBatch(ctx, { batchId: deps.batchId });
   }
 
+  function advanceChapter(doc: DocumentRow, idx: number, score: number | null): AutopilotBatchDto | null {
+    overrideCurrentChapter = false;
+    if (initial.autonomyMode === "chapter_gate" && idx + 1 < initial.chapterIds.length) {
+      const grade = score === null ? "" : `（综合分 ${score}）`;
+      return pauseForRedLine(
+        "chapter_gate_checkpoint", doc,
+        `《${doc.title}》已完成${grade}，请审阅后继续下一章。`,
+        [`下一章：第 ${idx + 2}/${initial.chapterIds.length} 章`], [], "paused_gate", idx + 1,
+      );
+    }
+    updateBatchState(ctx, deps.batchId, { currentChapterIndex: idx + 1, tokensSpent, refineRoundsUsed });
+    return null;
+  }
+
   for (let idx = initial.currentChapterIndex; idx < initial.chapterIds.length; idx += 1) {
     const liveBatch = getAutopilotBatch(ctx, { batchId: deps.batchId });
     if (deps.signal.aborted || liveBatch.status === "cancelled") {
@@ -499,6 +538,7 @@ export async function runAutopilotBatch(
 
     const docId = initial.chapterIds[idx];
     let doc = ctx.document(docId);
+    const baseRevisionId = doc.revisionId;
     if (doc.state === "final") {
       recordStep(ctx, {
         batchId: deps.batchId,
@@ -519,6 +559,20 @@ export async function runAutopilotBatch(
       continue;
     }
 
+    if (candidateOnly) {
+      if (liveBatch.candidates.some((candidate) => candidate.documentId === doc.id)) {
+        const gate = advanceChapter(doc, idx, null);
+        if (gate) return gate;
+        continue;
+      }
+      try {
+        ctx.assertRunAvailable("autopilot.write", doc.id);
+      } catch (error) {
+        if (!(error instanceof ContractError)) throw error;
+        return pauseForRedLine("candidate_conflict", doc, "本章已有待处理的写作任务。处理后可重试。", [], [], "paused_redline", idx);
+      }
+    }
+
     // Budget cap red-line (>= 85%)
     if (tokensSpent >= initial.tokenBudget * 0.85 && !overrideCurrentChapter) {
       return pauseForRedLine(
@@ -530,7 +584,16 @@ export async function runAutopilotBatch(
     }
 
     // Build shared L0+L1+L2 prefix and full context once for this chapter
-    const frozen = buildFanqieFrozenContext(ctx, doc, { instruction: deps.instruction ?? "" }, { readOnly: false });
+    const previous = candidateOnly ? previousChapter(ctx, doc) : null;
+    const upstream = liveBatch.candidates.find((candidate) =>
+      candidate.documentId === previous?.id && candidate.state === "awaiting-author" &&
+      candidate.baseRevisionId === previous.revisionId);
+    const contextInput = {
+      instruction: deps.instruction ?? "",
+      previousVersionId: upstream?.candidateId,
+    };
+    const selectedUpstream = upstream ? resolveContinuation(ctx, doc, contextInput) : null;
+    const frozen = buildFanqieFrozenContext(ctx, doc, contextInput, { readOnly: false });
     const shared = buildFanqieSharedLayeredPrefix(ctx, doc.projectId, doc, { readOnly: false });
     const activeTechniqueIds = frozen.contextBundle.report.activeTechniqueIds;
 
@@ -612,7 +675,7 @@ export async function runAutopilotBatch(
     // --- Step 2: Draft Write ---
     updateBatchState(ctx, deps.batchId, { currentStep: "draft_write", tokensSpent });
     let draftBody = doc.body ?? "";
-    let workingRevId = doc.revisionId;
+    let workingRevId = candidateOnly ? null : doc.revisionId;
     try {
       const writeSections = [
         frozen.contextBundle.dynamicTail,
@@ -630,7 +693,7 @@ export async function runAutopilotBatch(
       consecutiveErrors = 0;
       draftBody = generated.trim();
 
-      if (initial.adoptionPolicy === "working_draft_snapshot") {
+      if (!candidateOnly) {
         const saved = deps.saveDraft(doc, draftBody);
         workingRevId = saved.revisionId;
         doc = ctx.document(doc.id);
@@ -643,13 +706,13 @@ export async function runAutopilotBatch(
         stepKind: "draft_write",
         round: 1,
         status: "completed",
-        inputRevisionId: initial.preBatchRevisions[doc.id] ?? null,
-        outputRevisionId: workingRevId,
+        inputRevisionId: baseRevisionId,
+        outputRevisionId: candidateOnly ? null : workingRevId,
         scoreBefore: null,
         scoreAfter: null,
         tokensUsed: writeDelta,
         cacheHitRate: frozen.contextBundle.report.estimatedCacheableRatio ?? null,
-        summary: `生成正文 ${[...draftBody.replace(/\s/gu, "")].length} 字（${initial.adoptionPolicy === "working_draft_snapshot" ? "已写入工作稿快照" : "仅暂存候选态"}）。`,
+        summary: `生成正文 ${[...draftBody.replace(/\s/gu, "")].length} 字（${candidateOnly ? "进入候选稿审校" : "已写入工作稿快照"}）。`,
         error: null,
       });
     } catch (err) {
@@ -676,7 +739,7 @@ export async function runAutopilotBatch(
 
     // --- Step 3a: Zero-token Offline Quality v2 QA ---
     updateBatchState(ctx, deps.batchId, { currentStep: "offline_qa", tokensSpent });
-    let diag = diagnoseChapterDraft(ctx, doc, draftBody);
+    let diag = diagnoseChapterDraft(ctx, doc, draftBody, selectedUpstream);
     const initialScore = diag.qualityV2?.compositeScore ?? diag.goldenThree.overallScore;
     recordStep(ctx, {
       batchId: deps.batchId,
@@ -724,7 +787,7 @@ export async function runAutopilotBatch(
           suggestion: String(rec.suggestion ?? ""),
         };
       });
-      if (reviewObs.length > 0) {
+      if (!candidateOnly && reviewObs.length > 0) {
         ctx.atomic(() => {
           insertObservationsBatch(ctx, doc.projectId, doc.id, workingRevId, reviewObs, "autopilot");
         });
@@ -769,6 +832,7 @@ export async function runAutopilotBatch(
     // --- Step 4: Surgical Paragraph Refine (strictly capped at QA_REFINEMENT_LIMIT = 2) ---
     let currentScore = initialScore;
     let chapterRefineRound = 0;
+    let lastRefineError = "";
     const highSeverityReview = () =>
       reviewObs.filter((o) => o.severity === "error" && (o.dimension === "ooc" || o.dimension === "continuity"));
     const needsRefine = () =>
@@ -821,12 +885,12 @@ export async function runAutopilotBatch(
         const prevScore = currentScore;
         if (applied.appliedCount > 0) {
           draftBody = applied.body;
-          if (initial.adoptionPolicy === "working_draft_snapshot") {
+          if (!candidateOnly) {
             const saved = deps.saveDraft(doc, draftBody);
             workingRevId = saved.revisionId;
             doc = ctx.document(doc.id);
           }
-          diag = diagnoseChapterDraft(ctx, doc, draftBody);
+          diag = diagnoseChapterDraft(ctx, doc, draftBody, selectedUpstream);
           currentScore = diag.qualityV2?.compositeScore ?? diag.goldenThree.overallScore;
           // Clear addressed model review observations if patches were applied
           if (applied.appliedCount > 0 && currentScore >= prevScore) {
@@ -853,6 +917,7 @@ export async function runAutopilotBatch(
       } catch (err) {
         consecutiveErrors += 1;
         const msg = err instanceof Error ? err.message : String(err);
+        lastRefineError = msg;
         recordStep(ctx, {
           batchId: deps.batchId,
           documentId: doc.id,
@@ -869,15 +934,21 @@ export async function runAutopilotBatch(
           summary: `第 ${chapterRefineRound} 轮精修失败`,
           error: msg,
         });
-        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-          return pauseForRedLine("consecutive_errors", doc, "连续模型调用失败，已暂停自动写作。", [msg]);
-        }
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) break;
         break;
       }
     }
 
-    // --- Red-Line Circuit Breakers after refinement ---
-    if (!overrideCurrentChapter) {
+    if (deps.signal.aborted || getAutopilotBatch(ctx, { batchId: deps.batchId }).status === "cancelled") {
+      updateBatchState(ctx, deps.batchId, { status: "cancelled", currentStep: null, tokensSpent, refineRoundsUsed });
+      return getAutopilotBatch(ctx, { batchId: deps.batchId });
+    }
+
+    function checkQuality(): AutopilotBatchDto | null {
+      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+        return pauseForRedLine("consecutive_errors", doc, "连续模型调用失败，已暂停自动写作。", [lastRefineError]);
+      }
+      if (overrideCurrentChapter) return null;
       const povLeaks = diag.qualityV2?.povLeakWarnings ?? [];
       if (povLeaks.length > 0) {
         return pauseForRedLine(
@@ -909,15 +980,47 @@ export async function runAutopilotBatch(
           ],
         );
       }
+      return null;
     }
-    overrideCurrentChapter = false;
 
-    // Record technique effectiveness telemetry
-    if (activeTechniqueIds.length > 0) {
-      ctx.atomic(() => {
-        recordTechniqueOutcome(ctx, activeTechniqueIds, currentScore - initialScore);
-      });
+    function recordOutcome(): void {
+      if (activeTechniqueIds.length > 0) {
+        ctx.atomic(() => recordTechniqueOutcome(ctx, activeTechniqueIds, currentScore - initialScore));
+      }
     }
+
+    if (candidateOnly) {
+      let gate: AutopilotBatchDto | null;
+      try {
+        gate = ctx.atomic(() => {
+          stageDraftCandidate(ctx, doc, deps.saveDraft, draftBody, {
+            origin: "autopilot",
+            batchId: deps.batchId,
+            continuationSource: frozen.continuationSource,
+            reviewObservations: reviewObs,
+          });
+          recordStep(ctx, {
+            batchId: deps.batchId, documentId: doc.id, chapterTitle: doc.title, stepKind: "fact_sync",
+            round: 1, status: "skipped", inputRevisionId: null, outputRevisionId: null,
+            scoreBefore: currentScore, scoreAfter: currentScore, tokensUsed: 0, cacheHitRate: null,
+            summary: "候选稿已保存。采纳后可从该版工作稿生成记忆提案。", error: null,
+          });
+          const pause = checkQuality();
+          if (pause) return pause;
+          recordOutcome();
+          return advanceChapter(doc, idx, currentScore);
+        });
+      } catch (error) {
+        if (!(error instanceof ContractError)) throw error;
+        return pauseForRedLine("candidate_conflict", doc, "写作期间本章稿件或任务已变更。检查本章后可重试。", [], [], "paused_redline", idx);
+      }
+      if (gate) return gate;
+      continue;
+    }
+
+    const pause = checkQuality();
+    if (pause) return pause;
+    recordOutcome();
 
     // --- Step 5: Fact Sync Proposal (staged to proposal inbox, never mutates locked lore) ---
     updateBatchState(ctx, deps.batchId, { currentStep: "fact_sync", tokensSpent, refineRoundsUsed });
@@ -981,24 +1084,8 @@ export async function runAutopilotBatch(
       });
     }
 
-    // Chapter Gate pause if multi-chapter in chapter_gate mode and more chapters remain
-    if (initial.autonomyMode === "chapter_gate" && idx + 1 < initial.chapterIds.length) {
-      return pauseForRedLine(
-        "chapter_gate_checkpoint",
-        doc,
-        `《${doc.title}》流水线已完成（综合分 ${currentScore}），按「逐章放行」策略暂停，请审阅后继续下一章。`,
-        [`下一章：第 ${idx + 2}/${initial.chapterIds.length} 章`],
-        [],
-        "paused_gate",
-        idx + 1,
-      );
-    }
-
-    updateBatchState(ctx, deps.batchId, {
-      currentChapterIndex: idx + 1,
-      tokensSpent,
-      refineRoundsUsed,
-    });
+    const gate = advanceChapter(doc, idx, currentScore);
+    if (gate) return gate;
   }
 
   updateBatchState(ctx, deps.batchId, {

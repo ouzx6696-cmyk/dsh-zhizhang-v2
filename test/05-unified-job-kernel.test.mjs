@@ -181,7 +181,7 @@ test("HostJobEngine executes all 3 job kinds over /jobs/* and drains cleanly on 
 
     const diag = await host.getDiag();
     assert.equal(diag.body.result.usageConsistencyIssues, 0);
-    assert.equal(diag.body.result.version, "3.1.0");
+    assert.equal(diag.body.result.version, "3.2.0");
 
     // Job 4: start another generation and unload plugin cleanly
     await host.command("run.discard", { runId });

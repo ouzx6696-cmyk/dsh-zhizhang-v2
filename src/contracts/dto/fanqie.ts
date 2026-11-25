@@ -608,6 +608,7 @@ export type AutopilotRedLineKind =
   | "high_severity_review"
   | "budget_cap"
   | "consecutive_errors"
+  | "candidate_conflict"
   | "chapter_gate_checkpoint";
 
 export interface AutopilotPauseReasonDto {
@@ -655,6 +656,13 @@ export interface AutopilotBatchDto {
   readonly model: string;
   readonly pauseReason: AutopilotPauseReasonDto | null;
   readonly preBatchRevisions: Readonly<Record<string, string | null>>;
+  readonly candidates: readonly {
+    readonly documentId: string;
+    readonly runId: string;
+    readonly candidateId: string;
+    readonly baseRevisionId: string;
+    readonly state: string;
+  }[];
   readonly steps: readonly AutopilotStepDto[];
   readonly createdAt: number;
   readonly updatedAt: number;

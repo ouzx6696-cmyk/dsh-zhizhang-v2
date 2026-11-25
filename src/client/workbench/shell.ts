@@ -549,6 +549,32 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     const mod = activeModule();
     const hasDraft = Boolean(active?.revisionId);
     const locked = Boolean(active && mod?.lockedStates.includes(active.state));
+    const versions = snapshot.previousChapterVersions ?? [];
+    const versionSelect = byId<HTMLSelectElement>("continuation-version");
+    const previousDocumentId = versions[0]?.documentId ?? "";
+    byId("continuation-source").hidden = !previousDocumentId || locked;
+    versionSelect.disabled = !previousDocumentId || locked;
+    if (gate.changed("continuation", JSON.stringify([active?.id, versions]))) {
+      const keep = versionSelect.dataset.chapter === active?.id &&
+        versionSelect.dataset.previous === previousDocumentId ? versionSelect.value : "";
+      versionSelect.dataset.chapter = active?.id ?? "";
+      versionSelect.dataset.previous = previousDocumentId;
+      const options = versions.filter((version) => !version.current).map((version) => {
+        const shortId = version.id.slice(0, 8);
+        const time = version.createdAt ? new Date(version.createdAt).toLocaleString("zh-Hans", { dateStyle: "short", timeStyle: "short" }) : "";
+        const label = version.kind === "candidate" ? `待审候选稿 · ${shortId}` : `历史修订 ${time} · ${shortId}`;
+        return new Option(label, version.id);
+      });
+      if (keep && versions.some((version) => version.id === keep && version.current)) {
+        options.push(new Option(`指定修订 · ${keep.slice(0, 8)}`, keep));
+      }
+      if (keep && !versions.some((version) => version.id === keep)) {
+        options.push(new Option(`先前选定版本 · ${keep.slice(0, 8)}`, keep));
+      }
+      const title = versions[0]?.title ?? "";
+      versionSelect.replaceChildren(new Option(title ? `《${title}》当前工作稿` : "上一章当前工作稿", ""), ...options);
+      versionSelect.value = keep;
+    }
 
     const projSig = (snapshot.projects ?? []).map((p) => `${p.id}:${p.name}:${p.product}`).join("|");
     if (gate.changed("projects", projSig)) {
@@ -903,9 +929,10 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     const session = snapshot.active ? sessions.get(snapshot.active.product) : undefined;
     if (!instruction.reportValidity() || session?.validateRunStartParams?.(form) === false) return;
     const extra = session?.collectRunStartParams?.(form) ?? {};
+    const previousVersionId = byId<HTMLSelectElement>("continuation-version").value;
     const { inputReserve, recommended } = await request<{ inputReserve: number; recommended: number }>(
       "run.preview",
-      activeInput({ instruction: instruction.value, ...extra }),
+      activeInput({ instruction: instruction.value, ...(previousVersionId ? { previousVersionId } : {}), ...extra }),
     );
     if (!tokenLimit.value || tokenLimit.value === tokenLimit.dataset.suggested) {
       tokenLimit.value = String(recommended);
