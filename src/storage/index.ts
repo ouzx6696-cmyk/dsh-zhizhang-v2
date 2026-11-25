@@ -15,7 +15,6 @@ export {
 export {
   SCHEMA_ID,
   SCHEMA_USER_VERSION,
-  SCHEMA_WINDOW,
   isSupportedSchema,
   assertSupportedSchema,
 } from "./schema.ts";

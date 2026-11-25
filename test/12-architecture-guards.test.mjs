@@ -107,6 +107,7 @@ test("WorkspaceAction maintains 100% parity with backend handlers and endpoint r
   const endpointMapped = new Set([
     "read.model",
     "jobs.list",
+    "jobs.cancel",
     "run.preview",
     "run.generate",
     "proposal.generate",

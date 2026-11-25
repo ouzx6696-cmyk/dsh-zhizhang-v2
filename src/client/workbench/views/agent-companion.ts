@@ -25,36 +25,8 @@ export function onAgentHandoff(listener: HandoffListener): () => void {
   };
 }
 
-/**
- * Dispatches a structured task brief to the parent DsH conversation host via
- * `postMessage` and copies it to clipboard as a reliable fallback.
- */
 export function dispatchAgentHandoff(brief: AgentHandoffBrief): void {
-  try {
-    if (typeof window !== "undefined" && window.parent && window.parent !== window) {
-      window.parent.postMessage(
-        {
-          type: "zhizhang:handoff",
-          title: brief.title,
-          prompt: brief.prompt,
-          context: brief.context ?? {},
-        },
-        "*",
-      );
-    }
-  } catch {
-    // Ignore cross-origin postMessage restrictions when hosted outside DsH.
-  }
-  try {
-    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-      void navigator.clipboard.writeText(brief.prompt).catch(() => {});
-    }
-  } catch {
-    // Clipboard access may be denied in headless or restricted iframes.
-  }
-  for (const listener of handoffListeners) {
-    listener(brief);
-  }
+  for (const listener of handoffListeners) listener(brief);
 }
 
 export interface AgentCompanionOptions {
@@ -62,17 +34,19 @@ export interface AgentCompanionOptions {
   readonly writeBannerContainer: HTMLElement;
   readonly handoffStripContainer: HTMLElement;
   readonly host: WorkbenchShellHost;
-  readonly onClearLocalDraft: (documentId: string) => void;
 }
 
 export function createAgentCompanion(options: AgentCompanionOptions) {
-  const { companionContainer, writeBannerContainer, handoffStripContainer, host, onClearLocalDraft } = options;
+  const { companionContainer, writeBannerContainer, handoffStripContainer, host } = options;
 
   let lastSnapshot: WorkspaceSnapshot = {};
   let dismissedWriteId: string | null = null;
   let showWriteDiff = false;
   let promptPreview: CollaborationSystemPromptDto | null = null;
   let activeHandoff: AgentHandoffBrief | null = null;
+  let handoffStatus = "";
+  let boundFocus = "";
+  const sessionId = new URLSearchParams(window.location.search).get("sessionId");
 
   function renderHandoffStrip(): void {
     handoffStripContainer.replaceChildren();
@@ -85,10 +59,10 @@ export function createAgentCompanion(options: AgentCompanionOptions) {
     const head = el("div", { className: "agent-strip-head" });
     const titleWrap = el("div");
     titleWrap.append(
-      el("p", { className: "setting-title", text: `已交办给 DsH Agent · ${activeHandoff.title}` }),
+      el("p", { className: "setting-title", text: `交办 · ${activeHandoff.title}` }),
       el("p", {
         className: "muted-copy",
-        text: "任务指令已派发至 DsH 对话宿主并复制到剪贴板，可直接发送给 Agent 执行。",
+        text: handoffStatus,
       }),
     );
 
@@ -100,8 +74,10 @@ export function createAgentCompanion(options: AgentCompanionOptions) {
         size: "sm",
         onClick: () => {
           if (!activeHandoff) return;
-          void navigator.clipboard?.writeText(activeHandoff.prompt).catch(() => {});
-          host.notice("已复制交办指令到剪贴板");
+          void host.perform(async () => {
+            await navigator.clipboard.writeText(activeHandoff!.prompt);
+            host.notice("已复制交办指令");
+          });
         },
       }),
       createButton({
@@ -126,10 +102,44 @@ export function createAgentCompanion(options: AgentCompanionOptions) {
     handoffStripContainer.append(head, details);
   }
 
+  async function bindSessionFocus() {
+    const { projectId, documentId } = host.getState();
+    await host.request("focus.set", { sessionId, projectId, documentId, viewMode: "conversation" });
+    boundFocus = documentId;
+  }
+
   onAgentHandoff((brief) => {
     activeHandoff = brief;
+    handoffStatus = sessionId
+      ? "正在填入当前 DsH 会话…"
+      : "请在 DsH 对话的织章面板交办，或复制指令到已绑定作品的会话。";
     renderHandoffStrip();
-    host.notice(`已交办给 DsH Agent：${brief.title}`);
+    if (!sessionId || window.parent === window) return;
+
+    void host.perform(async () => {
+      await bindSessionFocus();
+      const requestId = crypto.randomUUID();
+      const accepted = await new Promise<boolean>((resolve) => {
+        const stop = (result: boolean) => {
+          clearTimeout(timer);
+          window.removeEventListener("message", receive);
+          resolve(result);
+        };
+        const receive = (event: MessageEvent) => {
+          if (event.origin !== location.origin || event.source !== window.parent) return;
+          if (event.data?.type === "zhizhang:handoff-result" && event.data.requestId === requestId) {
+            stop(event.data.accepted === true);
+          }
+        };
+        const timer = setTimeout(() => stop(false), 1500);
+        window.addEventListener("message", receive);
+        window.parent.postMessage({ type: "zhizhang:handoff", requestId, prompt: brief.prompt }, location.origin);
+      });
+      if (activeHandoff === brief) {
+        handoffStatus = accepted ? "已填入当前 DsH 会话，确认后发送。" : "当前输入框不可用，可复制指令。";
+        renderHandoffStrip();
+      }
+    });
   });
 
   function renderWriteBanner(snapshot: WorkspaceSnapshot): void {
@@ -141,6 +151,7 @@ export function createAgentCompanion(options: AgentCompanionOptions) {
       latest &&
       latest.documentId === active.id &&
       latest.mode === "direct_write" &&
+      latest.newRevisionId === active.revisionId &&
       !latest.rolledBack &&
       latest.id !== dismissedWriteId &&
       active.state !== "final" &&
@@ -183,7 +194,6 @@ export function createAgentCompanion(options: AgentCompanionOptions) {
         onClick: () =>
           void host.perform(async () => {
             await host.request("agent.rollback_write", { writeId: latest.id });
-            onClearLocalDraft(active.id);
             showWriteDiff = false;
             await host.load();
             host.notice("已撤销 Agent 本次写入并恢复至前序版本快照");
@@ -406,7 +416,31 @@ export function createAgentCompanion(options: AgentCompanionOptions) {
     );
 
     // 2. Primary Agent Handoff quick actions
+    if (sessionId) {
+      bodyNodes.push(createButton({
+        label: boundFocus === active.id ? "当前会话已绑定本篇" : "将本篇绑定到当前会话",
+        variant: "secondary",
+        size: "sm",
+        onClick: () => void host.perform(async () => {
+          await bindSessionFocus();
+          renderCompanionPanel(snapshot);
+          host.notice("已绑定当前会话");
+        }),
+      }));
+    }
     bodyNodes.push(buildQuickActions(snapshot));
+    if (snapshot.outlineWriteId) {
+      bodyNodes.push(createButton({
+        label: "撤销 Agent 章纲修改",
+        variant: "secondary",
+        size: "sm",
+        onClick: () => void host.perform(async () => {
+          await host.request("chapter.outline.rollback", { documentId: active.id, writeId: snapshot.outlineWriteId });
+          await host.load();
+          host.notice("已恢复上一版章纲");
+        }),
+      }));
+    }
 
     // 3. Pending proposal counter shortcut
     const pendingProposals = snapshot.pendingProposalCount ?? 0;

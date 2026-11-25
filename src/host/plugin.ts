@@ -1,3 +1,4 @@
+import Schema from "@deepseek-ai/schemastery";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -24,7 +25,7 @@ import {
   type HostToolRegistrar,
 } from "./dsh-adapter.ts";
 import { createHostJobEngine } from "./job-engine.ts";
-import { buildSanitizedDiagnostics, registerZhizhangSettings, type DsHConfigFormRegistrar } from "./settings.ts";
+import { buildSanitizedDiagnostics, DEFAULT_MODEL_ROUTE } from "./settings.ts";
 import { registerZhizhangSystemPrompt } from "./system-prompt.ts";
 import { registerZhizhangTools, type ZhizhangAgentToolDefinition } from "./tools.ts";
 import { openAuthorWorkspace } from "./workspace.ts";
@@ -40,14 +41,19 @@ export interface DsHPluginConfig {
   readonly shutdownDrainMs?: number;
 }
 
+export const Config = Schema.object({
+  dataDirectory: Schema.string().required().description("织章工作区目录"),
+  defaultProvider: Schema.string().default(DEFAULT_MODEL_ROUTE.provider).description("后台作业默认提供方"),
+  defaultModel: Schema.string().default(DEFAULT_MODEL_ROUTE.model).description("后台作业默认模型"),
+  enableAgentTools: Schema.boolean().default(true).description("启用 DsH 会话中的织章工具"),
+});
+
 export interface WorkbenchPluginDeps {
   readonly readAsset?: (kind: "html" | "css" | "js", path: string) => Uint8Array;
 }
 
 /**
- * Cordis plugin identifier & `inject`: required services only. `tools` and
- * `configForms` are optional and resolved lazily through `ctx.get()` in
- * isolated sub-scopes.
+ * Cordis plugin identifier and required host services.
  */
 export const name = "zhizhang-workbench";
 export const inject = HOST_REQUIRED_SERVICES;
@@ -217,7 +223,6 @@ export function applyWorkbench(
             path: BASE_PATH + path,
             methods,
             requestBody: methods.includes("GET") ? "buffered" : "streaming",
-            auth: "required",
             fetch,
           }),
         );
@@ -278,20 +283,16 @@ export function applyWorkbench(
           ),
         );
       }
-      disposers.push(
-        ...runInServiceScope(
-          ctx,
-          ["configForms"],
-          "zhizhang: settings form",
-          (scoped) => {
-            const configForms = getHostService<DsHConfigFormRegistrar>(scoped, "configForms");
-            return registerZhizhangSettings(configForms, config);
-          },
-          (error) => {
-            ctx.logger.error("zhizhang: settings form registration failed", { reason: describeError(error) });
-          },
-        ),
-      );
+      const defaults = {
+        provider: config.defaultProvider ?? DEFAULT_MODEL_ROUTE.provider,
+        model: config.defaultModel ?? DEFAULT_MODEL_ROUTE.model,
+      };
+      const withModelRoute = (input: Record<string, unknown>) => ({
+        ...input,
+        provider: typeof input.provider === "string" && input.provider.trim() ? input.provider : defaults.provider,
+        model: typeof input.model === "string" && input.model.trim() ? input.model : defaults.model,
+      });
+      route("/settings", ["GET"], async () => json({ ok: true, result: { ...defaults, agentToolsEnabled } }));
 
       route("/diag", ["GET"], async () => {
         if (!accepting) return new Response(null, { status: 503 });
@@ -360,20 +361,20 @@ export function applyWorkbench(
           const { kind, ...input } = await requestObject(request);
           if (!accepting || request.signal.aborted) return new Response(null, { status: 503 });
           if (kind === "draft_generation") {
-            return json({ ok: true, result: engine.startDraftGeneration(input) }, 202);
+            return json({ ok: true, result: engine.startDraftGeneration(withModelRoute(input)) }, 202);
           }
           if (kind === "proposal_extraction") {
-            return json({ ok: true, result: engine.startProposalExtraction(input) }, 202);
+            return json({ ok: true, result: engine.startProposalExtraction(withModelRoute(input)) }, 202);
           }
           if (kind === "selection_rewrite") {
-            const result = await engine.runSelectionRewrite(input, request.signal);
+            const result = await engine.runSelectionRewrite(withModelRoute(input), request.signal);
             return json({ ok: true, result });
           }
           if (kind === "autopilot_pipeline") {
-            return json({ ok: true, result: engine.startAutopilotPipeline(input) }, 202);
+            return json({ ok: true, result: engine.startAutopilotPipeline(withModelRoute(input)) }, 202);
           }
           if (kind === "material_normalize") {
-            return json({ ok: true, result: engine.startMaterialNormalize(input) }, 202);
+            return json({ ok: true, result: engine.startMaterialNormalize(withModelRoute(input)) }, 202);
           }
           throw new ContractError("input.invalid", { field: "kind", reason: "unknown-job-kind" });
         } catch (error) {
@@ -415,7 +416,10 @@ export function applyWorkbench(
       accepting = false;
       dbOpen = false;
       if (journalTimer !== undefined) clearInterval(journalTimer);
-      for (const dispose of [...disposers].reverse()) void dispose();
+      for (const dispose of [...disposers].reverse()) {
+        void Promise.resolve().then(dispose).catch((cause) =>
+          ctx.logger.error("zhizhang: startup cleanup failed", { reason: describeError(cause) }));
+      }
       db.close();
       throw error;
     }
@@ -423,9 +427,14 @@ export function applyWorkbench(
     return async () => {
       accepting = false;
       if (journalTimer !== undefined) clearInterval(journalTimer);
-      await Promise.all(disposers.map((dispose) => dispose()));
-      await shutdownEngine();
       try {
+        const disposed = await Promise.allSettled(disposers.map(async (dispose) => dispose()));
+        for (const result of disposed) {
+          if (result.status === "rejected") {
+            ctx.logger.error("zhizhang: disposer failed", { reason: describeError(result.reason) });
+          }
+        }
+        await shutdownEngine();
         recoverOnClose();
       } finally {
         dbOpen = false;

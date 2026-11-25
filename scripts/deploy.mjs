@@ -15,7 +15,7 @@ const MIN_FRESH_EPOCH_MS = Date.parse("2020-01-01T00:00:00.000Z");
 
 export function touchBuildArtifacts(rootDir = fileURLToPath(new URL("..", import.meta.url)), now = new Date()) {
   const serverEntry = join(rootDir, "dist", "server", "host", "plugin.js");
-  const clientSlot = join(rootDir, "dist", "client", "slot.js");
+  const clientSlot = join(rootDir, "dist", "client", "dsh.js");
   const clientDistRoot = join(rootDir, "dist", "client");
   assert.equal(existsSync(serverEntry), true, `Missing server entrypoint: ${serverEntry}. Run npm run build first.`);
   assert.equal(existsSync(clientSlot), true, `Missing client slot entrypoint: ${clientSlot}. Run npm run build first.`);

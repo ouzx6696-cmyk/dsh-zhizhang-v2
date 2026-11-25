@@ -25,8 +25,18 @@ export function createZhizhangAgentTools(workspace: AuthorWorkspace): readonly A
     readOnly: spec.readOnly,
     ...(spec.proposalOnly ? { proposalOnly: true } : {}),
     parameters: defineParameters(spec.properties, spec.required),
-    outputSchema: openOutputSchema(spec.outputDescription),
-    execute: spec.execute,
+    outputSchema: spec.outputType === "array"
+      ? { type: "array", description: spec.outputDescription }
+      : spec.outputType === "object-or-array"
+        ? { oneOf: [{ type: "object" }, { type: "array" }], description: spec.outputDescription }
+        : openOutputSchema(spec.outputDescription),
+    execute(args, exec) {
+      const sessionId = exec.agent?.id;
+      if (!sessionId) return spec.execute(args);
+      workspace.assertAgentTarget(sessionId, args);
+      const scoped = workspace.agentTools(sessionId).find((item) => item.name === spec.name)!;
+      return scoped.execute({ ...args, ...(exec.callId ? { key: exec.callId } : {}) });
+    },
   }));
 }
 
@@ -40,5 +50,7 @@ export function registerZhizhangTools(
   enabled = true,
 ): Disposer[] {
   if (!registrar || !enabled) return [];
-  return registerHostTools(registrar, createZhizhangAgentTools(workspace));
+  return registerHostTools(registrar, createZhizhangAgentTools(workspace), {
+    when: ({ agent }) => Boolean(workspace.getSessionFocus(agent.id).projectId),
+  });
 }

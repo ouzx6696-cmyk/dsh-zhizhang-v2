@@ -1,6 +1,6 @@
 # 02 · 六层单向架构与模块边界（Zhizhang 3.0）
 
-织章 3.0 采用严格的**六层单向依赖架构**、**声明式产品线插槽（`ProductLineModule`）**与**零运行时依赖策略**，并由 `test/12-architecture-guards.test.mjs` 与 `test/01-contracts-protected.test.mjs` 在每次构建与测试中自动化锁定。
+织章 3.1 采用严格的**六层单向依赖架构**、**声明式产品线插槽（`ProductLineModule`）**与**DsH Host 对接**，并由 `test/12-architecture-guards.test.mjs` 与 `test/01-contracts-protected.test.mjs` 在每次构建与测试中自动化锁定。
 
 ---
 
@@ -55,8 +55,8 @@
 3. **`WorkspaceAction` 100% 契约零漂移**：`src/contracts/dto/core.ts` 中的 `WorkspaceAction` 联合类型与后端 `src/application/`、`src/host/` 及 `api.ts` 路由端点严格一一对应——**零幻影 Action、零未类型化处理器**。
 4. **契约层纯类型零排放**：`src/contracts/workspace-dto.ts` 及 `src/contracts/dto/*.ts` 不允许出现任何运行时导出。
 5. **受保护常量单一真相源**：`src/contracts/protected-rules.ts` 为唯一定义点，浏览器侧 `src/client/contracts/protected-rules.ts` 保持逐字一致镜像。
-6. **零第三方运行时依赖 & 测试目录洁净**：`package.json` 不得包含运行时 `dependencies`；`test/` 仅允许存放 `*.test.mjs` 套件文件，共用夹具必须位于 `support/`。
-7. **DsH 宿主边界隔离**：上游宿主接口与工具注册形状仅允许声明于 `src/host/dsh-adapter.ts` 与 `src/host/dsh-tools-adapter.ts`（在经授权隔离环境实测验证前显式标注为基于公开文档推导）。
+6. **宿主共享依赖与测试目录**：宿主配置复用 DsH 的 Schemastery，包通过 peer 声明版本；`test/` 仅允许存放 `*.test.mjs` 套件文件，共用夹具必须位于 `support/`。
+7. **DsH 宿主边界隔离**：上游宿主接口与工具注册形状仅允许声明于 `src/host/dsh-adapter.ts` 与 `src/host/dsh-tools-adapter.ts`，以已安装的 DsH 0.2.2-rc.5 Web profile 为集成基准。
 
 ---
 
@@ -71,3 +71,10 @@
   - `contributeSystemPrompt(ctx, projectId, active)`：向 `ctx.systemPrompt` 注入轻量产品线摘要、方法论提示与推荐 Skill 目录索引。
   - `diagnoseForAgent(ctx, row, body)` / `onAgentDraftRecorded(...)`：在 Agent 提交草稿后即时返回零 Token 诊断摘要并回写技法效果遥测。
 - **兜底流水线与生命周期**：`buildFrozenContext`、`runGeneration`、`contributeSnapshot`、`onStartupRecover`、`onJobCacheHit`。
+
+
+## 5. DsH 安装与协作归属
+
+Web Loader 以普通脚本载入 Bundle 的 `./client` 入口。该入口注册主书房、侧栏、对话视图和设置视图，工作台页面内继续使用 ESM。宿主的 SQLite 和路由归插件生命周期所有。开关和默认模型通过 Cordis `Config` 暴露，页面和作业从同一插件配置读取。
+
+作者从对话视图将作品与文档绑定到 DsH 会话。提示词使用宿主的 `systemPrompt.section`，工具通过宿主的 step-time admission 确定该会话能用的能力。工具调用使用宿主提供的 Agent 身份，并在应用层核对作品。正文按 revision 提交，章纲按 planningId 提交。候选、提案与直接写入共用作品数据及审批规则。

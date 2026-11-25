@@ -33,11 +33,7 @@ export const SHARED_WORKBENCH_SYSTEM_KERNEL = [
   "3. 严格依据文末【L3 本次执行任务协议】指定的角色、范围与输出格式返回结果，不附带多余解释。",
 ].join("\n");
 
-export type CacheProviderStrategy =
-  | "deepseek-implicit"
-  | "anthropic-breakpoints"
-  | "openai-implicit"
-  | "compact-local";
+export type CacheProviderStrategy = "deepseek-implicit" | "stable-prefix";
 
 export interface LayeredPromptPayload {
   /** L0: shared system kernel (byte-identical across all book jobs). */
@@ -51,14 +47,11 @@ export interface LayeredPromptPayload {
   readonly volumePrefixSha256?: string;
   /** L3: per-request dynamic tail (delta patches, POV boundary, active draft, task protocol). */
   readonly dynamicTail: string;
-  /** Stable per-book cache routing key (e.g. `zhizhang:<projectId>`). */
-  readonly cachePartitionKey?: string;
 }
 
 export interface CacheStreamPayload {
-  readonly system: string | readonly Record<string, unknown>[];
+  readonly system: string;
   readonly messages: readonly Record<string, unknown>[];
-  readonly extraOptions: Readonly<Record<string, unknown>>;
   readonly strategy: CacheProviderStrategy;
   readonly prefixSha256: string | null;
   readonly l1Version: number | null;
@@ -107,26 +100,7 @@ export function canonicalizeJsonKeys<T>(value: T): T {
  * Resolves the optimal DsH prompt-caching wire strategy for a `(provider, model)` pair.
  */
 export function resolveCacheProviderStrategy(provider: string, model: string): CacheProviderStrategy {
-  const combined = `${provider} ${model}`.toLowerCase();
-  if (combined.includes("claude") || combined.includes("anthropic")) {
-    return "anthropic-breakpoints";
-  }
-  if (
-    combined.includes("ollama")
-    || combined.includes("lmstudio")
-    || combined.includes("local")
-    || combined.includes("vllm-small")
-  ) {
-    return "compact-local";
-  }
-  if (
-    combined.includes("openai")
-    || /\bgpt-/u.test(combined)
-    || /\bo[134](?:-|\b)/u.test(combined)
-  ) {
-    return "openai-implicit";
-  }
-  return "deepseek-implicit";
+  return /deepseek/i.test(`${provider} ${model}`) ? "deepseek-implicit" : "stable-prefix";
 }
 
 const PHASE_TASK_PROTOCOLS: Readonly<Record<WritingPhase, string>> = {
@@ -159,19 +133,7 @@ export function buildTaskProtocolSection(phase: WritingPhase, extraDirectives?: 
   return lines.join("\n");
 }
 
-/**
- * Translates a single-shot request (layered or plain) into provider-aware DsH
- * `call.stream(...)` options without ever emitting non-standard `cachePrefix`.
- *
- * - `deepseek-implicit`: merges L0 + L1 + L2 into a single deterministic `system`
- *   prefix block (0-token-offset strict match) and puts L3 into the `user` message.
- * - `openai-implicit`: same 0-offset prefix layout plus `prompt_cache_key`
- *   scoped per book (`zhizhang:<projectId>`).
- * - `anthropic-breakpoints`: emits structured `system` content blocks with explicit
- *   `cache_control: { type: "ephemeral" }` breakpoints at the end of L1 and L2.
- * - `compact-local`: strips heavy L1/L2 prefix blocks for constrained local models
- *   to prevent context overflow while preserving L0 + L3.
- */
+/** Compose portable DsH requests with a stable system prefix and a task-specific user message. */
 export function buildLayeredStreamPayload(
   request: {
     readonly system: string;
@@ -189,7 +151,6 @@ export function buildLayeredStreamPayload(
     return {
       system: cleanSystem,
       messages: [{ role: "user", content: [{ type: "text", text: cleanPrompt }] }],
-      extraOptions: {},
       strategy,
       prefixSha256: cleanSystem ? sha256Prefix(cleanSystem) : null,
       l1Version: null,
@@ -203,60 +164,11 @@ export function buildLayeredStreamPayload(
   const l3 = normalizeCacheText(request.layered.dynamicTail || request.prompt);
   const l1Version = request.layered.bookSnapshotVersion ?? null;
 
-  if (strategy === "compact-local") {
-    return {
-      system: l0,
-      messages: [{ role: "user", content: [{ type: "text", text: l3 }] }],
-      extraOptions: {},
-      strategy,
-      prefixSha256: sha256Prefix(l0),
-      l1Version,
-      estimatedTextForReserve: { systemText: l0, promptText: l3 },
-    };
-  }
-
   const prefixCombined = [l0, l1, l2].filter(Boolean).join("\n\n===\n\n");
   const prefixSha256 = sha256Prefix(prefixCombined);
-
-  if (strategy === "anthropic-breakpoints") {
-    const systemBlocks: Record<string, unknown>[] = [{ type: "text", text: l0 }];
-    if (l1) {
-      systemBlocks.push({
-        type: "text",
-        text: l1,
-        cache_control: { type: "ephemeral" },
-      });
-    }
-    if (l2) {
-      systemBlocks.push({
-        type: "text",
-        text: l2,
-        cache_control: { type: "ephemeral" },
-      });
-    }
-    if (!l1 && !l2) {
-      systemBlocks[0] = { type: "text", text: l0, cache_control: { type: "ephemeral" } };
-    }
-    return {
-      system: systemBlocks,
-      messages: [{ role: "user", content: [{ type: "text", text: l3 }] }],
-      extraOptions: {},
-      strategy,
-      prefixSha256,
-      l1Version,
-      estimatedTextForReserve: { systemText: prefixCombined, promptText: l3 },
-    };
-  }
-
-  const extraOptions: Record<string, unknown> = {};
-  if (strategy === "openai-implicit" && request.layered.cachePartitionKey) {
-    extraOptions.prompt_cache_key = request.layered.cachePartitionKey;
-  }
-
   return {
     system: prefixCombined,
     messages: [{ role: "user", content: [{ type: "text", text: l3 }] }],
-    extraOptions,
     strategy,
     prefixSha256,
     l1Version,
@@ -283,6 +195,7 @@ export function diagnoseCacheBehavior(
 ): CacheDiagnosisResult {
   let totalInput = 0;
   let totalCacheRead = 0;
+  let totalCacheWrite = 0;
   let prefixTransitions = 0;
   let lastHash: string | null = null;
   let l1Changed = false;
@@ -308,6 +221,7 @@ export function diagnoseCacheBehavior(
     const cacheRead = Math.max(0, Number(tuple[2] ?? 0));
     totalInput += input;
     totalCacheRead += cacheRead;
+    totalCacheWrite += Math.max(0, Number(tuple[3] ?? 0));
     validCalls += 1;
   }
 
@@ -316,7 +230,7 @@ export function diagnoseCacheBehavior(
   }
 
   // DeepSeek charges ~0.1x on cache hits -> each cacheRead token saves ~0.9x input cost.
-  const totalPrompt = totalCacheRead <= totalInput ? totalInput : totalInput + totalCacheRead;
+  const totalPrompt = totalInput + totalCacheRead + totalCacheWrite;
   const hitRate = totalPrompt > 0 ? totalCacheRead / totalPrompt : 0;
   const estimatedSavingsRatio = totalPrompt > 0 ? Math.round(hitRate * 0.9 * 1000) / 1000 : 0;
 
@@ -334,7 +248,7 @@ export function diagnoseCacheBehavior(
   } else if (validCalls >= 2) {
     cacheDiagnosis = "前缀哈希一致但缓存读为 0：可能已超服务端 TTL 窗口或网关未回传缓存用量";
   } else {
-    cacheDiagnosis = "首次冷启动写入缓存，后续同书作业将复用 L0+L1+L2 前缀";
+    cacheDiagnosis = "本次未报告缓存读取，后续同书作业沿用此前缀";
   }
 
   return { estimatedSavingsRatio, prefixTransitions, cacheDiagnosis };

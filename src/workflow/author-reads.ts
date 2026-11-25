@@ -441,6 +441,7 @@ interface AttachedUnitMeta {
   lastSavedAt: number;
   hasDurableRow: boolean;
   lastAccessTick: number;
+  served?: ServedRead;
 }
 
 interface ProjectProjectionHub {
@@ -648,6 +649,13 @@ export function createAuthorModelReader(
 
       // Advance the entire shared project ProjectionStore in bounded pages, then
       // materialize & schema-validate the requested read ONCE at the final watermark!
+      if (meta.served?.asOfSeq === logHead) {
+        return {
+          result: { ...structuredClone(meta.served), folded: 0 },
+          checkpointsToPersist: [],
+          persistNow: Date.now(),
+        };
+      }
       const sharedFolded = store.seqOf() < logHead ? foldStoreToTarget(projectId, store, logHead) : 0;
       const totalFolded = sharedFolded + unitCatchUpFolded;
       const cut = store.snapshot([cacheKey]);
@@ -696,8 +704,8 @@ export function createAuthorModelReader(
 
       evictMemoryUnitsIfNeeded(hubKey, cacheKey);
 
-      // `navigation.view()` already allocates a fresh unaliased object graph; avoid double cloning it.
       const safeResult = name === "navigation" ? served : structuredClone(served);
+      if (name === "navigation") meta.served = structuredClone(served);
 
       return {
         result: safeResult,

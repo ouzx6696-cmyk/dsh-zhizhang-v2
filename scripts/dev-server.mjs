@@ -5,7 +5,7 @@ import { join, normalize } from "node:path";
 import { CLIENT_ENTRY_CSS, CLIENT_ENTRY_HTML, CLIENT_JS_MODULES } from "../src/client/manifest.ts";
 import { ContractError } from "../src/contracts/index.ts";
 import { writeDeliveryFile } from "../src/host/delivery-io.ts";
-import { buildSanitizedDiagnostics } from "../src/host/settings.ts";
+import { buildSanitizedDiagnostics, DEFAULT_MODEL_ROUTE } from "../src/host/settings.ts";
 import { openAuthorWorkspace } from "../src/host/workspace.ts";
 import {
   configureStorePragmas,
@@ -146,6 +146,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && pathname === "/settings") {
+      sendJson(res, { ok: true, result: { ...DEFAULT_MODEL_ROUTE, agentToolsEnabled: false } });
+      return;
+    }
+
     if (req.method === "GET" && pathname === "/diag") {
       const report = buildSanitizedDiagnostics(db, {
         activeJobs: { total: 0, draftGeneration: 0, proposalExtraction: 0, selectionRewrite: 0, autopilotPipeline: 0, materialNormalize: 0 },
@@ -223,7 +228,7 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`织章工作台（V3.0）本地预览服务已启动: http://localhost:${PORT}/workbench`);
+  console.log(`织章工作台本地预览服务已启动: http://localhost:${PORT}/workbench`);
 });
 
 function shutdown() {

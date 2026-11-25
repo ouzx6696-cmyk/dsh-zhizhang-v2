@@ -28,6 +28,7 @@ export interface ProductAgentToolSpec {
   readonly properties: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   readonly required?: readonly string[];
   readonly outputDescription: string;
+  readonly outputType?: "array" | "object-or-array";
   readonly execute: (args: Record<string, unknown>) => unknown;
 }
 

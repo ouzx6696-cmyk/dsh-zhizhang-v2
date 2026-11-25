@@ -69,8 +69,8 @@ test("progressive-disclosure systemPrompt, focus sync, and Skill catalog -> load
       assert.ok(ch.id);
 
       // Sync workspace focus and verify zhizhang_read_focus
-      await host.command("focus.set", { projectId, documentId: ch.id, viewMode: "conversation" });
-      const focusRes = await toolReg.invoke("zhizhang_read_focus", {});
+      await host.command("focus.set", { projectId, documentId: ch.id, viewMode: "conversation", sessionId: "draft-session" });
+      const focusRes = await toolReg.invoke("zhizhang_read_focus", {}, { agent: { id: "draft-session" } });
       assert.equal(focusRes.focus.projectId, projectId);
       assert.equal(focusRes.focus.documentId, ch.id);
       assert.equal(focusRes.focus.projectName, "雪夜孤舟");
@@ -108,7 +108,7 @@ test("progressive-disclosure systemPrompt, focus sync, and Skill catalog -> load
       assert.ok(mount.id);
 
       // Progressive disclosure check: systemPrompt lists the skill index, NOT full executionSteps
-      const renderedPrompt = await promptReg.renderAll();
+      const renderedPrompt = await promptReg.renderAll({ agent: { id: "draft-session" } });
       assert.match(renderedPrompt, /雪夜孤舟/);
       assert.match(renderedPrompt, /第一章 断缆/);
       assert.match(renderedPrompt, /审慎模式/);
@@ -139,7 +139,7 @@ test("progressive-disclosure systemPrompt, focus sync, and Skill catalog -> load
         projectId,
         agentPromptInjection: false,
       });
-      const disabledPrompt = await promptReg.renderAll();
+      const disabledPrompt = await promptReg.renderAll({ agent: { id: "draft-session" } });
       assert.equal(disabledPrompt, "");
     } finally {
       await host.close();
@@ -292,10 +292,8 @@ test("co_create mode allows direct draft/patch/outline writes with snapshot roll
       const doubleRollback = await host.command("agent.rollback_write", { writeId: directPatch.writeId });
       assert.equal(doubleRollback.status, 409);
 
-      // Roll back the earlier full draft -> restores original author draft verbatim
-      await host.command("agent.rollback_write", { writeId: directDraft.writeId });
-      st = (await host.getState({ projectId, documentId: chId })).body.result;
-      assert.equal(st.active.body, authorOriginal);
+      const obsoleteRollback = await host.command("agent.rollback_write", { writeId: directDraft.writeId });
+      assert.equal(obsoleteRollback.body.code, "version.conflict");
 
       // 4. Direct outline write in co_create mode
       const directOutline = await toolReg.invoke("zhizhang_plan_chapter", {
@@ -367,8 +365,8 @@ test("Toutiao co-creation enforces protected 34-char title cap, micro no-title r
         line: "资讯线",
       })).body.result.id;
 
-      await host.command("focus.set", { projectId, documentId: shortId });
-      const ttPrompt = await promptReg.renderAll();
+      await host.command("focus.set", { projectId, documentId: shortId, sessionId: "article-session" });
+      const ttPrompt = await promptReg.renderAll({ agent: { id: "article-session" } });
       assert.match(ttPrompt, /深度观察号/);
       assert.match(ttPrompt, /34 字/);
       assert.match(ttPrompt, /84 分/);
@@ -449,6 +447,50 @@ test("Toutiao co-creation enforces protected 34-char title cap, micro no-title r
         () => ws.app.mutation("agent.submit_draft", { documentId: lockedArt, body: "已验收后不可修改" }),
         "gate.denied",
       );
+    } finally {
+      await host.close();
+    }
+  });
+});
+
+
+test("bound DsH tools use the correct project and preserve the author revision on replay and rollback", async () => {
+  await withTempDir("zhizhang-session-", async (dataDirectory) => {
+    const tools = createStrictToolRegistrar();
+    const prompt = createMockSystemPromptRegistrar();
+    const host = createMockDsHHost({ tools, systemPrompt: prompt });
+    applyWorkbench(host.ctx, { dataDirectory }, { readAsset: host.readAsset });
+    try {
+      const exec = { agent: { id: "session-a" }, callId: "call-1" };
+      const project = async (name) => (await host.command("project.create", { product: "fanqie", name })).body.result.id;
+      const a = await project("甲书");
+      const b = await project("乙书");
+      const documentId = (await host.command("document.create", { projectId: a, title: "甲章" })).body.result.id;
+      await host.command("focus.set", { sessionId: exec.agent.id, projectId: a, documentId });
+      await host.command("focus.set", { sessionId: "session-b", projectId: b });
+      assert.match(await prompt.renderAll(exec), /甲书/);
+      assert.match(await prompt.renderAll({ agent: { id: "session-b" } }), /乙书/);
+      assert.equal(await prompt.renderAll({ agent: { id: "unbound" } }), "");
+      assert.equal(tools.available("zhizhang_read_focus", { id: "unbound" }), false);
+      await assert.rejects(() => tools.invoke("zhizhang_read_tree", { projectId: b }, exec), { code: "gate.denied" });
+
+      await host.command("project.collaboration.set", { projectId: a, collaborationMode: "co_create" });
+      const args = { documentId, baseRevisionId: null, body: "Agent 版本" };
+      const write = await tools.invoke("zhizhang_submit_draft", args, exec);
+      const repeat = await tools.invoke("zhizhang_submit_draft", args, exec);
+      assert.equal(repeat.writeId, write.writeId);
+      await assert.rejects(() => tools.invoke("zhizhang_submit_draft", args, { ...exec, callId: "call-2" }), { code: "version.conflict" });
+
+      const saved = await host.command("draft.save", { documentId, baseRevisionId: write.newRevisionId, body: "作者后续稿" });
+      assert.equal(saved.body.ok, true);
+      assert.equal((await host.command("agent.rollback_write", { writeId: write.writeId })).body.code, "version.conflict");
+      const snap = (await host.getState({ projectId: a, documentId })).body.result;
+      assert.equal(snap.active.body, "作者后续稿");
+
+      const plan = await tools.invoke("zhizhang_plan_chapter", { documentId, basePlanningId: snap.planningId, viewpoint: "陆舟" }, exec);
+      assert.equal(plan.mode, "direct_write");
+      assert.equal((await host.command("chapter.outline.rollback", { documentId, writeId: plan.writeId })).body.ok, true);
+      assert.equal((await host.getState({ projectId: a, documentId })).body.result.planning, null);
     } finally {
       await host.close();
     }

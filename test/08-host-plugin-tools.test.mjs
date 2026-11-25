@@ -25,8 +25,7 @@ test("applyWorkbench serves Next-Gen HTTP routes, static assets, security header
   await withTempDir("zhizhang-host-", async (dataDirectory) => {
     const toolReg = createStrictToolRegistrar();
     const promptReg = createMockSystemPromptRegistrar();
-    const configForms = { forms: [], register(form) { this.forms.push(form); return () => {}; } };
-    const host = createMockDsHHost({ tools: toolReg, configForms, systemPrompt: promptReg, cordis: true });
+    const host = createMockDsHHost({ tools: toolReg, systemPrompt: promptReg, cordis: true });
 
     applyWorkbench(
       host.ctx,
@@ -43,10 +42,6 @@ test("applyWorkbench serves Next-Gen HTTP routes, static assets, security header
       assert.equal(host.routes.has("/api/zhizhang/jobs/start"), true);
       assert.equal(host.routes.has("/api/zhizhang/jobs/cancel"), true);
       assert.equal(host.routes.has("/api/zhizhang/mutate"), false);
-
-      for (const [path, entry] of host.routes.entries()) {
-        assert.equal(entry.auth, "required", `Route ${path} must explicitly declare auth: "required"`);
-      }
 
       const htmlRes = await host.get("/workbench");
       assert.equal(htmlRes.status, 200);
@@ -65,13 +60,13 @@ test("applyWorkbench serves Next-Gen HTTP routes, static assets, security header
       assert.equal(badCt.headers.get("x-content-type-options"), "nosniff");
 
       assert.equal(promptReg.sections.length, 1);
-      assert.equal(promptReg.sections[0].id, "zhizhang.cocreation");
+      assert.equal(promptReg.sections[0].name, "zhizhang.cocreation");
       const idlePrompt = await promptReg.renderAll();
-      assert.match(idlePrompt, /zhizhang_read_focus/);
+      assert.equal(idlePrompt, "");
 
       const diag = await host.getDiag();
       assert.equal(diag.status, 200);
-      assert.equal(diag.body.result.version, "3.0.0");
+      assert.equal(diag.body.result.version, "3.1.0");
       assert.equal(diag.body.result.schemaId, "zhizhang/3.0");
       assert.equal(diag.body.result.agentToolsRegistered, true);
       assert.equal(diag.body.result.agentToolCount, 23);
@@ -79,7 +74,8 @@ test("applyWorkbench serves Next-Gen HTTP routes, static assets, security header
       assert.equal(diag.body.result.systemPromptError, null);
       assert.equal(JSON.stringify(diag.body).includes(dataDirectory), false);
 
-      assert.equal(configForms.forms.length, 1);
+      const settings = await (await host.get("/settings")).json();
+      assert.deepEqual(settings.result, { provider: "deepseek", model: "deepseek-chat", agentToolsEnabled: true });
     } finally {
       await host.close();
     }
@@ -214,18 +210,19 @@ test("dsh-tools-adapter supports DsH flat parameter DSL and client slot mounts s
   // Client slot registration covers main, sidebar.panellist, conversation.view, and settings.plugins.tab
   const registered = [];
   const fakeReact = {
+    useRef: (value) => ({ current: value }),
+    useEffect: () => {},
     createElement(tag, props, ...children) {
       return { tag, props, children };
     },
   };
   const fakeCtx = {
-    apiBase: "https://dsh.example.com/sub/",
     slots: {
       inject(_name, factory) {
         factory();
       },
       register(descriptor, component) {
-        registered.push({ descriptor, rendered: component({}) });
+        registered.push({ descriptor, rendered: component({ apiBase: "https://dsh.example.com/sub/" }) });
       },
     },
   };

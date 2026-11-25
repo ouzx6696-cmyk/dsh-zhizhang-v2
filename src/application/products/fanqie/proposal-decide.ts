@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ContractError } from "../../../contracts/errors.ts";
 import type { AiProposalDto, AiProposalKind, ProposalOrigin } from "../../../contracts/workspace-dto.ts";
 import { stmt, syncChapterFts } from "../../../storage/index.ts";
 import {
@@ -302,7 +303,13 @@ export function decideProposal(ctx: WorkspaceContext, input: Input) {
       if (!targetDocId) invalid("documentId", "chapter-required");
       const doc = ctx.document(targetDocId);
       if (projectId && doc.projectId !== projectId) invalid("documentId", "project-mismatch");
-      const existingPlan = ctx.planning(doc.id) ?? {};
+      if (ctx.isLockedDocument(doc)) refuse("chapter.outline.propose", "revision-locked");
+      const currentPlan = ctx.planning(doc.id);
+      const basePlanningId = JSON.parse(row.payload).basePlanningId;
+      if (typeof basePlanningId === "string" && basePlanningId !== sha256Text(JSON.stringify(currentPlan))) {
+        throw new ContractError("version.conflict", { documentId: doc.id, field: "planning" });
+      }
+      const existingPlan = currentPlan ?? {};
       const existingSections =
         existingPlan.sections && typeof existingPlan.sections === "object" && !Array.isArray(existingPlan.sections)
           ? (existingPlan.sections as Record<string, string>)

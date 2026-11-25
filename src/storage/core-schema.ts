@@ -235,6 +235,14 @@ export function createCoreSchema(db: SqliteDatabase): void {
       updated_at INTEGER NOT NULL DEFAULT 0
     ) STRICT;
 
+    CREATE TABLE IF NOT EXISTS author_session_focus (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES author_projects(id) ON DELETE CASCADE,
+      document_id TEXT REFERENCES author_documents(id) ON DELETE SET NULL,
+      view_mode TEXT NOT NULL DEFAULT 'conversation',
+      updated_at INTEGER NOT NULL DEFAULT 0
+    ) STRICT;
+
     CREATE TABLE IF NOT EXISTS author_project_collaboration (
       project_id TEXT PRIMARY KEY REFERENCES author_projects(id),
       collaboration_mode TEXT NOT NULL DEFAULT 'cautious' CHECK (collaboration_mode IN ('cautious', 'co_create')),

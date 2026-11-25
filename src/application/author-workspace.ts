@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { createDocument, stmt, type SqliteDatabase } from "../storage/index.ts";
+import { createDocument, runAuthorWrite, stmt, type SqliteDatabase } from "../storage/index.ts";
 import {
   createWorkspaceContext,
   invalid,
+  optionalText,
+  refuse,
   requiredRow,
   text,
   type DocumentRow,
@@ -106,7 +108,7 @@ export function openAuthorWorkspace(
       case "run.discard":
         return jobs.handleRunLifecycle(action, input);
       case "focus.get":
-        return getWorkspaceFocus(ctx);
+        return getWorkspaceFocus(ctx, optionalText(input, "sessionId"));
       case "focus.set":
         return setWorkspaceFocus(ctx, input);
       case "project.collaboration.get":
@@ -216,7 +218,23 @@ export function openAuthorWorkspace(
     snapshot: snapshots.snapshot,
   };
 
-  function coreAgentTools(): readonly ProductAgentToolSpec[] {
+  function writeAgentRevision(action: string, input: Input, sessionId?: string) {
+    if (!sessionId && input.baseRevisionId === undefined) return mutation(action, input);
+    const documentId = text(input, "documentId");
+    const baseRevisionId = input.baseRevisionId;
+    if (baseRevisionId !== null && typeof baseRevisionId !== "string") invalid("baseRevisionId", "required");
+    const key = optionalText(input, "key");
+    return runAuthorWrite(db, {
+      actorId: sessionId ?? "agent",
+      commandId: action,
+      documentId,
+      idempotencyKey: key ?? randomUUID(),
+      payload: input,
+      baseRevisionId,
+    }, () => mutation(action, input), { auditOnly: !key }).result;
+  }
+
+  function coreAgentTools(sessionId?: string): readonly ProductAgentToolSpec[] {
     return [
       {
         name: "zhizhang_read_focus",
@@ -226,8 +244,9 @@ export function openAuthorWorkspace(
         properties: {},
         outputDescription: "Current active focus, per-book collaboration mode, and list of workspace projects.",
         execute: () => ({
-          focus: getWorkspaceFocus(ctx),
-          projects: (snapshots.snapshot() as { projects?: unknown }).projects ?? [],
+          focus: getWorkspaceFocus(ctx, sessionId),
+          projects: (snapshots.snapshot() as { projects?: Array<{ id: string }> }).projects
+            ?.filter((project) => !sessionId || project.id === getWorkspaceFocus(ctx, sessionId).projectId) ?? [],
         }),
       },
       {
@@ -237,21 +256,24 @@ export function openAuthorWorkspace(
         readOnly: false,
         properties: {
           documentId: { type: "string" },
+          baseRevisionId: { oneOf: [{ type: "string" }, { type: "null" }], description: "Revision ID from the latest read, or null for a new document." },
           body: { type: "string" },
           summary: { type: "string" },
           techniqueIds: { type: "array", items: { type: "string" } },
           forceCandidate: { type: "boolean" },
         },
-        required: ["documentId", "body"],
+        required: ["documentId", "baseRevisionId", "body"],
         outputDescription: "Submission outcome (candidate or direct_write), snapshot/run IDs, char count, and deterministic offline diagnostics.",
         execute: (args) =>
-          mutation("agent.submit_draft", {
+          writeAgentRevision("agent.submit_draft", {
             documentId: args.documentId,
+            baseRevisionId: args.baseRevisionId,
+            key: args.key,
             body: args.body,
             ...(typeof args.summary === "string" ? { summary: args.summary } : {}),
             ...(Array.isArray(args.techniqueIds) ? { techniqueIds: args.techniqueIds } : {}),
             ...(typeof args.forceCandidate === "boolean" ? { forceCandidate: args.forceCandidate } : {}),
-          }),
+          }, sessionId),
       },
       {
         name: "zhizhang_patch_paragraphs",
@@ -260,6 +282,7 @@ export function openAuthorWorkspace(
         readOnly: false,
         properties: {
           documentId: { type: "string" },
+          baseRevisionId: { oneOf: [{ type: "string" }, { type: "null" }], description: "Revision ID from the latest read, or null for a new document." },
           patches: {
             type: "array",
             items: {
@@ -275,16 +298,18 @@ export function openAuthorWorkspace(
           techniqueIds: { type: "array", items: { type: "string" } },
           forceCandidate: { type: "boolean" },
         },
-        required: ["documentId", "patches"],
+        required: ["documentId", "baseRevisionId", "patches"],
         outputDescription: "Patched draft submission outcome with offline diagnostics summary.",
         execute: (args) =>
-          mutation("agent.patch_paragraphs", {
+          writeAgentRevision("agent.patch_paragraphs", {
             documentId: args.documentId,
+            baseRevisionId: args.baseRevisionId,
+            key: args.key,
             patches: args.patches,
             ...(typeof args.summary === "string" ? { summary: args.summary } : {}),
             ...(Array.isArray(args.techniqueIds) ? { techniqueIds: args.techniqueIds } : {}),
             ...(typeof args.forceCandidate === "boolean" ? { forceCandidate: args.forceCandidate } : {}),
-          }),
+          }, sessionId),
       },
     ];
   }
@@ -315,12 +340,51 @@ export function openAuthorWorkspace(
     recoverJobs: jobs.recoverAll,
     recoverStartup,
     verifyUsageConsistency: () => ctx.jobs.verifyUsageConsistency(),
-    buildSystemPrompt: (projectId?: string, documentId?: string) =>
+    getSessionFocus: (sessionId: string) => getWorkspaceFocus(ctx, sessionId),
+    buildSystemPrompt: (projectId?: string, documentId?: string, sessionId?: string) =>
       buildProgressiveSystemPrompt(ctx, registry, {
         ...(projectId ? { projectId } : {}),
         ...(documentId ? { documentId } : {}),
+        ...(sessionId ? { sessionId } : {}),
       }),
-    agentTools: () => [...coreAgentTools(), ...registry.collectAgentTools(toolFacade)],
+    agentTools: (sessionId?: string) => {
+      const scopedFacade = sessionId ? {
+        mutation,
+        snapshot: (projectId?: string, documentId?: string) => {
+          const snapshot = snapshots.snapshot(projectId, documentId);
+          return { ...snapshot, projects: (snapshot.projects as readonly { id: string }[]).filter((project) => project.id === projectId) };
+        },
+      } : toolFacade;
+      return [...coreAgentTools(sessionId), ...registry.collectAgentTools(scopedFacade)];
+    },
+    assertAgentTarget: (sessionId: string, args: Readonly<Record<string, unknown>>) => ctx.read(() => {
+      const focus = getWorkspaceFocus(ctx, sessionId);
+      if (!focus.projectId) refuse("agent.tool", "session-unbound");
+      if (args.projectId !== undefined && args.projectId !== focus.projectId) {
+        refuse("agent.tool", "session-project-mismatch");
+      }
+      for (const id of [args.documentId, args.chapterId]) {
+        if (typeof id === "string" && ctx.document(id).projectId !== focus.projectId) {
+          refuse("agent.tool", "session-project-mismatch");
+        }
+      }
+      const scopedRecords = [
+        ["author_volumes", args.volumeId ?? (args.targetType === "volume" ? args.targetId : undefined)],
+        ["author_acts", args.actId ?? (args.targetType === "act" ? args.targetId : undefined)],
+        ["author_documents", args.targetType === "chapter" ? args.targetId : undefined],
+        ["author_material_ingests", args.sessionId],
+        ["author_library_mounts", args.mountId],
+        [args.kind === "deconstruction" ? "library_deconstructions" : "library_technique_cards", args.id],
+        [args.itemKind === "deconstruction" ? "library_deconstructions" : "library_technique_cards", args.itemId],
+      ] as const;
+      for (const [table, id] of scopedRecords) {
+        if (typeof id !== "string") continue;
+        const target = stmt(db, `SELECT project_id AS projectId FROM ${table} WHERE id = ?;`).get(id) as
+          | { projectId: string | null }
+          | undefined;
+        if (target?.projectId && target.projectId !== focus.projectId) refuse("agent.tool", "session-project-mismatch");
+      }
+    }),
     resumeExports: () => toutiaoModule.onStartupRecover?.(ctx),
   };
 }

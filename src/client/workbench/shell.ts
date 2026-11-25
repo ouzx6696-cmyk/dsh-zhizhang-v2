@@ -72,15 +72,11 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
   });
   const jobCenter = createJobCenter(byId("job-center"), {
     onCancelJob: (job) => {
-      if (job.kind === "draft_generation" && job.runId) {
-        void perform(() => change("run.cancel", { runId: job.runId! }, { message: "已取消生成作业" }));
-      } else if (job.kind === "proposal_extraction" && job.proposalId) {
-        void perform(async () => {
-          await request("proposal.cancel", { proposalId: job.proposalId! });
-          await load();
-          notice("已取消提案抽取作业");
-        });
-      }
+      void perform(async () => {
+        await request("jobs.cancel", { jobId: job.id });
+        await load();
+        notice("已取消作业");
+      });
     },
     onInspectRun: (runId) => void perform(() => showRunDetail(runId)),
     onApplyRecoveryHint: (hint) => {
@@ -122,22 +118,6 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
   let activePipelineTab: PipelineTabId = "runs";
   let activeWorkspaceView: WorkspaceViewId = "writing";
   let usingCustomTree = false;
-  let lastSyncedFocusKey = "";
-
-  function syncWorkspaceFocus(): void {
-    const key = `${projectId}:${documentId}:${viewMode}`;
-    if (key === lastSyncedFocusKey) return;
-    lastSyncedFocusKey = key;
-    if (!projectId && !documentId) return;
-    void request("focus.set", {
-      projectId: projectId || null,
-      documentId: documentId || null,
-      viewMode,
-    }).catch(() => {
-      // Non-fatal: focus sync will retry on next navigation if server is temporarily busy.
-    });
-  }
-
   function notice(message: string, isError = false): void {
     const container = byId("notice");
     const textNode = byId("notice-text");
@@ -448,9 +428,6 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     writeBannerContainer: byId("agent-write-banner"),
     handoffStripContainer: byId("agent-handoff-strip"),
     host,
-    onClearLocalDraft: (docId) => {
-      vault.write(docId, null);
-    },
   });
 
   const selectionMicrobar = createSelectionMicrobar(editor, host, {
@@ -617,7 +594,6 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     byId<HTMLButtonElement>("save").hidden = !active;
 
     editorBase = active ? { id: active.id, revisionId: active.revisionId, body: active.body ?? "" } : undefined;
-    syncWorkspaceFocus();
     if (!active) {
       studyHome.update(snapshot);
       selectionMicrobar.hide();
@@ -1070,5 +1046,32 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
     switchPipelineTab("runs");
   }
   switchWorkspaceView("writing");
-  void perform(load);
+  void perform(async () => {
+    const response = await fetch("./settings");
+    if (!response.ok) throw new Error("无法读取织章设置");
+    const { result } = await response.json() as { result: { provider: string; model: string; agentToolsEnabled: boolean } };
+    const form = byId<HTMLFormElement>("generate-run");
+    for (const name of ["provider", "model"] as const) {
+      const field = form.elements.namedItem(name) as HTMLInputElement;
+      field.value = result[name];
+    }
+    if (viewMode === "settings") {
+      const panel = el("main", { className: "canvas" });
+      panel.append(
+        el("h1", { text: "织章设置" }),
+        el("p", { text: `后台作业模型 · ${result.provider} / ${result.model}` }),
+        el("p", { text: result.agentToolsEnabled ? "Agent 工具已启用" : "Agent 工具已停用" }),
+        el("p", { className: "muted-copy", text: "默认模型和工具开关可在 DsH 插件配置中修改。" }),
+      );
+      document.body.replaceChildren(panel);
+      return;
+    }
+    const sessionId = new URLSearchParams(window.location.search).get("sessionId");
+    if (sessionId) {
+      const focus = await request<{ projectId: string | null; documentId: string | null }>("focus.get", { sessionId });
+      projectId = focus.projectId ?? "";
+      documentId = focus.documentId ?? "";
+    }
+    await load();
+  });
 }

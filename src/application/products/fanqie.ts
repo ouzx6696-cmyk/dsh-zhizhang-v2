@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { ContractError } from "../../contracts/errors.ts";
+import { sha256Text } from "../digest.ts";
 import {
   assertChapterFinalizable,
   assertChapterTransition,
@@ -200,7 +202,12 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
   function proposeOrSaveOutline(ctx: WorkspaceContext, row: DocumentRow, input: Input) {
     if (row.product !== "fanqie") invalid("documentId", "chapter-required");
     if (ctx.isLockedDocument(row)) refuse("chapter.outline.propose", "revision-locked");
-    const existingPlan = ctx.planning(row.id) ?? {};
+    const previous = ctx.planning(row.id);
+    const currentHash = sha256Text(JSON.stringify(previous));
+    if (input.basePlanningId !== undefined && input.basePlanningId !== currentHash) {
+      throw new ContractError("version.conflict", { documentId: row.id, field: "planning" });
+    }
+    const existingPlan = previous ?? {};
     const existingSections =
       existingPlan.sections && typeof existingPlan.sections === "object" && !Array.isArray(existingPlan.sections)
         ? (existingPlan.sections as Record<string, string>)
@@ -237,7 +244,13 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
     if (collab.collaborationMode === "co_create" && !forceProposal) {
       return ctx.atomic(() => {
         ctx.savePlanning(row, payload);
+        const writeId = randomUUID();
+        stmt(ctx.db, `
+          INSERT INTO author_outline_writes (id, document_id, previous_plan, new_plan_hash, created_at)
+          VALUES (?, ?, ?, ?, ?);
+        `).run(writeId, row.id, previous === null ? null : JSON.stringify(previous), sha256Text(JSON.stringify(payload)), Date.now());
         return {
+          writeId,
           mode: "direct_write" as const,
           documentId: row.id,
           planning: payload,
@@ -251,7 +264,7 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
       projectId: row.projectId,
       documentId: row.id,
       sourceRef: `章纲提案《${row.title}》`,
-      payload,
+      payload: { ...payload, basePlanningId: currentHash },
     });
     return {
       mode: "proposal" as const,
@@ -261,6 +274,28 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
       planning: payload,
       warnings: chapterLengthWarnings(targetRaw),
     };
+  }
+
+  function rollbackOutline(ctx: WorkspaceContext, row: DocumentRow, input: Input) {
+    return ctx.atomic(() => {
+      if (ctx.isLockedDocument(row)) refuse("chapter.outline.rollback", "revision-locked");
+      const writeId = text(input, "writeId");
+      const write = stmt(ctx.db, `
+        SELECT previous_plan AS previousPlan, new_plan_hash AS newPlanHash
+        FROM author_outline_writes WHERE id = ? AND document_id = ?;
+      `).get(writeId, row.id) as { previousPlan: string | null; newPlanHash: string } | undefined;
+      if (!write || write.newPlanHash !== sha256Text(JSON.stringify(ctx.planning(row.id)))) {
+        throw new ContractError("version.conflict", { documentId: row.id, field: "planning" });
+      }
+      if (write.previousPlan === null) {
+        stmt(ctx.db, "DELETE FROM author_planning WHERE document_id = ?;").run(row.id);
+        ctx.event(row.projectId, "chapter", "document.planning", { documentId: row.id });
+      } else {
+        ctx.savePlanning(row, JSON.parse(write.previousPlan) as Input);
+      }
+      stmt(ctx.db, "DELETE FROM author_outline_writes WHERE id = ?;").run(writeId);
+      return { documentId: row.id, writeId };
+    });
   }
 
   function reviewChapter(ctx: WorkspaceContext, row: DocumentRow, input: Input) {
@@ -354,6 +389,7 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
     "reorder.impact": { scope: "project", handler: (ctx, input) => handleContinuity("reorder.impact", ctx, input) },
     "reorder.commit": { scope: "project", handler: (ctx, input) => handleContinuity("reorder.commit", ctx, input) },
     "chapter.outline": { scope: "document", handler: (ctx, input, row) => saveOutline(ctx, row!, input) },
+    "chapter.outline.rollback": { scope: "document", handler: (ctx, input, row) => rollbackOutline(ctx, row!, input) },
     "chapter.outline.propose": { scope: "document", handler: (ctx, input, row) => proposeOrSaveOutline(ctx, row!, input) },
     "chapter.review": { scope: "document", handler: (ctx, input, row) => reviewChapter(ctx, row!, input) },
     "draft.finalize": { scope: "document", handler: (ctx, input, row) => finalizeChapter(ctx, row!, input) },
@@ -708,7 +744,15 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
       const pendingProposalCount = (pendingAiRow?.count ?? 0) + (pendingSettingRow?.count ?? 0);
       if (!active) return { pendingProposalCount };
       const page = settingsPage(ctx, projectId);
-      return { settings: page.entries, settingsCursor: page.cursor, pendingProposalCount };
+      const planningId = sha256Text(JSON.stringify(ctx.planning(active.id)));
+      const outline = stmt(ctx.db, `
+        SELECT id, new_plan_hash AS hash FROM author_outline_writes
+        WHERE document_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1;
+      `).get(active.id) as { id: string; hash: string } | undefined;
+      return {
+        settings: page.entries, settingsCursor: page.cursor, pendingProposalCount, planningId,
+        outlineWriteId: outline?.hash === planningId ? outline.id : null,
+      };
     },
     contributeSystemPrompt(ctx, projectId, active) {
       const controls = loadProjectControls(ctx, projectId);

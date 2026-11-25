@@ -9,11 +9,11 @@
 
 | Object Type | Count |
 | --- | ---: |
-| Tables (non-shadow) | 45 |
+| Tables (non-shadow) | 47 |
 | FTS5 Virtual Tables | 3 |
 | FTS5 Shadow Tables | 12 |
 | Views | 3 |
-| Explicit Indexes | 44 |
+| Explicit Indexes | 45 |
 | Triggers | 14 |
 
 ## Tables
@@ -400,6 +400,18 @@ Foreign keys: `project_id` -> `author_projects(id)`
 
 Foreign keys: `project_id` -> `author_projects(id)`
 
+### `author_outline_writes` (STRICT)
+
+| Column | Type | Not Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | `TEXT` | YES |  | 1 |
+| `document_id` | `TEXT` | YES |  |  |
+| `previous_plan` | `TEXT` | NO |  |  |
+| `new_plan_hash` | `TEXT` | YES |  |  |
+| `created_at` | `INTEGER` | YES |  |  |
+
+Foreign keys: `document_id` -> `author_documents(id)`
+
 ### `author_planning`
 
 | Column | Type | Not Null | Default | PK |
@@ -497,6 +509,18 @@ Foreign keys: `run_id` -> `author_runs(id)`
 | `recovery_hints` | `TEXT` | NO |  |  |
 
 Foreign keys: `document_id` -> `author_documents(id)`
+
+### `author_session_focus` (STRICT)
+
+| Column | Type | Not Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | `TEXT` | YES |  | 1 |
+| `project_id` | `TEXT` | YES |  |  |
+| `document_id` | `TEXT` | NO |  |  |
+| `view_mode` | `TEXT` | YES | 'conversation' |  |
+| `updated_at` | `INTEGER` | YES | 0 |  |
+
+Foreign keys: `document_id` -> `author_documents(id)`, `project_id` -> `author_projects(id)`
 
 ### `author_settings`
 
@@ -741,6 +765,7 @@ Foreign keys: `document_id` -> `documents(document_id)`
 | `author_library_mounts_lookup` | `author_library_mounts` | NO | NO |
 | `author_lore_current_by_cat` | `author_lore_current` | NO | NO |
 | `author_material_ingests_by_project` | `author_material_ingests` | NO | NO |
+| `author_outline_writes_document` | `author_outline_writes` | NO | NO |
 | `author_read_checkpoints_lru` | `author_read_checkpoints` | NO | NO |
 | `author_reports_by_revision` | `author_article_reports` | NO | NO |
 | `author_runs_by_doc_state` | `author_runs` | NO | NO |
