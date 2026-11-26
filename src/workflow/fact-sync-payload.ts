@@ -15,7 +15,7 @@ function remapFactIds(items: unknown, oldToNew: ReadonlyMap<string, string>): un
 }
 
 /**
- * FQ-10: the prompt asks the model to omit `factId` for new facts, and the
+ * the prompt asks the model to omit `factId` for new facts, and the
  * server assigns a collision-free `fq-<uuid>` instead. Normalisation happens
  * before the proposal is stored, so the author sees real ids in the inbox and
  * the checklist can select rows that have no model-supplied id.

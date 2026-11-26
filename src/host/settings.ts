@@ -64,7 +64,7 @@ export function buildSanitizedDiagnostics(
   };
 
   return {
-    version: "3.2.0",
+    version: "3.3.0",
     schemaId,
     nodeVersion: process.version,
     journalMode: journalRow?.journal_mode ?? "unknown",

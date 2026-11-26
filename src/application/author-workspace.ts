@@ -285,6 +285,7 @@ export function openAuthorWorkspace(
         properties: {
           documentId: { type: "string" },
           baseRevisionId: { oneOf: [{ type: "string" }, { type: "null" }], description: "Revision ID from the latest read, or null for a new document." },
+          baseCandidateId: { type: "string", description: "Active candidate ID to refine. Omit when editing the working draft. Candidate edits remain pending for author review." },
           patches: {
             type: "array",
             items: {
@@ -308,6 +309,7 @@ export function openAuthorWorkspace(
             baseRevisionId: args.baseRevisionId,
             key: args.key,
             patches: args.patches,
+            ...(typeof args.baseCandidateId === "string" ? { baseCandidateId: args.baseCandidateId } : {}),
             ...(typeof args.summary === "string" ? { summary: args.summary } : {}),
             ...(Array.isArray(args.techniqueIds) ? { techniqueIds: args.techniqueIds } : {}),
             ...(typeof args.forceCandidate === "boolean" ? { forceCandidate: args.forceCandidate } : {}),

@@ -31,6 +31,8 @@ const STATUS_LABELS: Readonly<Record<string, string>> = {
 };
 
 const REDLINE_LABELS: Readonly<Record<string, string>> = {
+  manual_pause: "手动暂停",
+  interrupted: "执行已中断",
   locked_lore_conflict: "锁定设定冲突",
   pov_leak: "视角越权疑点",
   quality_below_floor: "回改达上限仍低于质量底线",
@@ -72,6 +74,9 @@ export function createAutopilotPanel(
   let batches: readonly AutopilotBatchDto[] = [];
   let activeBatch: AutopilotBatchDto | null = null;
   let pollTimer: number | null = null;
+  let refreshSequence = 0;
+  let refreshing = false;
+  let batchSignature = "";
 
   const root = el("section", { className: "autopilot-panel" });
   root.hidden = true;
@@ -101,12 +106,20 @@ export function createAutopilotPanel(
   }
 
   async function refreshBatches(silent = false): Promise<void> {
-    if (!activeProjectId) return;
+    if (!activeProjectId || (silent && refreshing)) return;
+    const sequence = ++refreshSequence;
+    refreshing = true;
     try {
       const list = await host.request<readonly AutopilotBatchDto[]>("autopilot.list", {
         projectId: activeProjectId,
         limit: 6,
+        includeHistoryDetails: false,
+        detailBatchId: activeBatch?.id,
       });
+      if (sequence !== refreshSequence) return;
+      const signature = JSON.stringify(list);
+      if (silent && signature === batchSignature) return;
+      batchSignature = signature;
       batches = list;
       if (activeBatch) {
         const updated = list.find((b) => b.id === activeBatch!.id);
@@ -117,11 +130,15 @@ export function createAutopilotPanel(
       ensurePolling();
       paint();
     } catch {
-      if (!silent) {
+      if (sequence === refreshSequence && !silent) {
+        batchSignature = "";
         batches = [];
         activeBatch = null;
+        ensurePolling();
         paint();
       }
+    } finally {
+      if (sequence === refreshSequence) refreshing = false;
     }
   }
 
@@ -300,6 +317,9 @@ export function createAutopilotPanel(
               provider,
               model,
               instruction: instruction.trim() || undefined,
+              previousVersionId: chapterIds[0] === activeDocId
+                ? document.querySelector<HTMLSelectElement>("#continuation-version")?.value || undefined
+                : undefined,
             });
             if (res.batch) activeBatch = res.batch;
             host.notice("已启动分级自治写作流水线（复用 L0+L1+L2 缓存前缀）");
@@ -369,6 +389,7 @@ export function createAutopilotPanel(
       // Red-line / gate pause card
       if ((batch.status === "paused_redline" || batch.status === "paused_gate") && batch.pauseReason) {
         const pr = batch.pauseReason;
+        const override = batch.status === "paused_redline" && pr.kind !== "candidate_conflict";
         const redBody: HTMLElement[] = [
           el("p", {
             className: "setting-title status-warning",
@@ -397,7 +418,7 @@ export function createAutopilotPanel(
             onClick: () => void host.selectDocument(pr.documentId),
           }),
           createButton({
-            label: "人工放行并续跑",
+            label: override ? "放行本章并继续" : "继续批次",
             variant: "primary",
             size: "sm",
             onClick: () =>
@@ -405,11 +426,11 @@ export function createAutopilotPanel(
                 const { provider, model } = options.getProviderModel();
                 await host.request("autopilot.resume", {
                   batchId: batch.id,
-                  overrideRedLine: true,
+                  overrideRedLine: override,
                   provider,
                   model,
                 });
-                host.notice("已人工放行，继续推进自治流水线");
+                host.notice("已提交续跑请求");
                 await refreshBatches(false);
               }),
           }),
@@ -559,18 +580,27 @@ export function createAutopilotPanel(
       return;
     }
     const projectChanged = projectId !== activeProjectId;
+    const documentChanged = documentId !== activeDocId;
     activeDocId = documentId;
     activeProjectId = projectId;
     if (projectChanged) {
+      stopPolling();
+      refreshSequence += 1;
+      refreshing = false;
+      batchSignature = "";
       selectedChapterIds.clear();
       activeBatch = null;
       batches = [];
     }
+    if (projectChanged || documentChanged) paint();
     await refreshBatches(true);
   }
 
   function clear(): void {
     stopPolling();
+    refreshSequence += 1;
+    refreshing = false;
+    batchSignature = "";
     activeProjectId = "";
     activeDocId = "";
     activeBatch = null;

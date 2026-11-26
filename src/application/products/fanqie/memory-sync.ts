@@ -28,7 +28,7 @@ function countOccurrences(haystack: string, needle: string): number {
 /**
  * Paragraph boundaries come from the shared splitter so the delta markers use
  * the same "one non-empty line is one paragraph" rule as evidence anchors and
- * diagnostics (FQ-02). Trailing/leading spaces stay out of the comparison text.
+ * diagnostics. Trailing/leading spaces stay out of the comparison text.
  */
 function splitParagraphs(text: string): string[] {
   return splitChapterParagraphs(text).map((span) => span.text.trim());
@@ -107,18 +107,11 @@ export function computeParagraphDelta(previousBody: string, currentBody: string)
     }
   }
 
-  if (changedLines.length > 0) {
+  if (changedLines.length > 0 || removedLines.length > 0) {
     return {
       hasBaseline: true,
-      deltaText: changedLines.join("\n\n"),
-      changedParagraphCount: changedLines.length,
-    };
-  }
-  if (removedLines.length > 0) {
-    return {
-      hasBaseline: true,
-      deltaText: `[段落删减]\n${removedLines.join("\n")}`,
-      changedParagraphCount: removedLines.length,
+      deltaText: [...changedLines, ...(removedLines.length ? ["[段落删减]", ...removedLines] : [])].join("\n\n"),
+      changedParagraphCount: Math.max(changedLines.length, removedLines.length),
     };
   }
   return {

@@ -56,7 +56,7 @@ import {
   saveSlopConfig,
   updateObservation,
 } from "./fanqie/diagnostics.ts";
-import { exportProjectBundle, importProjectBundle, type ProjectBundleDiskWriter } from "./fanqie/io.ts";
+import { exportProjectBundle, submitProjectImport, type ProjectBundleDiskWriter } from "./fanqie/io.ts";
 import {
   computeParagraphDelta,
   getChapterMemorySyncRecord,
@@ -118,6 +118,7 @@ import {
   listAutopilotBatches,
   pauseAutopilotBatch,
   rollbackAutopilotChapter,
+  recoverAutopilotBatches,
   runAutopilotBatch,
 } from "./fanqie/autopilot.ts";
 import {
@@ -429,7 +430,7 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
     "proposal.decide": { scope: "global", handler: (ctx, input) => decideProposal(ctx, input) },
     "workspace.search": { scope: "project", handler: (ctx, input) => searchFanqieWorkspace(ctx, input) },
     "project.export_bundle": { scope: "project", handler: (ctx, input) => exportProjectBundle(ctx, input, writeProjectExport) },
-    "project.import_bundle": { scope: "global", handler: (ctx, input) => importProjectBundle(ctx, input) },
+    "project.import_bundle": { scope: "global", handler: (ctx, input) => submitProjectImport(ctx, input) },
     "skill.import": { scope: "global", handler: (ctx, input) => importSkillDocument(ctx, input) },
     "chapter.diagnose": { scope: "document", handler: (ctx, _input, row) => diagnoseChapter(ctx, row!) },
     "slop.config.get": { scope: "project", handler: (ctx, input) => getSlopConfig(ctx, input) },
@@ -478,6 +479,7 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
       if (!title) invalid("title", "required");
       return { title, mode: null, line: null };
     },
+    onStartupRecover: recoverAutopilotBatches,
     onDocumentCreated(ctx, projectId, documentId, input) {
       attachChapterToTree(ctx, projectId, documentId, input);
     },
@@ -733,7 +735,7 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
     },
     runGeneration,
     actions,
-    contributeSnapshot(ctx, projectId, active) {
+    contributeSnapshot(ctx, projectId, active, chapterOrder) {
       const pendingAiRow = stmt(
         ctx.db,
         "SELECT COUNT(*) AS count FROM author_ai_proposals WHERE (project_id = ? OR project_id IS NULL) AND status = 'pending';",
@@ -752,7 +754,7 @@ export function createFanqieModule(writeProjectExport?: ProjectBundleDiskWriter)
       `).get(active.id) as { id: string; hash: string } | undefined;
       return {
         settings: page.entries, settingsCursor: page.cursor, pendingProposalCount, planningId,
-        previousChapterVersions: chapterVersionOptions(ctx, active),
+        previousChapterVersions: chapterVersionOptions(ctx, active, chapterOrder),
         outlineWriteId: outline?.hash === planningId ? outline.id : null,
       };
     },

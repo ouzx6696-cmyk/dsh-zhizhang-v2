@@ -199,3 +199,24 @@ test("Fanqie L1 Book Bible stays byte-identical across tokenLimit/stage changes 
   assert.equal(afterRebuild.report.slots.some((slot) => slot.id === "l1DeltaPatch"), false);
 });
 
+
+test("An approved memory retirement ends an unlocked fact at its selected paragraph", (t) => {
+  const ws = createTestWorkspace(t);
+  const { app } = ws;
+  const { projectId, documentId } = ws.createFanqieChapter({ body: "仓库依旧开着。\n她抵达门口。\n守门人锁门离开。" });
+  app.mutation("setting.propose", {
+    projectId, documentId, factId: "warehouse-open",
+    note: "仓库目前开放", source: "作者", from: { chapterId: documentId, point: 1 },
+    people: [{ character: "阿简" }],
+  });
+  const setting = app.snapshot(projectId, documentId).settings[0];
+  app.mutation("setting.decide", { projectId, documentId, proposalId: setting.id, accept: true });
+  const retirement = app.mutation("proposal.create", {
+    kind: "fact_sync", projectId, documentId,
+    payload: { retiredFacts: [{ factId: "warehouse-open", point: 3, reason: "守门人落锁" }] },
+  });
+  app.mutation("proposal.decide", { proposalId: retirement.id, accept: true, selectedRetiredFactIndices: [0] });
+  const stored = ws.db.prepare("SELECT value FROM author_settings WHERE fact_id = ? ORDER BY decided_seq DESC LIMIT 1")
+    .get("warehouse-open");
+  assert.deepEqual(JSON.parse(stored.value).effectiveTo, { chapterId: documentId, point: 3 });
+});

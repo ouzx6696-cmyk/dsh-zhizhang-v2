@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ContractError } from "../src/contracts/index.ts";
+import { applyWorkbench } from "../src/host/plugin.ts";
 import { writeDeliveryFile } from "../src/host/delivery-io.ts";
 import {
   createBackup,
@@ -13,7 +15,7 @@ import {
   restoreBackup,
   verifyBackup,
 } from "../src/storage/index.ts";
-import { assertRejectsContract, createTestWorkspace, withTempDir } from "../support/harness.mjs";
+import { assertRejectsContract, createMockDsHHost, createTestWorkspace, withTempDir } from "../support/harness.mjs";
 
 test("offline & online backups verify SHA-256 integrity, detect tampering, and guard non-empty restore targets", async (t) => {
   const ws = createTestWorkspace(t, { mode: "file", wal: true });
@@ -130,5 +132,57 @@ test("writeDeliveryFile enforces strict directory confinement and atomic publish
       );
     }
     assert.equal(existsSync(join(dir, "..", "escape.md")), false);
+  });
+});
+
+test("Large projects import atomically and export finalized text in chapter order", async () => {
+  await withTempDir("zhizhang-chunked-import-", async (dataDirectory) => {
+    const host = createMockDsHHost();
+    applyWorkbench(host.ctx, { dataDirectory }, { readAsset: host.readAsset });
+    try {
+      const files = Array.from({ length: 300 }, (_, i) => ({
+        path: `卷一/${String(i + 1).padStart(3, "0")}_第${i + 1}章.md`,
+        content: "窗外雨声。".repeat(500),
+      }));
+      const payload = JSON.stringify({ projectName: "长篇样本", files });
+      assert.ok(Buffer.byteLength(payload) > 2 * 1024 * 1024);
+      const chunks = payload.match(/[\s\S]{1,192000}/gu);
+      const uploadId = randomUUID();
+      const send = (chunkIndex, chunk = chunks[chunkIndex]) => host.command("project.import_bundle", {
+        uploadId, chunkIndex, chunkCount: chunks.length, chunk,
+      });
+      const commit = () => host.command("project.import_bundle", { uploadId, commit: true });
+
+      assert.equal((await send(0)).status, 200);
+      assert.equal((await send(0)).status, 200);
+      assert.equal((await send(0, "改变重传内容")).body.details.reason, "import-upload-mismatch");
+      assert.equal((await commit()).body.details.reason, "import-upload-incomplete");
+      assert.equal((await host.getState()).body.result.projects.length, 0);
+      for (let i = 1; i < chunks.length; i++) assert.equal((await send(i)).status, 200);
+
+      const imported = await commit();
+      assert.equal(imported.status, 200);
+      assert.equal(imported.body.result.chaptersCreated, 300);
+      assert.deepEqual((await commit()).body.result, imported.body.result);
+      const { projectId } = imported.body.result;
+      const { chapters } = (await host.command("tree.get", { projectId })).body.result;
+      assert.deepEqual([chapters[0].title, chapters.at(-1).title], ["第1章", "第300章"]);
+      assert.equal((await host.getState()).body.result.projects.length, 1);
+
+      const exportFinal = () => host.command("project.export_bundle", { projectId, format: "final_text" });
+      assert.equal((await exportFinal()).body.details.reason, "no-final-chapters");
+      for (const chapter of [chapters.at(-1), chapters[0]]) {
+        const { revisionId } = (await host.getState({ projectId, documentId: chapter.id })).body.result.active;
+        const input = { documentId: chapter.id, baseRevisionId: revisionId };
+        assert.equal((await host.command("chapter.review", { ...input, accept: true })).status, 200);
+        assert.equal((await host.command("draft.finalize", { ...input, key: chapter.id })).status, 200);
+      }
+      const [{ content }] = (await exportFinal()).body.result.files;
+      assert.match(content, /^第1章\n/);
+      assert.match(content, /\n第300章\n/);
+      assert.doesNotMatch(content, /\n第2章\n/);
+    } finally {
+      await host.close();
+    }
   });
 });

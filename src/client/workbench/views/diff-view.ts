@@ -14,6 +14,7 @@ export type DiffDisplayMode = "split" | "inline" | "raw";
 
 export interface DiffViewState {
   readonly candidateId?: string | null;
+  readonly baseCandidateId?: string | null;
   readonly originalBody: string;
   readonly candidateBody: string;
   readonly candidateQa?: CandidateQaReport;
@@ -379,6 +380,7 @@ export function createDiffView(container: HTMLElement, callbacks?: DiffViewCallb
     const { candidateBody, candidateQa, refinementRounds, canAdopt } = lastState;
     const visibleRows = diffSummary.rows.filter((row) => shouldRenderRow(row));
     summaryEl.textContent = [
+      ...(lastState.baseCandidateId ? [`沿用候选 ${lastState.baseCandidateId.slice(0, 8)}`] : []),
       `修改 ${visibleRows.filter((r) => r.kind === "changed").length} 段`,
       `新增 ${visibleRows.filter((r) => r.kind === "added").length} 段`,
       `删除 ${visibleRows.filter((r) => r.kind === "removed").length} 段`,

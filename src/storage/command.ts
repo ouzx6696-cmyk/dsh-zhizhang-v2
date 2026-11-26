@@ -429,6 +429,13 @@ export function compactAutoSaveRevisions(
         WHERE CASE WHEN json_valid(frozen_input) THEN json_extract(frozen_input, '$.continuationSource.kind') = 'revision' END;
       `);
     }
+    if (tableExists(db, "author_autopilot_batches")) {
+      collect("SELECT value AS rev FROM author_autopilot_batches, json_each(pre_batch_revisions_json);");
+      const columns = db.prepare("PRAGMA table_info(author_autopilot_batches);").all() as { name: string }[];
+      if (columns.some(({ name }) => name === "writing_options_json")) {
+        collect("SELECT json_extract(writing_options_json, '$.previousVersionId') AS rev FROM author_autopilot_batches;");
+      }
+    }
     if (tableExists(db, "author_chapter_memory_sync")) {
       const cols = new Set(
         (db.prepare("PRAGMA table_info(author_chapter_memory_sync);").all() as readonly { name?: unknown }[])

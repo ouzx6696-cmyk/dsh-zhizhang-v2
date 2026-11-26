@@ -137,7 +137,7 @@ async function requestObject(request: Request): Promise<Record<string, unknown>>
 }
 
 /**
- * Registers the Next-Gen `zhizhang/3.0` DsH Workbench plugin:
+ * Registers the DsH Workbench plugin:
  * - Static workbench UI & client ESM assets
  * - Clean HTTP API under `/api/zhizhang`:
  *   - `GET  /state`        — project/document snapshot with ETag-like `ifSequence`
@@ -406,6 +406,9 @@ export function applyWorkbench(
           const result = workspace.mutation(action, input);
           if (action === "run.cancel" && typeof input.runId === "string") {
             engine.abortRun(input.runId);
+          }
+          if (action === "autopilot.pause" && typeof input.batchId === "string") {
+            engine.abortAutopilot(input.batchId.trim());
           }
           return json({ ok: true, result });
         } catch (error) {

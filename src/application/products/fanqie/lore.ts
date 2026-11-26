@@ -245,7 +245,7 @@ export function handleContinuity(action: string, ctx: WorkspaceContext, input: I
     }
     const decision = input.accept ? "approved" : "rejected";
     const parsedFact = JSON.parse(proposal.value) as SettingFact;
-    // FQ-01: keep each character's earliest "already knew it" anchor across
+    // keep each character's earliest "already knew it" anchor across
     // versions, while the author's explicit `from` marks when this version
     // becomes true. The stored decision keeps the merged fact so later reads
     // do not fall back to the raw proposal's later knowledge anchor.
@@ -548,7 +548,7 @@ export function upsertForeshadow(ctx: WorkspaceContext, input: Input): Foreshado
   if (id) {
     const existing = readForeshadowRow(ctx, id);
     if (existing) {
-      // FQ-06: an upsert carrying another project's foreshadow id must fail
+      // an upsert carrying another project's foreshadow id must fail
       // loudly instead of editing that project's row.
       const projectId = text(input, "projectId");
       if (projectId !== existing.projectId) invalid("projectId", "project-mismatch");

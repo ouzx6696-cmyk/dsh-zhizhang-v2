@@ -3,7 +3,7 @@ import type { AiProposalKind } from "../contracts/workspace-dto.ts";
 /**
  * Proposals that only make sense as a diff against one chapter's current text.
  * They must carry a `documentId` at creation and stay pinned to it at decision
- * time (FQ-07); otherwise the commit path has to guess a chapter and can write
+ * time; otherwise the commit path has to guess a chapter and can write
  * a summary or fact into the wrong one.
  */
 export const DOCUMENT_BOUND_PROPOSAL_KINDS = [
@@ -23,7 +23,7 @@ export function isDocumentBoundProposalKind(kind: string): kind is typeof DOCUME
 /**
  * Fields an AI payload must never control: the proposal row already owns them,
  * and letting the payload restate them opens cross-project / cross-scope writes
- * through `deconstruct.save` and `technique.save` (FQ-06).
+ * through `deconstruct.save` and `technique.save`.
  */
 const RESERVED_PAYLOAD_FIELDS = [
   "id",

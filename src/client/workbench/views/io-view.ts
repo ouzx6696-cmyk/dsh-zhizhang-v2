@@ -10,6 +10,50 @@ import { createMaterialIngestView } from "./material-ingest-view.ts";
 export function createIoView(container: HTMLElement, host: WorkbenchShellHost) {
   let lastExport: ProjectExportBundleDto | null = null;
   let lastImportSummary: ProjectImportSummaryDto | null = null;
+  let pendingImport: { uploadId: string; chunks: string[]; nextChunk: number } | null = null;
+
+  function prepareImport(input: { projectId?: string; projectName?: string; files: unknown[] }): void {
+    const payload = JSON.stringify(input);
+    const chunks: string[] = [];
+    for (let offset = 0; offset < payload.length;) {
+      let end = Math.min(offset + 192_000, payload.length);
+      const boundary = payload.charCodeAt(end - 1);
+      if (end < payload.length && boundary >= 0xd800 && boundary <= 0xdbff) end -= 1;
+      chunks.push(payload.slice(offset, end));
+      offset = end;
+    }
+    if (chunks.length > 512) throw new Error("资产包过大，请拆成较小的项目包。");
+    lastImportSummary = null;
+    pendingImport = { uploadId: crypto.randomUUID(), chunks, nextChunk: 0 };
+  }
+
+  async function completeImport(): Promise<void> {
+    const pending = pendingImport;
+    if (!pending) return;
+    try {
+      while (pending.nextChunk < pending.chunks.length) {
+        const chunkIndex = pending.nextChunk;
+        await host.request("project.import_bundle", {
+          uploadId: pending.uploadId,
+          chunkCount: pending.chunks.length,
+          chunkIndex,
+          chunk: pending.chunks[chunkIndex],
+        });
+        pending.nextChunk += 1;
+      }
+      lastImportSummary = await host.request<ProjectImportSummaryDto>("project.import_bundle", {
+        uploadId: pending.uploadId,
+        commit: true,
+      });
+    } finally {
+      if (lastImportSummary) {
+        host.notice(`导入完成 · 新建 ${lastImportSummary.chaptersCreated} 章 · 更新 ${lastImportSummary.chaptersUpdated} 章`);
+        pendingImport = null;
+        await host.load();
+      }
+      refresh();
+    }
+  }
   const ingestRoot = document.createElement("div");
   const materialIngestView = createMaterialIngestView(ingestRoot, host);
 
@@ -44,6 +88,15 @@ export function createIoView(container: HTMLElement, host: WorkbenchShellHost) {
     } else {
       const actions = el("div", "", "actions");
       actions.append(
+        createButton({
+          label: "下载定稿 TXT",
+          variant: "secondary",
+          onClick: () => void host.perform(async () => {
+            const bundle = await host.request<ProjectExportBundleDto>("project.export_bundle", { projectId, format: "final_text" });
+            const file = bundle.files[0];
+            triggerDownload(file.path, file.content, "text/plain;charset=utf-8");
+          }),
+        }),
         createButton({
           label: "打包导出整书 JSON 资产包",
           variant: "primary",
@@ -133,14 +186,11 @@ export function createIoView(container: HTMLElement, host: WorkbenchShellHost) {
           if (stripped === "export-manifest.json") continue;
           files.push({ path: stripped, content: await file.text() });
         }
-        const summary = await host.request<ProjectImportSummaryDto>("project.import_bundle", {
+        prepareImport({
           ...(mergeCurrentCheck.checked && project?.product === "fanqie" ? { projectId: project.id } : {}),
           files,
         });
-        lastImportSummary = summary;
-        host.notice(`导入完成：新建 ${summary.chaptersCreated} 章，更新 ${summary.chaptersUpdated} 章`);
-        await host.load();
-        refresh();
+        await completeImport();
       });
     };
     dirLabel.append(dirInput);
@@ -156,20 +206,25 @@ export function createIoView(container: HTMLElement, host: WorkbenchShellHost) {
       void host.perform(async () => {
         const parsed = JSON.parse(await file.text()) as { files?: { path: string; content: string }[]; projectName?: string };
         if (!Array.isArray(parsed.files)) throw new Error("资产包格式无效：缺少 files 数组。");
-        const summary = await host.request<ProjectImportSummaryDto>("project.import_bundle", {
+        prepareImport({
           ...(mergeCurrentCheck.checked && project?.product === "fanqie" ? { projectId: project.id } : {}),
           projectName: parsed.projectName,
           files: parsed.files,
         });
-        lastImportSummary = summary;
-        host.notice(`资产包导入完成：新建 ${summary.chaptersCreated} 章，更新 ${summary.chaptersUpdated} 章`);
-        await host.load();
-        refresh();
+        await completeImport();
       });
     };
     jsonLabel.append(jsonInput);
 
     importBody.push(targetCheckLabel, dirLabel, jsonLabel);
+
+    if (pendingImport) {
+      importBody.push(createButton({
+        label: "继续上次导入",
+        variant: "secondary",
+        onClick: () => void host.perform(completeImport),
+      }));
+    }
 
     if (lastImportSummary) {
       const s = lastImportSummary;

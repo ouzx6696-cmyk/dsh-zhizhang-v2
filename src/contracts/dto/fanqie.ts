@@ -609,6 +609,8 @@ export type AutopilotRedLineKind =
   | "budget_cap"
   | "consecutive_errors"
   | "candidate_conflict"
+  | "manual_pause"
+  | "interrupted"
   | "chapter_gate_checkpoint";
 
 export interface AutopilotPauseReasonDto {

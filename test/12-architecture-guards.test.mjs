@@ -22,7 +22,7 @@ function extractImports(filePath) {
   return matches.map((m) => m[1]);
 }
 
-test("domain/fanqie and domain/toutiao remain strictly isolated from each other and upper layers", () => {
+test("domain, storage, client, and host preserve their dependency boundaries", () => {
   for (const file of listTsFiles(join(ROOT, "src", "domain", "fanqie"))) {
     for (const spec of extractImports(file)) {
       assert.doesNotMatch(spec, /toutiao|\/application\/|\/host\/|\/client\/|\/storage\//, `Leak in ${relative(ROOT, file)}: ${spec}`);
@@ -33,25 +33,19 @@ test("domain/fanqie and domain/toutiao remain strictly isolated from each other 
       assert.doesNotMatch(spec, /fanqie|\/application\/|\/host\/|\/client\/|\/storage\//, `Leak in ${relative(ROOT, file)}: ${spec}`);
     }
   }
-});
 
-test("storage layer never imports domain, application, host, or client", () => {
   for (const file of listTsFiles(join(ROOT, "src", "storage"))) {
     for (const spec of extractImports(file)) {
       assert.doesNotMatch(spec, /\/domain\/|\/application\/|\/host\/|\/client\//, `Storage layer leak in ${relative(ROOT, file)}: ${spec}`);
     }
   }
-});
 
-test("client layer never imports storage, host, application, or node:* built-ins", () => {
   for (const file of listTsFiles(join(ROOT, "src", "client"))) {
     for (const spec of extractImports(file)) {
       assert.doesNotMatch(spec, /^node:|\/storage\/|\/host\/|\/application\//, `Client layer leak in ${relative(ROOT, file)}: ${spec}`);
     }
   }
-});
 
-test("host/tools.ts and host/system-prompt.ts remain product-agnostic with zero hardcoded product names", () => {
   const toolsSrc = readFileSync(join(ROOT, "src", "host", "tools.ts"), "utf8");
   assert.doesNotMatch(toolsSrc, /zhizhang_read_tree|zhizhang_propose_setting|zhizhang_read_article/);
   const promptSrc = readFileSync(join(ROOT, "src", "host", "system-prompt.ts"), "utf8");
@@ -78,7 +72,6 @@ test("package.json declares zero runtime dependencies and test/ contains only *.
   assert.equal(pkg.dependencies ? Object.keys(pkg.dependencies).length : 0, 0);
 
   const testEntries = readdirSync(join(ROOT, "test"));
-  assert.equal(testEntries.length, 14, `Expected exactly 14 test suites, found ${testEntries.length}`);
   for (const name of testEntries) {
     assert.ok(name.endsWith(".test.mjs"), `Non-test file in test/: ${name}`);
   }

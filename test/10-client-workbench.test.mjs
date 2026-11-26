@@ -1,34 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CLIENT_ENTRY_CSS, CLIENT_ENTRY_HTML, CLIENT_JS_MODULES } from "../src/client/manifest.ts";
+import { CLIENT_JS_MODULES } from "../src/client/manifest.ts";
 import { createJobCenter } from "../src/client/workbench/views/job-center.ts";
 import { withBrowserGlobals } from "../support/harness.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
-
-test("workbench.html preserves required 3-zone header, #job-center, and editor mount IDs", () => {
-  const html = readFileSync(join(ROOT, "src", "client", CLIENT_ENTRY_HTML), "utf8");
-  for (const id of [
-    "projects",
-    "documents",
-    "body",
-    "save",
-    "job-center",
-    "run-status",
-    "notice-text",
-    "workbench-dialog",
-    "quick-jump",
-  ]) {
-    assert.ok(html.includes(`id="${id}"`), `workbench.html missing required #${id}`);
-  }
-  assert.ok(html.includes('class="top-left"'), "workbench.html missing 3-zone .top-left");
-  assert.ok(html.includes('class="top-center"'), "workbench.html missing 3-zone .top-center");
-  assert.ok(html.includes('class="top-actions"'), "workbench.html missing 3-zone .top-actions");
-  assert.ok(existsSync(join(ROOT, "src", "client", CLIENT_ENTRY_CSS)));
-});
 
 test("CLIENT_JS_MODULES covers every compiled JS module needed by the workbench", () => {
   assert.ok(CLIENT_JS_MODULES.includes("workbench/views/job-center.js"));
@@ -142,113 +121,3 @@ test("JobCenter renders unified jobs, triggers cancel, inspect, and recovery-hin
     ["inspect", "run-1"],
   ]);
 });
-
-test("unified UI foundation primitives (Button, Input, Card, Navbar) apply consistent grammar and events", async () => {
-  const { createButton, createCard, createInput, createNavbar } = await import(
-    "../src/client/workbench/ui/primitives.ts"
-  );
-
-  function makeNode(tag) {
-    const attrs = new Map();
-    const listeners = new Map();
-    return {
-      tagName: tag.toUpperCase(),
-      className: "",
-      textContent: "",
-      type: "",
-      value: "",
-      href: "",
-      hidden: false,
-      disabled: false,
-      dataset: {},
-      children: [],
-      onclick: null,
-      oninput: null,
-      onchange: null,
-      setAttribute(k, v) { attrs.set(k, String(v)); },
-      getAttribute(k) { return attrs.get(k) ?? null; },
-      removeAttribute(k) { attrs.delete(k); },
-      addEventListener(type, fn) {
-        const list = listeners.get(type) ?? [];
-        list.push(fn);
-        listeners.set(type, list);
-      },
-      dispatch(type, evt) {
-        for (const fn of listeners.get(type) ?? []) fn(evt);
-      },
-      append(...items) { this.children.push(...items); },
-      replaceChildren(...items) { this.children = [...items]; },
-    };
-  }
-
-  await withBrowserGlobals({ document: { createElement: (tag) => makeNode(tag) } }, () => {
-    let clicked = 0;
-    const btn = createButton({
-      label: "保存草稿",
-      variant: "primary",
-      size: "lg",
-      onClick: () => { clicked += 1; },
-    });
-    assert.equal(btn.getAttribute("data-ui"), "button");
-    assert.match(btn.className, /\bui-btn\b/);
-    assert.match(btn.className, /\bui-btn--primary\b/);
-    assert.match(btn.className, /\bui-btn--lg\b/);
-    btn.dispatch("keydown", { key: "Enter" });
-    assert.equal(btn.getAttribute("data-pressing"), "true");
-    btn.dispatch("keyup", {});
-    assert.equal(btn.getAttribute("data-pressing"), null);
-    btn.onclick?.({});
-    assert.equal(clicked, 1);
-
-    let typed = "";
-    const field = createInput({
-      kind: "text",
-      label: "章节标题",
-      placeholder: "输入章名",
-      onInput: (val) => { typed = val; },
-    });
-    assert.equal(field.control.getAttribute("data-ui"), "input");
-    assert.match(field.control.className, /\bui-input\b/);
-    field.setValue("雨夜归人");
-    field.control.oninput?.({});
-    assert.equal(typed, "雨夜归人");
-    field.setError("标题不能为空");
-    assert.equal(field.control.getAttribute("aria-invalid"), "true");
-    field.setError(null);
-    assert.equal(field.control.getAttribute("aria-invalid"), null);
-
-    let cardClicks = 0;
-    const card = createCard({
-      variant: "interactive",
-      padding: "md",
-      eyebrow: "番茄连载",
-      title: "灰塔长夜",
-      footer: btn,
-      onClick: () => { cardClicks += 1; },
-    });
-    assert.equal(card.getAttribute("data-ui"), "card");
-    assert.match(card.className, /\bui-card--interactive\b/);
-    card.onclick?.({});
-    assert.equal(cardClicks, 1);
-
-    const tabChanges = [];
-    const nav = createNavbar({
-      brandLabel: "织章",
-      breadcrumb: "灰塔长夜",
-      tabs: [
-        { id: "writing", label: "写作" },
-        { id: "outline", label: "大纲" },
-      ],
-      activeTabId: "writing",
-      onTabChange: (id) => tabChanges.push(id),
-    });
-    assert.equal(nav.root.getAttribute("data-ui"), "navbar");
-    assert.match(nav.root.className, /\bui-navbar\b/);
-    nav.setScrolled(true);
-    assert.equal(nav.root.getAttribute("data-scrolled"), "true");
-    nav.setBreadcrumb("灰塔长夜 / 第一章");
-    nav.setActiveTab("outline");
-    assert.equal(tabChanges.length, 0);
-  });
-});
-

@@ -13,7 +13,7 @@ import {
   serializeChapterMarkdown,
   stmt,
 } from "../../../storage/index.ts";
-import { invalid, optionalText, refuse, text, type Input, type WorkspaceContext } from "../../context.ts";
+import { count, invalid, optionalText, refuse, text, type Input, type WorkspaceContext } from "../../context.ts";
 import { queryDeconstructions, queryLibraryMounts, queryTechniques } from "./library.ts";
 import { queryForeshadows, queryLore } from "./lore.ts";
 import { assertFanqieProject } from "./shared.ts";
@@ -36,6 +36,30 @@ export function exportProjectBundle(
 ): ProjectExportBundleDto {
   const projectId = text(input, "projectId");
   assertFanqieProject(ctx, projectId);
+  if (input.format === "final_text") {
+    return ctx.read(() => {
+      const project = stmt(ctx.db, "SELECT name FROM author_projects WHERE id = ?;")
+        .get(projectId) as { name: string };
+      const rows = stmt(ctx.db, `
+        SELECT d.id, d.title, r.body FROM author_documents d JOIN revisions r
+          ON r.revision_id = d.final_revision_id AND r.document_id = d.id
+        WHERE d.project_id = ? AND d.state = 'final';
+      `).all(projectId) as { id: string; title: string; body: string }[];
+      const byId = new Map(rows.map((row) => [row.id, row]));
+      const chapters = ctx.chapterOrder(projectId).flatMap((id) => {
+        const chapter = byId.get(id);
+        return chapter ? [`${chapter.title}\n\n${chapter.body}`] : [];
+      });
+      if (!chapters.length) refuse("project.export_bundle", "no-final-chapters");
+      const content = `${chapters.join("\n\n")}\n`;
+      return {
+        projectId,
+        projectName: project.name,
+        exportedAt: new Date().toISOString(),
+        files: [{ path: `${sanitizePathSegment(project.name)}-定稿.txt`, content, sha256: sha256(content) }],
+      };
+    });
+  }
 
   const built = ctx.read(() => {
     const project = stmt(ctx.db, "SELECT id, name, product FROM author_projects WHERE id = ?;")
@@ -239,6 +263,74 @@ function remapAnchor(
   return { chapterId: mappedId, point: pt };
 }
 
+const IMPORT_CHUNK_LENGTH = 192_000;
+const MAX_IMPORT_CHUNKS = 512;
+const IMPORT_UPLOAD_TTL_MS = 24 * 60 * 60 * 1000;
+
+function handleImportUpload(ctx: WorkspaceContext, input: Input, uploadId: string) {
+  if (!/^[a-z0-9-]{16,64}$/i.test(uploadId)) invalid("uploadId", "invalid-upload-id");
+  const now = Date.now();
+  return ctx.atomic(() => {
+    const getUpload = stmt(ctx.db, `
+      SELECT chunk_count AS chunkCount, result_json AS resultJson
+      FROM author_project_import_uploads WHERE id = ?;
+    `);
+    const upload = getUpload.get(uploadId) as { chunkCount: number; resultJson: string | null } | undefined;
+    const chunks = stmt(ctx.db, `
+      SELECT chunk_index AS chunkIndex, content FROM author_project_import_chunks
+      WHERE upload_id = ? ORDER BY chunk_index;
+    `);
+    if (input.commit === true) {
+      if (!upload) invalid("uploadId", "import-upload-missing");
+      if (upload.resultJson) return JSON.parse(upload.resultJson) as ProjectImportSummaryDto;
+      const rows = chunks.all(uploadId) as { chunkIndex: number; content: string }[];
+      if (rows.length !== upload.chunkCount) invalid("uploadId", "import-upload-incomplete");
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(rows.map((row) => row.content).join(""));
+      } catch {
+        invalid("files", "invalid-import-upload");
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) invalid("files", "invalid-import-upload");
+      const result = importProjectBundle(ctx, parsed as Input);
+      stmt(ctx.db, "UPDATE author_project_import_uploads SET result_json = ?, updated_at = ? WHERE id = ?;")
+        .run(JSON.stringify(result), now, uploadId);
+      stmt(ctx.db, "DELETE FROM author_project_import_chunks WHERE upload_id = ?;").run(uploadId);
+      return result;
+    }
+
+    const chunkCount = count(input, "chunkCount");
+    const chunkIndex = count(input, "chunkIndex");
+    const chunk = input.chunk;
+    if (chunkCount < 1 || chunkCount > MAX_IMPORT_CHUNKS || chunkIndex >= chunkCount ||
+        typeof chunk !== "string" || !chunk.length || chunk.length > IMPORT_CHUNK_LENGTH) {
+      invalid("chunk", "invalid-import-chunk");
+    }
+    if (upload && chunkCount !== upload.chunkCount) invalid("chunkCount", "import-upload-mismatch");
+    if (upload?.resultJson) return { chunkIndex };
+    if (!upload) {
+      stmt(ctx.db, "DELETE FROM author_project_import_uploads WHERE updated_at < ?;").run(now - IMPORT_UPLOAD_TTL_MS);
+      stmt(ctx.db, "INSERT INTO author_project_import_uploads (id, chunk_count, updated_at) VALUES (?, ?, ?);")
+        .run(uploadId, chunkCount, now);
+    }
+    const previous = stmt(ctx.db, `
+      SELECT content FROM author_project_import_chunks WHERE upload_id = ? AND chunk_index = ?;
+    `).get(uploadId, chunkIndex) as { content: string } | undefined;
+    if (previous && previous.content !== chunk) invalid("chunk", "import-upload-mismatch");
+    if (!previous) {
+      stmt(ctx.db, "INSERT INTO author_project_import_chunks (upload_id, chunk_index, content) VALUES (?, ?, ?);")
+        .run(uploadId, chunkIndex, chunk);
+    }
+    stmt(ctx.db, "UPDATE author_project_import_uploads SET updated_at = ? WHERE id = ?;").run(now, uploadId);
+    return { chunkIndex };
+  });
+}
+
+export function submitProjectImport(ctx: WorkspaceContext, input: Input) {
+  const uploadId = optionalText(input, "uploadId");
+  return uploadId ? handleImportUpload(ctx, input, uploadId) : importProjectBundle(ctx, input);
+}
+
 export function importProjectBundle(ctx: WorkspaceContext, input: Input): ProjectImportSummaryDto {
   const rawFiles = input.files;
   if (!Array.isArray(rawFiles) || rawFiles.length === 0) {
@@ -385,6 +477,8 @@ export function importProjectBundle(ctx: WorkspaceContext, input: Input): Projec
     const manifestChapterByPath = new Map(
       (manifest?.chapters ?? []).filter((c) => c.path).map((c) => [c.path!, c]),
     );
+    const chapterRanks = new Map((manifest?.chapters ?? []).map((chapter, index) => [chapter.path, index]));
+    const rank = (path: string) => chapterRanks.get(path) ?? Number.MAX_SAFE_INTEGER;
     const mdFiles = normalizedFiles
       .filter(
         (file) =>
@@ -392,7 +486,7 @@ export function importProjectBundle(ctx: WorkspaceContext, input: Input): Projec
           !file.path.startsWith("_worldbook/") &&
           !file.path.startsWith("_library/"),
       )
-      .sort((a, b) => a.path.localeCompare(b.path));
+      .sort((a, b) => rank(a.path) - rank(b.path) || a.path.localeCompare(b.path));
 
     let chaptersCreated = 0;
     let chaptersUpdated = 0;

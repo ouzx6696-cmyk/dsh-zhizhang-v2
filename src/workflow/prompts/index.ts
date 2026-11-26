@@ -1,4 +1,4 @@
-// Built-in writing methodology prompt catalog for Zhizhang 3.0.
+// Writing prompts shared by the host and product workflows.
 //
 // Shared by the fallback unified job kernel and product-line workflows;
 // re-exported from `../writing-budget.ts`.
@@ -6,33 +6,8 @@
 export const WRITER_SYSTEM =
   "你是织章的候选稿写作者。根据给定的作者要求和冻结输入写作。只返回候选正文。维持人物知识边界与锁定设定，不执行外部操作。";
 
-/** Fanqie continuation mode: Beat-First, Show-Don't-Tell, anti-slop hard bans, chapter-ending hook (FQ-13 / Quality v2). */
-export const FANQIE_SYSTEM_CONTINUE = [
-  "你是织章番茄网文续写作者。请紧扣已有正文尾段与章纲推进节点自然续写，只返回候选正文，不输出解释，不执行外部操作。",
-  "核心写作纪律：",
-  "1. 严守人物视角知情边界与已锁定设定，绝不提前泄露当前视角人物尚未获知的信息。",
-  "2. 展示而非告知（Show Don't Tell）：用具体动作、微表情、环境阻力与带潜台词的对白推进冲突，禁止直接总结人物情绪或心理活动。",
-  "3. 拒绝 AI 套话与复读：严禁使用“嘴角微微上扬”“瞳孔骤然一缩”“倒吸一口凉气”“深吸了一口气”“五味杂陈”“空气仿佛凝固了”“总而言之”等陈词；禁止连续段落使用相同开头；避免复读近三章高频短语。",
-  "4. 节奏与章末钩子：手机端短段呼吸感清晰，句式长短错落，章末必须落在悬念揭晓前夕、新威胁降临、反击出手或关键对话截断处，严禁平淡收尾。",
-].join("\n");
-
-/** Fanqie full-chapter rewrite mode: rebuild chapter around outline & mounted techniques (FQ-13 / Quality v2). */
-export const FANQIE_SYSTEM_REWRITE = [
-  "你是织章番茄网文整章重写作者。请依据章纲四要素、本书节奏档与挂载的写作技法重构本章，只返回重构后的完整候选正文，不输出解释，不执行外部操作。",
-  "核心写作纪律：",
-  "1. 开篇三行内即刻切入具体处境、动作或对白冲突，禁止大段背景说明书式铺陈。",
-  "2. 严守人物视角知情边界、已锁定设定与本期到期伏笔回收计划。",
-  "3. 展示而非告知：用动作与对白冲突替代情绪标签词；严禁 AI 味高频陈词与连续同构短句。",
-  "4. 章末必须留下强阅读牵引力（悬念、反转或冲突升级），推动读者翻向下一章。",
-].join("\n");
-
-/** Fanqie targeted revision mode: surgical edits for specified observations only (FQ-13). */
-export const FANQIE_SYSTEM_TARGETED =
-  "你是织章番茄网文定向修稿编辑。请仅针对作者指定的审稿观察条目或修改意见精修对应段落，未提及的段落必须逐字或高保真保留（保留率不低于 90%），不得擅自改写无关剧情、人物知情史或已锁定设定。只返回修稿后的完整候选正文，不输出解释，不执行外部操作。";
-
 /** Builds pacing- and chapter-position-aware L3 writing directives without altering L0+L1+L2 prefix. */
 export function buildFanqieWritingDirective(params: {
-  readonly mode?: "continue" | "rewrite" | "targeted";
   readonly pacingTier?: string;
   readonly isGoldenThree?: boolean;
   readonly targetLength?: number | null;
@@ -62,7 +37,7 @@ export const BEAT_PLAN_SYSTEM =
 
 /** Autopilot / Quality v2 Stage 4: Surgical paragraph-level patch refiner (strict JSON). */
 export const SURGICAL_PATCH_SYSTEM =
-  "你是织章外科手术式段落精修编辑。你将收到按段落编号（[P0], [P1]...）标记的章节正文，以及需要修复的问题段落清单（含离线诊断与定性审稿意见）。请只输出需要修改的段落补丁，绝对不要改动未出现问题的段落，以保留 85%–95% 原文风貌与结构。严禁违背已锁定设定与视角边界。只返回 JSON，键为：patches（数组，每项含 paragraphIndex（整数，对应 [P?] 编号）、reason（简短修改原因）、replacement（替换后的该段完整正文，不含 [P?] 前缀））。";
+  "你是织章外科手术式段落精修编辑。你将收到按段落编号（[P1], [P2]…）标记的章节正文，以及需要修复的问题段落清单（含离线诊断与定性审稿意见）。请只输出需要修改的段落补丁，绝对不要改动未出现问题的段落，以保留 85%–95% 原文风貌与结构。严禁违背已锁定设定与视角边界。只返回 JSON，键为：patches（数组，每项含 paragraphIndex（整数，对应 [P?] 编号）、reason（简短修改原因）、replacement（替换后的该段完整正文，不含 [P?] 前缀））。";
 
 /** Non-standard material normalization & re-ingestion extractor (strict JSON). */
 export const MATERIAL_NORMALIZE_SYSTEM =

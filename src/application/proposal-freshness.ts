@@ -5,7 +5,7 @@ import { invalid, optionalText, type Input, type WorkspaceContext } from "./cont
 import { sha256Text } from "./digest.ts";
 import { DOCUMENT_BOUND_PROPOSAL_KINDS, isDocumentBoundProposalKind } from "./proposal-kinds.ts";
 
-/** The subset of an `author_ai_proposals` row needed by the FQ-03/FQ-07 gates. */
+/** The subset of an `author_ai_proposals` row needed to check revision drift. */
 export interface ProposalFreshnessRow {
   readonly id: string;
   readonly projectId: string | null;
@@ -18,8 +18,7 @@ export interface ProposalFreshnessRow {
 
 export type StaleCheck = "fresh" | "unpinned" | "not-bound";
 
-// One source of truth for both the FQ-07 chapter requirement and the FQ-03
-// drift gate; a second hard-coded list would let the two silently diverge.
+// Chapter requirements and revision checks use the same list of proposal kinds.
 const DRIFT_BOUND_KINDS: ReadonlySet<AiProposalKind> = new Set(DOCUMENT_BOUND_PROPOSAL_KINDS);
 
 function staleError(row: ProposalFreshnessRow, currentRevisionId: string | null): ContractError {
@@ -68,7 +67,7 @@ export function assertProposalFresh(ctx: WorkspaceContext, row: ProposalFreshnes
 }
 
 /**
- * B2-5 / FQ-07: proposals written before the chapter requirement may have a
+ * proposals written before the chapter requirement may have a
  * NULL `document_id`. Let the author pin one at decision time instead of
  * leaving the row undecidable forever, but never invent a chapter or accept
  * one belonging to another project.

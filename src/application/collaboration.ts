@@ -22,7 +22,7 @@ import {
   type Input,
   type WorkspaceContext,
 } from "./context.ts";
-import { resolveContinuation } from "./continuation.ts";
+import { readContinuationSource, resolveContinuation } from "./continuation.ts";
 import { stageDraftCandidate } from "./draft-candidate.ts";
 import type { ProductLineRegistry } from "./product-line.ts";
 
@@ -422,11 +422,13 @@ export function submitAgentDraft(
     const now = Date.now();
     const writeId = randomUUID();
     const charCount = countNonWhitespace(body);
+    const baseCandidateId = optionalText(input, "baseCandidateId");
+    const sourceCandidate = baseCandidateId ? activeCandidateForRevision(ctx, row, baseCandidateId) : undefined;
     const continuationSource = row.product === "fanqie" && optionalText(input, "previousVersionId")
       ? resolveContinuation(ctx, row, input)?.source
-      : undefined;
+      : sourceCandidate ? readContinuationSource(sourceCandidate.frozenInput) : undefined;
 
-    if (effectiveMode === "candidate") {
+    if (effectiveMode === "candidate" || sourceCandidate) {
       // Auto-discard stale Agent-submitted candidates so Agent can iterate smoothly in cautious mode,
       // while refusing to overwrite an active author-initiated run candidate.
       const awaitingRows = stmt(
@@ -442,7 +444,7 @@ export function submitAgentDraft(
         } catch {
           origin = null;
         }
-        if (origin === "dsh_agent") {
+        if (origin === "dsh_agent" || existing.candidateId === baseCandidateId) {
           stmt(ctx.db, "UPDATE author_runs SET state = 'discarded' WHERE id = ?;").run(existing.id);
           ctx.event(row.projectId, "run", "run.state", { runId: existing.id, state: "discarded" });
           if (existing.candidateId) {
@@ -461,6 +463,8 @@ export function submitAgentDraft(
         summary,
         techniqueIds,
         continuationSource,
+        ...(baseCandidateId ? { baseCandidateId } : {}),
+        ...(sourceCandidate?.batchId ? { batchId: sourceCandidate.batchId } : {}),
       });
 
       stmt(ctx.db, `
@@ -525,6 +529,18 @@ export function submitAgentDraft(
   });
 }
 
+function activeCandidateForRevision(ctx: WorkspaceContext, row: DocumentRow, candidateId: string) {
+  const candidate = stmt(ctx.db, `
+    SELECT c.body, r.frozen_input AS frozenInput,
+      CASE WHEN json_valid(r.frozen_input) THEN json_extract(r.frozen_input, '$.batchId') END AS batchId
+    FROM author_runs r JOIN candidates c ON c.candidate_id = r.candidate_id
+    WHERE r.document_id = ? AND r.base_revision_id = ?
+      AND r.candidate_id = ? AND r.state = 'awaiting-author';
+  `).get(row.id, row.revisionId, candidateId) as { body: string; frozenInput: string; batchId: string | null } | undefined;
+  if (!candidate) refuse("agent.patch_paragraphs", "candidate-base-mismatch");
+  return candidate;
+}
+
 export function patchAgentParagraphs(
   ctx: WorkspaceContext,
   registry: ProductLineRegistry,
@@ -534,16 +550,18 @@ export function patchAgentParagraphs(
   const documentId = text(input, "documentId");
   const rawPatches = input.patches;
   if (!Array.isArray(rawPatches)) invalid("patches", "array-required");
-  const row = ctx.read(() => ctx.document(documentId));
-  if (ctx.isLockedDocument(row)) {
-    refuse("agent.patch_paragraphs", "revision-locked");
-  }
-  const patchedBody = applyParagraphPatches(row.body ?? "", rawPatches as readonly ParagraphPatchInput[]);
-  return submitAgentDraft(ctx, registry, saveDraftForRow, {
-    ...input,
-    documentId,
-    body: patchedBody,
-    summary: optionalText(input, "summary") ?? `DsH Agent 局部精修（${rawPatches.length} 段）`,
+  return ctx.atomic(() => {
+    const row = ctx.document(documentId);
+    if (ctx.isLockedDocument(row)) refuse("agent.patch_paragraphs", "revision-locked");
+    const baseCandidateId = optionalText(input, "baseCandidateId");
+    const sourceBody = baseCandidateId ? activeCandidateForRevision(ctx, row, baseCandidateId).body : row.body ?? "";
+    const patchedBody = applyParagraphPatches(sourceBody, rawPatches as readonly ParagraphPatchInput[]);
+    return submitAgentDraft(ctx, registry, saveDraftForRow, {
+      ...input,
+      documentId,
+      body: patchedBody,
+      summary: optionalText(input, "summary") ?? `DsH Agent 局部精修（${rawPatches.length} 段）`,
+    });
   });
 }
 

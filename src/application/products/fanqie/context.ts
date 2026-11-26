@@ -677,7 +677,6 @@ export function buildFanqieFrozenContext(
   );
 
   const extraDirective = buildFanqieWritingDirective({
-    mode: stage === "refine" ? "targeted" : (row.body?.trim() ? "continue" : "rewrite"),
     pacingTier: controls.pacingTier,
     isGoldenThree: currentIdx >= 0 && currentIdx < 3,
     targetLength: typeof plan?.target === "number" ? plan.target : null,

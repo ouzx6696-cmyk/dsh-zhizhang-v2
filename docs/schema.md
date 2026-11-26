@@ -9,11 +9,11 @@
 
 | Object Type | Count |
 | --- | ---: |
-| Tables (non-shadow) | 47 |
+| Tables (non-shadow) | 49 |
 | FTS5 Virtual Tables | 3 |
 | FTS5 Shadow Tables | 12 |
 | Views | 3 |
-| Explicit Indexes | 45 |
+| Explicit Indexes | 46 |
 | Triggers | 14 |
 
 ## Tables
@@ -124,6 +124,7 @@ Foreign keys: `document_id` -> `author_documents(id)`, `project_id` -> `author_p
 | `model` | `TEXT` | YES | '' |  |
 | `pause_reason_json` | `TEXT` | NO |  |  |
 | `pre_batch_revisions_json` | `TEXT` | YES | '{}' |  |
+| `writing_options_json` | `TEXT` | NO |  |  |
 | `created_at` | `INTEGER` | YES | 0 |  |
 | `updated_at` | `INTEGER` | YES | 0 |  |
 
@@ -450,6 +451,25 @@ Foreign keys: `project_id` -> `author_projects(id)`
 
 Foreign keys: `project_id` -> `author_projects(id)`
 
+### `author_project_import_chunks`
+
+| Column | Type | Not Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `upload_id` | `TEXT` | YES |  | 1 |
+| `chunk_index` | `INTEGER` | YES |  | 2 |
+| `content` | `TEXT` | YES |  |  |
+
+Foreign keys: `upload_id` -> `author_project_import_uploads(id)`
+
+### `author_project_import_uploads`
+
+| Column | Type | Not Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | `TEXT` | NO |  | 1 |
+| `chunk_count` | `INTEGER` | YES |  |  |
+| `result_json` | `TEXT` | NO |  |  |
+| `updated_at` | `INTEGER` | YES |  |  |
+
 ### `author_project_slop_config`
 
 | Column | Type | Not Null | Default | PK |
@@ -762,6 +782,7 @@ Foreign keys: `document_id` -> `documents(document_id)`
 | `author_jobs_by_project` | `author_jobs` | NO | NO |
 | `author_jobs_by_run` | `author_jobs` | NO | NO |
 | `author_jobs_open` | `author_jobs` | NO | YES |
+| `author_jobs_uncertain_draft` | `author_jobs` | NO | YES |
 | `author_library_mounts_lookup` | `author_library_mounts` | NO | NO |
 | `author_lore_current_by_cat` | `author_lore_current` | NO | NO |
 | `author_material_ingests_by_project` | `author_material_ingests` | NO | NO |

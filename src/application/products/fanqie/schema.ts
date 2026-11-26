@@ -1,7 +1,7 @@
 import type { SqliteDatabase } from "../../../storage/index.ts";
 
 /**
- * Clean Next-Gen (`zhizhang/3.0`) DDL for Fanqie (serialized novel) tables.
+ * Fanqie tables for the `zhizhang/3.0` workspace.
  * Owned exclusively by the Fanqie product-line module and initialized via
  * `fanqieModule.initSchema(db)`.
  */
@@ -269,6 +269,20 @@ export function initFanqieSchema(db: SqliteDatabase): void {
       updated_at INTEGER NOT NULL DEFAULT 0
     );
 
+    CREATE TABLE IF NOT EXISTS author_project_import_uploads (
+      id TEXT PRIMARY KEY,
+      chunk_count INTEGER NOT NULL,
+      result_json TEXT,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS author_project_import_chunks (
+      upload_id TEXT NOT NULL REFERENCES author_project_import_uploads(id) ON DELETE CASCADE,
+      chunk_index INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      PRIMARY KEY (upload_id, chunk_index)
+    );
+
     CREATE TABLE IF NOT EXISTS author_autopilot_batches (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL REFERENCES author_projects(id),
@@ -286,6 +300,7 @@ export function initFanqieSchema(db: SqliteDatabase): void {
       model TEXT NOT NULL DEFAULT '',
       pause_reason_json TEXT,
       pre_batch_revisions_json TEXT NOT NULL DEFAULT '{}',
+      writing_options_json TEXT,
       created_at INTEGER NOT NULL DEFAULT 0,
       updated_at INTEGER NOT NULL DEFAULT 0
     );
@@ -352,6 +367,11 @@ export function initFanqieSchema(db: SqliteDatabase): void {
     if (!techCols.has(col)) {
       db.exec(`ALTER TABLE library_technique_cards ADD COLUMN ${col} ${def};`);
     }
+  }
+
+  const batchCols = db.prepare("PRAGMA table_info(author_autopilot_batches);").all() as { name: string }[];
+  if (!batchCols.some((column) => column.name === "writing_options_json")) {
+    db.exec("ALTER TABLE author_autopilot_batches ADD COLUMN writing_options_json TEXT;");
   }
 
   const controlCols = new Set(
