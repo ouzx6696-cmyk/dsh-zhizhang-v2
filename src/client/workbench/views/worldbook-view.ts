@@ -159,6 +159,24 @@ export function createWorldbookView(container: HTMLElement, host: WorkbenchShell
           });
           row.append(checklist);
         }
+        const retirements: HTMLInputElement[] = [];
+        const retiredFacts = isFactSync && Array.isArray(prop.payload.retiredFacts)
+          ? prop.payload.retiredFacts as Record<string, unknown>[]
+          : [];
+        if (retiredFacts.length) {
+          const checklist = el("div", "", "proposal-checklist");
+          retiredFacts.forEach((item, index) => {
+            if (!item || typeof item !== "object") return;
+            const label = document.createElement("label");
+            const checkbox = document.createElement("input");
+            checkbox.type = "checkbox";
+            checkbox.value = String(index);
+            retirements.push(checkbox);
+            label.append(checkbox, ` 结束设定 ${String(item.factId)} · 第 ${String(item.point ?? 1)} 段 · ${String(item.reason ?? "")}`);
+            checklist.append(label);
+          });
+          row.append(checklist);
+        }
         row.append(el("pre", JSON.stringify(prop.payload, null, 2), "server-body-preview"));
 
         const actions = el("div", "", "actions");
@@ -172,6 +190,7 @@ export function createWorldbookView(container: HTMLElement, host: WorkbenchShell
                 await host.request("proposal.decide", {
                   proposalId: prop.id,
                   accept: true,
+                  ...(retirements.length ? { selectedRetiredFactIndices: retirements.filter((checkbox) => checkbox.checked).map((checkbox) => Number(checkbox.value)) } : {}),
                   ...(isFactSync && checkboxes.length > 0
                     ? {
                       selectedNewFactIndices: checkboxes

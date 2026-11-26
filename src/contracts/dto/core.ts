@@ -193,6 +193,7 @@ export interface RunSummary {
   readonly settled: number;
   readonly candidateId: string | null;
   readonly candidateBody: string | null;
+  readonly baseCandidateId?: string | null;
   readonly candidateQa: string | null;
   readonly candidateQaReport?: CandidateQaReport | null;
   readonly refinementRounds: number | null;

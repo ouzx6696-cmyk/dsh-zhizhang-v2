@@ -15,7 +15,7 @@ export function assertFanqieProject(ctx: WorkspaceContext, projectId: string): v
 
 /**
  * Resolves the existing library row for `id` and refuses a cross-project or
- * cross-scope overwrite (FQ-06), returning the original `created_at` so an
+ * cross-scope overwrite, returning the original `created_at` so an
  * update keeps its creation timestamp.
  */
 export function assertLibraryWriteScope(
@@ -36,7 +36,7 @@ export function assertLibraryWriteScope(
 }
 
 /**
- * FQ-06 also covers deletes: a project-scoped asset may only be removed by a
+ * A project-scoped asset may only be removed by a
  * caller from that same project. Global assets are intentionally shared, but
  * an explicit `scope: "global"` is still required so a stray id cannot delete
  * one from an unrelated workspace context.

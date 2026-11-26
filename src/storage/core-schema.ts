@@ -270,6 +270,8 @@ export function createCoreSchema(db: SqliteDatabase): void {
     CREATE INDEX IF NOT EXISTS author_runs_by_document ON author_runs(document_id);
     CREATE INDEX IF NOT EXISTS author_runs_by_doc_state ON author_runs(document_id, state);
     CREATE INDEX IF NOT EXISTS author_jobs_by_run ON author_jobs(run_id);
+    CREATE INDEX IF NOT EXISTS author_jobs_uncertain_draft ON author_jobs(run_id)
+      WHERE kind = 'draft_generation' AND state = 'uncertain';
     CREATE INDEX IF NOT EXISTS author_jobs_by_doc ON author_jobs(document_id, kind, created_at DESC);
     CREATE INDEX IF NOT EXISTS author_jobs_by_project ON author_jobs(project_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS author_jobs_open ON author_jobs(state)

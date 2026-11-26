@@ -67,12 +67,16 @@ function mapProposalRow(row: ProposalRow): AiProposalDto {
   return { ...row, payload: parsed };
 }
 
-export function createManualProposal(ctx: WorkspaceContext, input: Input): AiProposalDto {
+export function createManualProposal(
+  ctx: WorkspaceContext,
+  input: Input,
+  generatedSource?: { readonly revisionId: string | null; readonly body: string },
+): AiProposalDto {
   const kind = parseProposalKind(input.kind);
   const projectId = optionalText(input, "projectId") ?? null;
   if (projectId) assertFanqieProject(ctx, projectId);
   const documentId = optionalText(input, "documentId") ?? null;
-  // FQ-07: a chapter-bound proposal without a chapter can only be committed by
+  // a chapter-bound proposal without a chapter can only be committed by
   // guessing, so reject it at the inbox door instead of at decision time.
   if (isDocumentBoundProposalKind(kind) && !documentId) invalid("documentId", "chapter-required");
   const sourceRef = optionalText(input, "sourceRef") ?? "";
@@ -82,10 +86,14 @@ export function createManualProposal(ctx: WorkspaceContext, input: Input): AiPro
   const doc = documentId ? ctx.document(documentId) : null;
   if (doc && projectId && doc.projectId !== projectId) invalid("projectId", "project-mismatch");
   const resolvedProjectId = projectId ?? doc?.projectId ?? null;
-  const origin: ProposalOrigin = optionalText(input, "origin") === "agent-tool" ? "agent-tool" : "author-ui";
+  const origin: ProposalOrigin = generatedSource
+    ? "ai-generate"
+    : optionalText(input, "origin") === "agent-tool" ? "agent-tool" : "author-ui";
+  const baseRevisionId = generatedSource ? generatedSource.revisionId : doc?.revisionId ?? null;
+  const sourceSha256 = generatedSource ? sha256Text(generatedSource.body) : doc ? sha256Text(doc.body ?? "") : "";
   const id = randomUUID();
   const now = Date.now();
-  // FQ-10: hand-written fact_sync proposals never pass through the AI finish
+  // hand-written fact_sync proposals never pass through the AI finish
   // hook, so normalise them here as well — the model must not choose fact ids.
   const payload: Record<string, unknown> = kind === "fact_sync"
     ? normalizeFactSyncPayload(input.payload as Record<string, unknown>)
@@ -103,8 +111,8 @@ export function createManualProposal(ctx: WorkspaceContext, input: Input): AiPro
       kind,
       sourceRef,
       JSON.stringify(payload),
-      doc?.revisionId ?? null,
-      doc ? sha256Text(doc.body ?? "") : "",
+      baseRevisionId,
+      sourceSha256,
       origin,
       now,
       now,
@@ -195,6 +203,9 @@ export function decideProposal(ctx: WorkspaceContext, input: Input) {
       return { id: proposalId, status: "rejected" as const, staleCheck: "not-checked" as const };
     }
 
+    if (row.kind === "fact_sync" && row.origin === "author-ui" && row.sourceRef.startsWith("Autopilot · ")) {
+      refuse("proposal.decide", "proposal-stale");
+    }
     const staleCheck = assertProposalFresh(ctx, row);
     if (staleCheck === "unpinned" && row.projectId) {
       ctx.event(row.projectId, "setting", "proposal.decide.unpinned", { id: proposalId, kind: row.kind });
@@ -205,10 +216,10 @@ export function decideProposal(ctx: WorkspaceContext, input: Input) {
       ? (input.editedPayload as Record<string, unknown>)
       : basePayload;
     const sanitized = sanitizeProposalPayload(rawEdited);
-    // FQ-10: editedPayload bypasses the generation hook, so normalise again.
+    // editedPayload bypasses the generation hook, so normalise again.
     // The function is idempotent for already-issued `fq-` ids.
     const edited = row.kind === "fact_sync" ? normalizeFactSyncPayload(sanitized) : sanitized;
-    // FQ-06: the stored row is the only source of project identity; callers and
+    // the stored row is the only source of project identity; callers and
     // payloads may not redirect the commit to another project.
     const projectId = row.projectId;
     const documentId = pinProposalChapter(ctx, row, input, now);
@@ -254,7 +265,7 @@ export function decideProposal(ctx: WorkspaceContext, input: Input) {
     } else if (row.kind === "setting") {
       if (!projectId) invalid("projectId", "project-required");
       assertFanqieProject(ctx, projectId);
-      // FQ-07: never fall back to the first chapter — that writes lore into a
+      // never fall back to the first chapter — that writes lore into a
       // chapter the author never reviewed.
       const chapterId = documentId;
       if (!chapterId) invalid("documentId", "chapter-required");

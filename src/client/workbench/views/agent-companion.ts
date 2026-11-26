@@ -270,7 +270,7 @@ export function createAgentCompanion(options: AgentCompanionOptions) {
             `请对《${projectTitle}》章节《${active.title}》（documentId=${active.id}）执行按技法精修。`,
             "1. 调用 `zhizhang_read_chapter` 与 `zhizhang_list_skills` 查看当前正文与本章推荐/置顶技法；",
             "2. 用 `zhizhang_load_skill` 加载目标技法细则与正反例；",
-            "3. 仅针对需要打磨的段落调用 `zhizhang_patch_paragraphs` 进行外科手术式精修，保留其余段落不动。",
+            "3. 调用 `zhizhang_patch_paragraphs` 仅改指定段落。如果作者让你接着改待审候选，从读取结果确认 candidateId 并传为 baseCandidateId；省略时会精修工作稿。",
           ].join("\n"),
         },
         {

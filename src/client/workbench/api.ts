@@ -14,6 +14,8 @@ const REASON_MESSAGES: Readonly<Record<string, string>> = {
   "generation-needs-reconciliation": "上一次任务仍在结束或等待用量核对。请刷新任务查看状态。",
   "proposal-in-progress": "同类型 AI 提案任务正在生成中，请稍候。",
   "rewrite-in-progress": "当前章节已有选段微改写在进行中，请稍候。",
+  "no-final-chapters": "当前作品还没有定稿章节。",
+  "import-upload-missing": "导入暂存已过期，请重新选择文件。",
   "proposal-stale": "提案生成后章节已被修改，请拒绝本提案并重新生成。",
   "preview-no-llm-transport": "本地预览模式未连接 DsH 模型通道，可通过“手动导入候选稿”演练差异对照与采纳流。",
   "export.conflict": "目标文件与获批稿件不同，请处理同名文件后重试。",

@@ -366,6 +366,7 @@ export function createHostJobEngine(options: HostJobEngineOptions) {
         id: string;
         projectId: string;
         tokenBudget: number;
+        tokensSpent: number;
         provider: string;
         model: string;
       };
@@ -390,7 +391,7 @@ export function createHostJobEngine(options: HostJobEngineOptions) {
     let callSeq = 0;
     const caller = createSingleShotCaller(
       llm,
-      { provider, model, reserved: Math.max(8_000, batch.tokenBudget) },
+      { provider, model, reserved: Math.max(0, batch.tokenBudget - batch.tokensSpent) },
       controller.signal,
       {
         begin: () => `ap-${++callSeq}`,
@@ -408,6 +409,7 @@ export function createHostJobEngine(options: HostJobEngineOptions) {
         signal: controller.signal,
       })
       .catch((error: unknown) => {
+        workspace.mutation("autopilot.pause", { batchId: batch.id });
         logger.error("zhizhang: autopilot pipeline failed", {
           batchId: batch.id,
           reason: error instanceof Error ? error.message : String(error),
@@ -556,6 +558,7 @@ export function createHostJobEngine(options: HostJobEngineOptions) {
     startAutopilotPipeline,
     cancelJob,
     abortRun,
+    abortAutopilot: (batchId: string) => findActiveByEntity("autopilot_pipeline", batchId)?.controller.abort(),
     hasActiveRun,
     activeCounts,
     shutdownDrain,

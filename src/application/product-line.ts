@@ -149,6 +149,7 @@ export interface ProductLineModule {
     ctx: WorkspaceContext,
     projectId: string,
     active: DocumentRow | undefined,
+    chapterOrder: readonly string[],
   ): Record<string, unknown>;
 
   /** Optional lightweight progressive-disclosure contribution for DsH ctx.systemPrompt. */

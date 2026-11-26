@@ -55,6 +55,7 @@ interface BatchRow {
   readonly provider: string;
   readonly model: string;
   readonly pauseReasonJson: string | null;
+  readonly writingOptionsJson: string | null;
   readonly preBatchRevisionsJson: string;
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -67,7 +68,7 @@ const BATCH_COLS = `
   token_budget AS tokenBudget, tokens_spent AS tokensSpent,
   refine_rounds_used AS refineRoundsUsed, provider, model,
   pause_reason_json AS pauseReasonJson, pre_batch_revisions_json AS preBatchRevisionsJson,
-  created_at AS createdAt, updated_at AS updatedAt
+  writing_options_json AS writingOptionsJson, created_at AS createdAt, updated_at AS updatedAt
 `;
 
 const STEP_COLS = `
@@ -102,17 +103,21 @@ function loadBatchSteps(ctx: WorkspaceContext, batchId: string): AutopilotStepDt
   `).all(batchId) as AutopilotStepDto[];
 }
 
-function mapBatchRow(ctx: WorkspaceContext, row: BatchRow): AutopilotBatchDto {
-  const chapterIds = safeJson<string[]>(row.chapterIdsJson, []);
-  const candidates = row.adoptionPolicy === "candidate_only" ? stmt(ctx.db, `
+function loadBatchCandidates(
+  ctx: WorkspaceContext, batchId: string, chapterIds: readonly string[],
+): AutopilotBatchDto["candidates"] {
+  return stmt(ctx.db, `
     SELECT document_id AS documentId, id AS runId, candidate_id AS candidateId, base_revision_id AS baseRevisionId, state
     FROM author_runs
     WHERE document_id IN (SELECT value FROM json_each(?)) AND candidate_id IS NOT NULL
       AND CASE WHEN json_valid(frozen_input) THEN
-        json_extract(frozen_input, '$.origin') = 'autopilot'
-        AND json_extract(frozen_input, '$.batchId') = ? END
+        json_extract(frozen_input, '$.batchId') = ? END
     ORDER BY rowid;
-  `).all(JSON.stringify(chapterIds), row.id) as AutopilotBatchDto["candidates"] : [];
+  `).all(JSON.stringify(chapterIds), batchId) as AutopilotBatchDto["candidates"];
+}
+
+function mapBatchRow(ctx: WorkspaceContext, row: BatchRow, includeDetails = true): AutopilotBatchDto {
+  const chapterIds = safeJson<string[]>(row.chapterIdsJson, []);
   return {
     id: row.id,
     projectId: row.projectId,
@@ -130,8 +135,8 @@ function mapBatchRow(ctx: WorkspaceContext, row: BatchRow): AutopilotBatchDto {
     model: row.model,
     pauseReason: safeJson<AutopilotPauseReasonDto | null>(row.pauseReasonJson, null),
     preBatchRevisions: safeJson<Record<string, string | null>>(row.preBatchRevisionsJson, {}),
-    candidates,
-    steps: loadBatchSteps(ctx, row.id),
+    candidates: includeDetails && row.adoptionPolicy === "candidate_only" ? loadBatchCandidates(ctx, row.id, chapterIds) : [],
+    steps: includeDetails ? loadBatchSteps(ctx, row.id) : [],
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -242,6 +247,9 @@ export function createAutopilotBatch(ctx: WorkspaceContext, input: Input): Autop
       preBatchRevisions[docId] = doc.revisionId;
     }
 
+    const previousVersionId = optionalText(input, "previousVersionId");
+    if (previousVersionId) resolveContinuation(ctx, ctx.document(chapterIds[0]), { previousVersionId });
+    const writingOptions = JSON.stringify({ instruction: optionalText(input, "instruction") ?? "", previousVersionId });
     const id = randomUUID();
     const now = Date.now();
     stmt(ctx.db, `
@@ -250,8 +258,8 @@ export function createAutopilotBatch(ctx: WorkspaceContext, input: Input): Autop
         chapter_ids_json, current_chapter_index, current_step,
         token_budget, tokens_spent, refine_rounds_used,
         provider, model, pause_reason_json, pre_batch_revisions_json,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, 'running', ?, 0, 'beat_plan', ?, 0, 0, ?, ?, NULL, ?, ?, ?);
+        writing_options_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 'running', ?, 0, 'beat_plan', ?, 0, 0, ?, ?, NULL, ?, ?, ?, ?);
     `).run(
       id,
       projectId,
@@ -263,6 +271,7 @@ export function createAutopilotBatch(ctx: WorkspaceContext, input: Input): Autop
       provider,
       model,
       JSON.stringify(preBatchRevisions),
+      writingOptions,
       now,
       now,
     );
@@ -286,9 +295,11 @@ export function listAutopilotBatches(ctx: WorkspaceContext, input: Input): Autop
   return ctx.read(() => {
     const rows = stmt(ctx.db, `
       SELECT ${BATCH_COLS} FROM author_autopilot_batches
-      WHERE project_id = ? ORDER BY updated_at DESC LIMIT 20;
-    `).all(projectId) as BatchRow[];
-    return rows.map((r) => mapBatchRow(ctx, r));
+      WHERE project_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT ?;
+    `).all(projectId, input.limit === undefined ? 20 : Math.min(20, count(input, "limit"))) as BatchRow[];
+    const requested = optionalText(input, "detailBatchId");
+    const detailed = rows.find(({ id }) => id === requested)?.id ?? rows[0]?.id;
+    return rows.map((row) => mapBatchRow(ctx, row, input.includeHistoryDetails !== false || row.id === detailed));
   });
 }
 
@@ -308,9 +319,31 @@ export function pauseAutopilotBatch(ctx: WorkspaceContext, input: Input): Autopi
   const batchId = text(input, "batchId");
   const existing = getAutopilotBatch(ctx, { batchId });
   if (existing.status === "running") {
-    updateBatchState(ctx, batchId, { status: "paused_gate" });
+    setAutopilotPause(ctx, existing, "manual_pause", "已暂停。继续时从当前章重新开始。");
   }
   return getAutopilotBatch(ctx, { batchId });
+}
+
+function setAutopilotPause(
+  ctx: WorkspaceContext,
+  batch: AutopilotBatchDto,
+  kind: "manual_pause" | "interrupted",
+  message: string,
+): void {
+  const documentId = batch.chapterIds[batch.currentChapterIndex] ?? batch.chapterIds.at(-1);
+  if (!documentId) return;
+  const doc = ctx.document(documentId);
+  updateBatchState(ctx, batch.id, {
+    status: "paused_gate",
+    pauseReason: { kind, documentId, chapterTitle: doc.title, message, details: [], problemParagraphs: [] },
+  });
+}
+
+export function recoverAutopilotBatches(ctx: WorkspaceContext): void {
+  const rows = stmt(ctx.db, `SELECT ${BATCH_COLS} FROM author_autopilot_batches WHERE status = 'running' OR (status = 'paused_gate' AND pause_reason_json IS NULL);`).all() as BatchRow[];
+  for (const row of rows) {
+    setAutopilotPause(ctx, mapBatchRow(ctx, row, false), "interrupted", "上次执行已中断，可以从当前章继续。");
+  }
 }
 
 export function cancelAutopilotBatch(ctx: WorkspaceContext, input: Input): AutopilotBatchDto {
@@ -349,26 +382,33 @@ export function rollbackAutopilotChapter(
     const revRow = stmt(ctx.db, "SELECT body FROM revisions WHERE revision_id = ?;").get(preRevId) as
       | { body?: string }
       | undefined;
-    preBody = revRow?.body ?? "";
+    if (!revRow || typeof revRow.body !== "string") refuse("autopilot.rollback_chapter", "no-snapshot-to-rollback");
+    preBody = revRow.body;
   }
-  const doc = ctx.document(documentId);
-  if (doc.state === "final") {
-    invalid("documentId", "cannot-rollback-final-chapter");
-  }
-  const saved = saveDraft(doc, preBody);
-  ctx.atomic(() => {
+  return ctx.atomic(() => {
+    const doc = ctx.document(documentId);
+    if (ctx.isLockedDocument(doc)) refuse("autopilot.rollback_chapter", "revision-locked");
+    const lastWrite = stmt(ctx.db, `
+      SELECT output_revision_id AS revisionId FROM author_autopilot_steps
+      WHERE batch_id = ? AND document_id = ? AND status = 'completed'
+        AND step_kind IN ('draft_write', 'surgical_refine') AND output_revision_id IS NOT NULL
+      ORDER BY rowid DESC LIMIT 1;
+    `).get(batchId, documentId) as { revisionId: string } | undefined;
+    if (!lastWrite) refuse("autopilot.rollback_chapter", "no-snapshot-to-rollback");
+    if (doc.revisionId !== lastWrite.revisionId) {
+      throw new ContractError("version.conflict", {
+        documentId, baseRevisionId: lastWrite.revisionId, currentRevisionId: doc.revisionId,
+      });
+    }
+    const saved = saveDraft(doc, preBody);
     ctx.event(batch.projectId, "chapter", "autopilot.chapter.rolled_back", {
       batchId,
       documentId,
       restoredRevisionId: saved.revisionId,
       preBatchRevisionId: preRevId,
     });
+    return { documentId, restoredRevisionId: saved.revisionId, preBatchRevisionId: preRevId };
   });
-  return {
-    documentId,
-    restoredRevisionId: saved.revisionId,
-    preBatchRevisionId: preRevId,
-  };
 }
 
 function diagnoseChapterDraft(
@@ -460,6 +500,9 @@ export async function runAutopilotBatch(
   if (initial.status === "completed" || initial.status === "cancelled") {
     return initial;
   }
+  const optionsRow = stmt(ctx.db, "SELECT writing_options_json AS value FROM author_autopilot_batches WHERE id = ?;")
+    .get(initial.id) as { value: string | null };
+  const options = safeJson<{ instruction?: string; previousVersionId?: string }>(optionsRow.value, {});
   const candidateOnly = initial.adoptionPolicy === "candidate_only";
   if (candidateOnly && initial.status === "paused_redline" && !deps.overrideRedLine &&
       initial.candidates.some((candidate) => candidate.documentId === initial.chapterIds[initial.currentChapterIndex])) {
@@ -470,7 +513,8 @@ export async function runAutopilotBatch(
   let tokensSpent = initial.tokensSpent;
   let refineRoundsUsed = initial.refineRoundsUsed;
   let consecutiveErrors = 0;
-  let overrideCurrentChapter = deps.overrideRedLine === true;
+  let overrideCurrentChapter = deps.overrideRedLine === true && initial.status !== "paused_gate" &&
+    initial.pauseReason?.kind !== "candidate_conflict";
   let lastCallerTokens = deps.caller.usedTokens();
 
   function trackTokensDelta(): number {
@@ -479,6 +523,19 @@ export async function runAutopilotBatch(
     lastCallerTokens = nowTokens;
     tokensSpent += delta;
     return delta;
+  }
+
+  function stopped(): AutopilotBatchDto | null {
+    const state = stmt(ctx.db, "SELECT status FROM author_autopilot_batches WHERE id = ?;")
+      .get(deps.batchId) as { status: AutopilotBatchStatus };
+    if (!deps.signal.aborted && state.status === "running") return null;
+    trackTokensDelta();
+    const cancelled = state.status === "cancelled" || (deps.signal.aborted && state.status === "running");
+    updateBatchState(ctx, deps.batchId, {
+      tokensSpent, refineRoundsUsed,
+      ...(cancelled ? { status: "cancelled" as const, currentStep: null } : {}),
+    });
+    return getAutopilotBatch(ctx, { batchId: deps.batchId });
   }
 
   function pauseForRedLine(
@@ -530,11 +587,9 @@ export async function runAutopilotBatch(
   }
 
   for (let idx = initial.currentChapterIndex; idx < initial.chapterIds.length; idx += 1) {
-    const liveBatch = getAutopilotBatch(ctx, { batchId: deps.batchId });
-    if (deps.signal.aborted || liveBatch.status === "cancelled") {
-      updateBatchState(ctx, deps.batchId, { status: "cancelled", currentStep: null, tokensSpent, refineRoundsUsed });
-      return getAutopilotBatch(ctx, { batchId: deps.batchId });
-    }
+    const stop = stopped();
+    if (stop) return stop;
+    const candidates = candidateOnly ? loadBatchCandidates(ctx, deps.batchId, initial.chapterIds) : [];
 
     const docId = initial.chapterIds[idx];
     let doc = ctx.document(docId);
@@ -560,7 +615,7 @@ export async function runAutopilotBatch(
     }
 
     if (candidateOnly) {
-      if (liveBatch.candidates.some((candidate) => candidate.documentId === doc.id)) {
+      if (candidates.some((candidate) => candidate.documentId === doc.id)) {
         const gate = advanceChapter(doc, idx, null);
         if (gate) return gate;
         continue;
@@ -572,6 +627,15 @@ export async function runAutopilotBatch(
         return pauseForRedLine("candidate_conflict", doc, "本章已有待处理的写作任务。处理后可重试。", [], [], "paused_redline", idx);
       }
     }
+
+    const writeWorkingDraft = (body: string) => ctx.atomic(() => {
+      const current = ctx.document(doc.id);
+      if (ctx.isLockedDocument(current) || current.revisionId !== doc.revisionId || current.state !== doc.state) {
+        throw new ContractError("version.conflict", { documentId: doc.id, baseRevisionId: doc.revisionId, currentRevisionId: current.revisionId });
+      }
+      ctx.assertRunAvailable("autopilot.write", current.id);
+      return deps.saveDraft(current, body);
+    });
 
     // Budget cap red-line (>= 85%)
     if (tokensSpent >= initial.tokenBudget * 0.85 && !overrideCurrentChapter) {
@@ -585,14 +649,20 @@ export async function runAutopilotBatch(
 
     // Build shared L0+L1+L2 prefix and full context once for this chapter
     const previous = candidateOnly ? previousChapter(ctx, doc) : null;
-    const upstream = liveBatch.candidates.find((candidate) =>
+    const upstream = candidates.find((candidate) =>
       candidate.documentId === previous?.id && candidate.state === "awaiting-author" &&
       candidate.baseRevisionId === previous.revisionId);
     const contextInput = {
-      instruction: deps.instruction ?? "",
-      previousVersionId: upstream?.candidateId,
+      instruction: options.instruction ?? deps.instruction ?? "",
+      previousVersionId: (idx === 0 ? options.previousVersionId : undefined) ?? upstream?.candidateId,
     };
-    const selectedUpstream = upstream ? resolveContinuation(ctx, doc, contextInput) : null;
+    let selectedUpstream: ReturnType<typeof resolveContinuation> = null;
+    try {
+      if (contextInput.previousVersionId) selectedUpstream = resolveContinuation(ctx, doc, contextInput);
+    } catch (error) {
+      if (!(error instanceof ContractError)) throw error;
+      return pauseForRedLine("candidate_conflict", doc, "选定的上一章版本已不可用。请重新选择后启动批次。", [], [], "paused_redline", idx);
+    }
     const frozen = buildFanqieFrozenContext(ctx, doc, contextInput, { readOnly: false });
     const shared = buildFanqieSharedLayeredPrefix(ctx, doc.projectId, doc, { readOnly: false });
     const activeTechniqueIds = frozen.contextBundle.report.activeTechniqueIds;
@@ -611,6 +681,8 @@ export async function runAutopilotBatch(
         prompt: beatLayered.dynamicTail,
         layered: beatLayered,
       });
+      const halted = stopped();
+      if (halted) return halted;
       const beatDelta = trackTokensDelta();
       const beatJson = parseJsonPayload(beatRaw) as Record<string, unknown>;
       assertStageOutput(WRITING_STAGE_IDS.beatPlan, beatJson, "beatPlan");
@@ -643,6 +715,8 @@ export async function runAutopilotBatch(
         error: null,
       });
     } catch (err) {
+      const halted = stopped();
+      if (halted) return halted;
       consecutiveErrors += 1;
       const msg = err instanceof Error ? err.message : String(err);
       recordStep(ctx, {
@@ -667,11 +741,6 @@ export async function runAutopilotBatch(
       // Graceful degradation: continue to draft_write without beat sheet
     }
 
-    if (deps.signal.aborted) {
-      updateBatchState(ctx, deps.batchId, { status: "cancelled", currentStep: null, tokensSpent });
-      return getAutopilotBatch(ctx, { batchId: deps.batchId });
-    }
-
     // --- Step 2: Draft Write ---
     updateBatchState(ctx, deps.batchId, { currentStep: "draft_write", tokensSpent });
     let draftBody = doc.body ?? "";
@@ -688,13 +757,15 @@ export async function runAutopilotBatch(
         prompt: writeLayered.dynamicTail,
         layered: writeLayered,
       });
+      const halted = stopped();
+      if (halted) return halted;
       const writeDelta = trackTokensDelta();
       assertStageOutput(WRITING_STAGE_IDS.write, generated, "write");
       consecutiveErrors = 0;
       draftBody = generated.trim();
 
       if (!candidateOnly) {
-        const saved = deps.saveDraft(doc, draftBody);
+        const saved = writeWorkingDraft(draftBody);
         workingRevId = saved.revisionId;
         doc = ctx.document(doc.id);
       }
@@ -716,6 +787,12 @@ export async function runAutopilotBatch(
         error: null,
       });
     } catch (err) {
+      const halted = stopped();
+      if (halted) return halted;
+      if (err instanceof ContractError && (err.code === "version.conflict" || err.code === "gate.denied")) {
+        trackTokensDelta();
+        return pauseForRedLine("candidate_conflict", doc, "本章版本或状态已变化。请查看章节后再继续。", []);
+      }
       consecutiveErrors += 1;
       const msg = err instanceof Error ? err.message : String(err);
       recordStep(ctx, {
@@ -773,6 +850,8 @@ export async function runAutopilotBatch(
         prompt: reviewLayered.dynamicTail,
         layered: reviewLayered,
       });
+      const halted = stopped();
+      if (halted) return halted;
       const reviewDelta = trackTokensDelta();
       const reviewJson = parseJsonPayload(reviewRaw) as { observations?: unknown[] };
       assertStageOutput(WRITING_STAGE_IDS.chapterReview, reviewJson, "chapterReview");
@@ -809,6 +888,8 @@ export async function runAutopilotBatch(
         error: null,
       });
     } catch (err) {
+      const halted = stopped();
+      if (halted) return halted;
       consecutiveErrors += 1;
       const msg = err instanceof Error ? err.message : String(err);
       recordStep(ctx, {
@@ -876,6 +957,8 @@ export async function runAutopilotBatch(
           prompt: patchLayered.dynamicTail,
           layered: patchLayered,
         });
+        const halted = stopped();
+        if (halted) return halted;
         const patchDelta = trackTokensDelta();
         const patchJson = parseJsonPayload(patchRaw) as { patches?: ParagraphPatchInput[] };
         assertStageOutput(WRITING_STAGE_IDS.surgicalPatch, patchJson, "surgicalPatch");
@@ -886,7 +969,7 @@ export async function runAutopilotBatch(
         if (applied.appliedCount > 0) {
           draftBody = applied.body;
           if (!candidateOnly) {
-            const saved = deps.saveDraft(doc, draftBody);
+            const saved = writeWorkingDraft(draftBody);
             workingRevId = saved.revisionId;
             doc = ctx.document(doc.id);
           }
@@ -915,6 +998,12 @@ export async function runAutopilotBatch(
           error: null,
         });
       } catch (err) {
+        const halted = stopped();
+        if (halted) return halted;
+        if (err instanceof ContractError && (err.code === "version.conflict" || err.code === "gate.denied")) {
+          trackTokensDelta();
+          return pauseForRedLine("candidate_conflict", doc, "本章版本或状态已变化。请查看章节后再继续。", []);
+        }
         consecutiveErrors += 1;
         const msg = err instanceof Error ? err.message : String(err);
         lastRefineError = msg;
@@ -939,10 +1028,8 @@ export async function runAutopilotBatch(
       }
     }
 
-    if (deps.signal.aborted || getAutopilotBatch(ctx, { batchId: deps.batchId }).status === "cancelled") {
-      updateBatchState(ctx, deps.batchId, { status: "cancelled", currentStep: null, tokensSpent, refineRoundsUsed });
-      return getAutopilotBatch(ctx, { batchId: deps.batchId });
-    }
+    const stopAfterReview = stopped();
+    if (stopAfterReview) return stopAfterReview;
 
     function checkQuality(): AutopilotBatchDto | null {
       if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
@@ -1035,18 +1122,19 @@ export async function runAutopilotBatch(
         prompt: syncLayered.dynamicTail,
         layered: syncLayered,
       });
+      const halted = stopped();
+      if (halted) return halted;
       const syncDelta = trackTokensDelta();
       const syncJson = parseJsonPayload(syncRaw) as Record<string, unknown>;
       assertStageOutput(WRITING_STAGE_IDS.factSync, syncJson, "factSync");
 
       createManualProposal(ctx, {
         kind: "fact_sync",
-        origin: "ai-generate",
         projectId: doc.projectId,
         documentId: doc.id,
         sourceRef: `Autopilot · ${doc.title}`,
         payload: syncJson,
-      });
+      }, { revisionId: workingRevId, body: draftBody });
 
       recordStep(ctx, {
         batchId: deps.batchId,
@@ -1065,6 +1153,8 @@ export async function runAutopilotBatch(
         error: null,
       });
     } catch (err) {
+      const halted = stopped();
+      if (halted) return halted;
       const msg = err instanceof Error ? err.message : String(err);
       recordStep(ctx, {
         batchId: deps.batchId,

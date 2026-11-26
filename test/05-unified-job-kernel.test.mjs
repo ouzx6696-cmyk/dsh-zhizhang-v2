@@ -1,3 +1,4 @@
+import packageInfo from "../package.json" with { type: "json" };
 import test from "node:test";
 import assert from "node:assert/strict";
 import { applyWorkbench } from "../src/host/plugin.ts";
@@ -179,9 +180,13 @@ test("HostJobEngine executes all 3 job kinds over /jobs/* and drains cleanly on 
     const kinds = new Set(allJobs.body.result.map((j) => j.kind));
     assert.deepEqual(kinds, new Set(["draft_generation", "proposal_extraction", "selection_rewrite"]));
 
+    const invalidJob = await host.startJob("bogus_kind", {});
+    assert.equal(invalidJob.status, 400);
+    assert.equal(invalidJob.body.code, "input.invalid");
+
     const diag = await host.getDiag();
     assert.equal(diag.body.result.usageConsistencyIssues, 0);
-    assert.equal(diag.body.result.version, "3.2.0");
+    assert.equal(diag.body.result.version, packageInfo.version);
 
     // Job 4: start another generation and unload plugin cleanly
     await host.command("run.discard", { runId });
@@ -195,20 +200,6 @@ test("HostJobEngine executes all 3 job kinds over /jobs/* and drains cleanly on 
     await host.waitFor(() => llm.calls.length === 4);
     await host.close();
     assert.ok(host.disposedPaths.length > 0);
-  });
-});
-
-test("unknown job kind on /jobs/start returns 400 input.invalid", async () => {
-  await withTempDir("zhizhang-badkind-", async (dataDirectory) => {
-    const host = createMockDsHHost();
-    applyWorkbench(host.ctx, { dataDirectory }, { readAsset: host.readAsset });
-    try {
-      const res = await host.startJob("bogus_kind", {});
-      assert.equal(res.status, 400);
-      assert.equal(res.body.code, "input.invalid");
-    } finally {
-      await host.close();
-    }
   });
 });
 

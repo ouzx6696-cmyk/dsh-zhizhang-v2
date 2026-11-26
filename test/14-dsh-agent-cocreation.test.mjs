@@ -175,9 +175,10 @@ test("cautious mode stages Agent drafts, surgical patches, and chapter outlines 
       assert.equal(st.active.body, originalBody);
       assert.equal(st.runs[0].candidateId, firstSub.candidateId);
 
-      // 2. Agent iterates with surgical paragraph patch in cautious mode -> auto-replaces stale Agent candidate
+      // Refine the pending candidate and retain its earlier edits.
       const patchSub = await toolReg.invoke("zhizhang_patch_paragraphs", {
         documentId: chId,
+        baseCandidateId: firstSub.candidateId,
         patches: [{ paragraphIndex: 2, replacement: "第二段：铁甲未至，先有一枚青铜令箭钉在门框上。" }],
         summary: "精修第二段悬念",
       });
@@ -188,9 +189,15 @@ test("cautious mode stages Agent drafts, surgical patches, and chapter outlines 
       assert.equal(st.active.body, originalBody);
       const awaitingRun = st.runs.find((r) => r.state === "awaiting-author");
       assert.ok(awaitingRun);
+      assert.equal(awaitingRun.baseCandidateId, firstSub.candidateId);
+      await assert.rejects(() => toolReg.invoke("zhizhang_patch_paragraphs", {
+        documentId: chId,
+        baseCandidateId: firstSub.candidateId,
+        patches: [{ paragraphIndex: 1, replacement: "已替换的候选" }],
+      }), { code: "gate.denied" });
       assert.equal(
         awaitingRun.candidateBody,
-        "第一段：风雪压城，沈砚握紧木剑。\n\n第二段：铁甲未至，先有一枚青铜令箭钉在门框上。",
+        "第一段：风雪压城，沈砚按剑不动。\n\n第二段：铁甲未至，先有一枚青铜令箭钉在门框上。",
       );
 
       // Author adopts the candidate
@@ -204,7 +211,7 @@ test("cautious mode stages Agent drafts, surgical patches, and chapter outlines 
       st = (await host.getState({ projectId, documentId: chId })).body.result;
       assert.equal(
         st.active.body,
-        "第一段：风雪压城，沈砚握紧木剑。\n\n第二段：铁甲未至，先有一枚青铜令箭钉在门框上。",
+        "第一段：风雪压城，沈砚按剑不动。\n\n第二段：铁甲未至，先有一枚青铜令箭钉在门框上。",
       );
 
       // 3. Agent plans chapter outline in cautious mode -> creates pending "outline" proposal

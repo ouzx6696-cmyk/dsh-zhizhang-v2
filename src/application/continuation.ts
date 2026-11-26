@@ -9,8 +9,16 @@ export function previousChapter(ctx: WorkspaceContext, row: DocumentRow, order =
   return previous.projectId === row.projectId ? previous : null;
 }
 
-export function chapterVersionOptions(ctx: WorkspaceContext, row: DocumentRow): readonly ChapterVersionDto[] {
-  const previous = previousChapter(ctx, row);
+export function chapterVersionOptions(
+  ctx: WorkspaceContext, row: DocumentRow, order: readonly string[] = ctx.chapterOrder(row.projectId),
+): readonly ChapterVersionDto[] {
+  const index = order.indexOf(row.id);
+  if (index <= 0) return [];
+  const previous = stmt(ctx.db, `
+    SELECT a.id, a.title, d.current_revision_id AS revisionId
+    FROM author_documents a JOIN documents d ON d.document_id = a.id
+    WHERE a.id = ? AND a.project_id = ?;
+  `).get(order[index - 1], row.projectId) as { id: string; title: string; revisionId: string | null } | undefined;
   if (!previous) return [];
   const versions = stmt(ctx.db, `
     SELECT revision_id AS id, created_at AS createdAt

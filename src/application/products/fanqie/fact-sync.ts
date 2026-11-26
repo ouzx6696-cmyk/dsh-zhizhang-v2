@@ -7,7 +7,7 @@ import {
   normalizeLoreCategory,
   type SettingFact,
 } from "../../../domain/fanqie/index.ts";
-import { anchor, pointAtOffset } from "../../../domain/shared/index.ts";
+import { anchor, pointAtOffset, precedes } from "../../../domain/shared/index.ts";
 import { stmt, syncChapterFts } from "../../../storage/index.ts";
 import {
   invalid,
@@ -125,7 +125,7 @@ export function commitFactBatch(
     const rawId = optionalText(item, "factId");
     if (!rawId && params.factIdPolicy !== "generate") invalid("factId");
     // A model-supplied id is kept only when it is unique; a collision with an
-    // existing fact is exactly the silent-merge bug FQ-10 fixes. Legacy pending
+    // existing fact is exactly the silent merge this path prevents. Legacy pending
     // proposals keep their original ids so they still decide correctly.
     const factId = rawId
       ? params.factIdPolicy === "generate" && params.factById.has(rawId)
@@ -155,7 +155,7 @@ export function commitFactBatch(
       effectiveFrom: anchor(params.chapterId, point),
       knownFrom: buildKnownFromMap(item, params.chapterId, point, category, entityName),
     };
-    // FQ-01: a later sync must never postpone an earlier "already knew it" point,
+    // a later sync must never postpone an earlier "already knew it" point,
     // and it inherits the original effectiveFrom instead of moving the fact.
     const merged = mergeFactVersion(params.factById.get(factId), fact, order);
     approvedSettings.push(commitApprovedFact(ctx, params.projectId, factId, category, entityName, merged));
@@ -253,9 +253,9 @@ export function commitFactSyncProposal(
 ) {
   if (!projectId) invalid("projectId", "project-required");
   assertFanqieProject(ctx, projectId);
-  // FQ-07 / B2-5: the stored proposal row pins the chapter. Accepting a
+  // the stored proposal row pins the chapter. Accepting a
   // caller-supplied documentId would redirect lore, evidence, foreshadows and
-  // the memory-sync flag to another chapter while the FQ-03 drift gate still
+  // the memory-sync flag to another chapter while the revision check still
   // checks the original one.
   if (!proposalDocId) invalid("documentId", "chapter-required");
   const doc = ctx.document(proposalDocId);
@@ -336,7 +336,7 @@ export function commitFactSyncProposal(
     const point = typeof upd.point === "number" && Number.isSafeInteger(upd.point) && upd.point >= 1
       ? upd.point
       : 1;
-    // FQ-01: keep the earlier per-character anchor when a later chapter mentions it again.
+    // keep the earlier per-character anchor when a later chapter mentions it again.
     const merged = mergeFactVersion(
       existing,
       { ...existing, knownFrom: { [character]: anchor(doc.id, point) } },
@@ -346,6 +346,30 @@ export function commitFactSyncProposal(
       commitApprovedFact(ctx, projectId, factId, meta?.category ?? "world_rule", meta?.entityName ?? "", merged),
     );
     factById.set(factId, merged);
+  });
+
+  const retiredFacts = Array.isArray(edited.retiredFacts) ? (edited.retiredFacts as Input[]) : [];
+  const selectedRetirements = Array.isArray(input.selectedRetiredFactIndices)
+    ? new Set(input.selectedRetiredFactIndices.map(Number))
+    : null;
+  retiredFacts.forEach((item, index) => {
+    if (selectedRetirements && !selectedRetirements.has(index)) return;
+    if (!item || typeof item !== "object" || Array.isArray(item)) invalid("retiredFacts", "object-required");
+    const factId = text(item, "factId").trim();
+    const existing = factById.get(factId);
+    if (!existing) invalid("retiredFacts", "unknown-fact");
+    if (existing.locked) refuse("proposal.decide", "setting-is-locked");
+    const point = item.point === undefined ? 1 : item.point;
+    if (typeof point !== "number" || !Number.isSafeInteger(point) || point < 1) invalid("retiredFacts", "invalid-expiry-point");
+    const end = anchor(doc.id, point);
+    if (!precedes(existing.effectiveFrom, end, knownOrder)) invalid("retiredFacts", "invalid-expiry-point");
+    if (existing.effectiveTo && !precedes(end, existing.effectiveTo, knownOrder)) return;
+    const meta = stmt(ctx.db, `
+      SELECT category, entity_name AS entityName FROM author_lore_current WHERE project_id = ? AND fact_id = ?;
+    `).get(projectId, factId) as { category: string; entityName: string };
+    const next = { ...existing, effectiveTo: end };
+    approvedSettings.push(commitApprovedFact(ctx, projectId, factId, meta.category, meta.entityName, next));
+    factById.set(factId, next);
   });
 
   const foreshadows = commitForeshadowBatch(
@@ -375,13 +399,5 @@ export function commitFactSyncProposal(
   const syncStatus = syncChapterMemoryAndEntities(ctx, projectId, doc.id, doc.body ?? "");
   ctx.event(projectId, "setting", "chapter.memory.synced", { documentId: doc.id, syncStatus });
 
-  // FQ-20 owns the expiry semantics; until it lands, never let a retired fact
-  // disappear silently from an approved proposal.
-  const retiredFacts = Array.isArray(edited.retiredFacts) ? (edited.retiredFacts as Input[]) : [];
-  const unapplied: string[] = retiredFacts.length > 0 ? ["retiredFacts"] : [];
-  if (unapplied.length > 0) {
-    ctx.event(projectId, "setting", "proposal.unapplied", { documentId: doc.id, fields: unapplied });
-  }
-
-  return { approvedSettings, foreshadows, evidenceIds, summaryUpdated, unapplied, syncStatus: "clean" as const };
+  return { approvedSettings, foreshadows, evidenceIds, summaryUpdated, unapplied: [], syncStatus };
 }

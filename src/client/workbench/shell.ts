@@ -693,6 +693,7 @@ export function bootWorkbench(modules: readonly ProductLineUiModule[]): void {
       const candidateQa = pending.candidateQa ? (JSON.parse(pending.candidateQa) as CandidateQaReport) : undefined;
       diffView.update({
         candidateId: pending.candidateId,
+        baseCandidateId: pending.baseCandidateId,
         originalBody: active.body ?? "",
         candidateBody: pending.candidateBody ?? "",
         candidateQa,

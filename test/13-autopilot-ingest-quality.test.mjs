@@ -861,3 +861,118 @@ test("User-tunable ContextTuningConfig: bounds clamping, slot toggles, reading w
   });
 });
 
+
+function scriptedAutopilot(app, projectId, batchId, respond, options = {}) {
+  const replies = {
+    beatPlan: JSON.stringify({
+      openingHook: "契约出现",
+      beats: [{ index: 1, scene: "铺子", conflict: "房契易主", turn: "来客出示证据", targetChars: 500 }],
+      endingHook: "来客是谁",
+    }),
+    write: "门前放着一封信。\n\n信封上印着掌柜的名字。",
+    chapterReview: '{"observations":[]}',
+    surgicalPatch: '{"patches":[]}',
+    factSync: '{"newFacts":[],"updates":[],"retiredFacts":[],"knownFromUpdates":[],"foreshadowUpdates":[],"summaryDraft":"岸边拾到一封信。"}',
+  };
+  return app.runAutopilotJob({
+    projectId, batchId, signal: new AbortController().signal,
+    caller: {
+      usedTokens: () => 0,
+      async complete(input) { return respond(input) ?? replies[input.phase]; },
+    },
+    ...options,
+  });
+}
+
+test("Autopilot respects manual pause and protects author edits and finalization while a model call is pending", async (t) => {
+  const ws = createTestWorkspace(t);
+  const { app } = ws;
+  for (const scenario of ["pause", "edit", "final", "refine"]) {
+    const { projectId, documentId, revisionId } = ws.createFanqieChapter();
+    const original = app.snapshot(projectId, documentId).active.body;
+    const batch = app.mutation("autopilot.start", { projectId, documentId });
+    const phases = [];
+    const result = await scriptedAutopilot(app, projectId, batch.id, ({ phase }) => {
+      phases.push(phase);
+      if (scenario === "refine" && phase === "chapterReview") {
+        return '{"observations":[{"dimension":"continuity","severity":"error","quote":"信","suggestion":"重查信的来历"}]}';
+      }
+      if (scenario === "refine" && phase === "surgicalPatch") {
+        const live = app.snapshot(projectId, documentId).active;
+        app.mutation("draft.save", { documentId, baseRevisionId: live.revisionId, body: "作者的第二稿。" });
+        return '{"patches":[{"paragraphIndex":2,"replacement":"一封假信。","reason":"纠正来历"}]}';
+      }
+      if (phase !== "write") return;
+      if (scenario === "pause") app.mutation("autopilot.pause", { batchId: batch.id });
+      if (scenario === "edit") app.mutation("draft.save", { documentId, baseRevisionId: revisionId, body: "作者的第二稿。" });
+      if (scenario === "final") {
+        app.mutation("chapter.review", { documentId, baseRevisionId: revisionId, accept: true });
+        app.mutation("draft.finalize", { documentId, baseRevisionId: revisionId, key: "concurrent-final" });
+      }
+    });
+    assert.equal(result.pauseReason?.kind, scenario === "pause" ? "manual_pause" : "candidate_conflict");
+    const live = app.snapshot(projectId, documentId).active;
+    assert.equal(live.body, scenario === "edit" || scenario === "refine" ? "作者的第二稿。" : original);
+    if (scenario === "final") {
+      assert.equal(live.state, "final");
+      assert.equal(live.finalRevisionId, revisionId);
+    }
+    assert.ok(!phases.includes("factSync"));
+  }
+});
+
+test("Autopilot resumes with its original instruction and tests the next chapter red line", async (t) => {
+  const ws = createTestWorkspace(t);
+  const { app } = ws;
+  const upstream = ws.createFanqieChapter();
+  const { projectId } = upstream;
+  const source = app.mutation("agent.submit_draft", {
+    documentId: upstream.documentId, body: "上章候选以折断的琴弦收尾。",
+  });
+  const documentId = app.mutation("document.create", { projectId, title: "接续章" }).id;
+  const second = app.mutation("document.create", { projectId, title: "下一章" }).id;
+  const batch = app.mutation("autopilot.start", {
+    projectId, chapterIds: [documentId, second], scope: "multi_chapter",
+    autonomyMode: "chapter_gate", adoptionPolicy: "candidate_only", instruction: "保留青伞约定",
+    previousVersionId: source.candidateId,
+  });
+  const reopened = ws.reopen();
+  reopened.recoverStartup();
+  assert.equal(reopened.mutation("autopilot.get", { batchId: batch.id }).pauseReason?.kind, "interrupted");
+  const prompts = [];
+  const response = ({ phase, prompt }) => {
+    if (phase === "write") prompts.push(prompt);
+    if (phase === "chapterReview" && prompts.length === 2) {
+      return '{"observations":[{"dimension":"continuity","severity":"error","quote":"信","suggestion":"前章已经毁掉这封信"}]}';
+    }
+  };
+  assert.equal((await scriptedAutopilot(reopened, projectId, batch.id, response)).status, "paused_gate");
+  const resumed = await scriptedAutopilot(reopened, projectId, batch.id, response, { overrideRedLine: true });
+  assert.equal(resumed.pauseReason?.kind, "high_severity_review");
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[0], /折断的琴弦/);
+  for (const prompt of prompts) assert.match(prompt, /青伞约定/);
+});
+
+test("Autopilot fact proposals bind the generated revision and reject stale approval", async (t) => {
+  const ws = createTestWorkspace(t);
+  const { app, db } = ws;
+  const { projectId, documentId } = ws.createFanqieChapter();
+  const batch = app.mutation("autopilot.start", { projectId, documentId });
+  let modelRevision;
+  const done = await scriptedAutopilot(app, projectId, batch.id, ({ phase }) => {
+    if (phase === "factSync") {
+      modelRevision = app.snapshot(projectId, documentId).active.revisionId;
+      app.mutation("draft.save", { documentId, baseRevisionId: modelRevision, body: "岸边只有一只空盒子。" });
+    }
+  }, { overrideRedLine: true });
+  assert.equal(done.status, "completed");
+  const proposal = db.prepare("SELECT id, origin, base_revision_id AS base FROM author_ai_proposals WHERE kind = 'fact_sync'").get();
+  assert.equal(proposal.origin, "ai-generate");
+  assert.equal(proposal.base, modelRevision);
+  assert.throws(() => app.mutation("proposal.decide", { proposalId: proposal.id, accept: true }),
+    (error) => error.code === "gate.denied" && error.details.reason === "proposal-stale");
+  assert.equal(app.mutation("proposal.decide", { proposalId: proposal.id, accept: false }).status, "rejected");
+  assert.throws(() => app.mutation("autopilot.rollback_chapter", { batchId: batch.id, documentId }),
+    (error) => error.code === "version.conflict");
+});
